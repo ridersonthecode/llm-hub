@@ -5,6 +5,7 @@ from __future__ import annotations
 from typing import Optional
 
 from mcp.server.fastmcp import FastMCP
+from mcp.server.transport_security import TransportSecuritySettings
 
 from . import downloader, process_manager
 from .catalog import list_cached_models
@@ -16,6 +17,14 @@ mcp = FastMCP(
     # unter "/mcp" ergäbe das intern "/mcp/mcp" -> 404. Mit "/" hier + Mount auf
     # "/mcp" in main.py landet die Route korrekt auf "/mcp/".
     streamable_http_path="/",
+    # FastMCP aktiviert DNS-Rebinding-Schutz automatisch, sobald `host`
+    # (Default "127.0.0.1", von uns nie überschrieben - wir mounten die App ja
+    # nur, statt FastMCPs eigenen Uvicorn zu nutzen) in ("127.0.0.1", "localhost",
+    # "::1") liegt: dann werden nur noch Host-Header wie "127.0.0.1:*" akzeptiert.
+    # Zugriffe übers LAN (z.B. "10.7.21.3:11434") bekommen dadurch 421 "Invalid
+    # Host header". Da dieser Dienst bewusst netzwerkweit ohne Einschränkung
+    # erreichbar sein soll (siehe Sicherheit in Anleitung.md), hier explizit aus.
+    transport_security=TransportSecuritySettings(enable_dns_rebinding_protection=False),
     instructions=(
         "Verwaltet einen vLLM-Inferenzserver auf diesem Host: Modelle auflisten, "
         "per HuggingFace herunterladen (mit Fortschritts-Telemetrie), laden/entladen "
@@ -37,15 +46,21 @@ async def list_models() -> dict:
             for name, m in cfg.models.items()
         ],
         "cached_locally": cached,
-        "currently_loaded": process_manager.engine.model,
+        "currently_loaded": process_manager.loaded_models(),
         "default_model": cfg.default_model,
     }
 
 
 @mcp.tool()
 async def server_status() -> dict:
-    """Gibt den Status der aktiven vLLM-Engine zurück (geladenes Modell, Laufzeit, Log-Datei)."""
-    return process_manager.engine.status()
+    """Gibt den Status aller aktiven vLLM-Engines zurück (Hot Pool: bei
+    max_concurrent_models > 1 können mehrere Modelle gleichzeitig geladen
+    sein). Je Eintrag: geladenes Modell, Port, Status, Laufzeit, Log-Datei."""
+    cfg = get_config()
+    return {
+        "engines": [e.status() for e in process_manager.engines.values()],
+        "max_concurrent_models": cfg.max_concurrent_models,
+    }
 
 
 @mcp.tool()
@@ -74,7 +89,9 @@ async def load_model(model: str) -> dict:
 
 
 @mcp.tool()
-async def unload_model() -> dict:
-    """Entlädt das aktuell geladene Modell und gibt den GPU-/Unified-Memory-Speicher frei."""
-    await process_manager.stop_engine()
-    return {"status": "unloaded"}
+async def unload_model(model: Optional[str] = None) -> dict:
+    """Entlädt ein Modell und gibt seinen Unified-Memory-Speicher frei.
+    Ohne `model` werden ALLE aktuell geladenen Modelle entladen (z.B. bei
+    einem Hot Pool mit mehreren gleichzeitig laufenden Modellen)."""
+    await process_manager.stop_engine(model)
+    return {"status": "unloaded", "model": model or "all"}

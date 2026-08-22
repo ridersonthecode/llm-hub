@@ -104,10 +104,12 @@ def finish_request(
     _publish({"type": "request_end"})
 
 
-async def fetch_engine_metrics() -> dict:
-    """Ruft vLLMs eigenen /metrics-Endpoint ab und extrahiert die wichtigsten Werte."""
+async def fetch_engine_metrics(port: Optional[int] = None) -> dict:
+    """Ruft vLLMs eigenen /metrics-Endpoint ab und extrahiert die wichtigsten
+    Werte. `port` adressiert eine bestimmte Engine aus dem Hot Pool - ohne
+    Angabe wird der konfigurierte Default-Port verwendet."""
     cfg = get_config()
-    url = f"http://{cfg.engine_host}:{cfg.engine_port}/metrics"
+    url = f"http://{cfg.engine_host}:{port or cfg.engine_port}/metrics"
     try:
         async with httpx.AsyncClient(timeout=2) as client:
             r = await client.get(url)

@@ -18,6 +18,7 @@ from .catalog import list_cached_models
 from .config import get_config, load_config
 from .dashboard import router as dashboard_router
 from .mcp_tools import mcp
+from .ollama_compat import router as ollama_router
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 logger = logging.getLogger("vllm_manager")
@@ -29,14 +30,13 @@ async def _idle_watchdog() -> None:
     while True:
         await asyncio.sleep(IDLE_CHECK_INTERVAL)
         cfg = get_config()
-        if cfg.idle_timeout_seconds and process_manager.engine.model:
-            if time.time() - process_manager.engine.last_used > cfg.idle_timeout_seconds:
-                logger.info(
-                    "Idle-Timeout (%ss) erreicht, entlade %s",
-                    cfg.idle_timeout_seconds,
-                    process_manager.engine.model,
-                )
-                await process_manager.stop_engine(reason="idle_timeout")
+        if not cfg.idle_timeout_seconds:
+            continue
+        now = time.time()
+        for eng in list(process_manager.engines.values()):
+            if now - eng.last_used > cfg.idle_timeout_seconds:
+                logger.info("Idle-Timeout (%ss) erreicht, entlade %s", cfg.idle_timeout_seconds, eng.model)
+                await process_manager.stop_engine(eng.model, reason="idle_timeout")
 
 
 @asynccontextmanager
@@ -52,6 +52,7 @@ async def lifespan(_app: FastAPI):
 app = FastAPI(title="vLLM Manager", lifespan=lifespan)
 app.mount("/mcp", mcp.streamable_http_app())
 app.include_router(dashboard_router)
+app.include_router(ollama_router)
 
 
 @app.middleware("http")
@@ -64,7 +65,7 @@ async def api_key_middleware(request: Request, call_next):
 
 @app.get("/health")
 async def health():
-    return {"status": "ok", **process_manager.engine.status()}
+    return {"status": "ok", "engines": [e.status() for e in process_manager.engines.values()]}
 
 
 @app.get("/models")
@@ -76,7 +77,7 @@ async def list_models_endpoint():
         out.append({
             "model": name,
             "cached": name in cached,
-            "loaded": process_manager.engine.model == name,
+            "loaded": process_manager.is_ready(name),
             "enabled": mcfg.enabled,
             "notes": mcfg.notes,
         })
@@ -85,11 +86,11 @@ async def list_models_endpoint():
         out.append({
             "model": name,
             "cached": True,
-            "loaded": process_manager.engine.model == name,
+            "loaded": process_manager.is_ready(name),
             "enabled": True,
             "notes": "Lokal gecacht, aber nicht in config.json registriert.",
         })
-    return {"models": out, "default_model": cfg.default_model, "active": process_manager.engine.model}
+    return {"models": out, "default_model": cfg.default_model, "active": process_manager.loaded_models()}
 
 
 @app.post("/models/pull")
@@ -124,10 +125,10 @@ async def load_model_endpoint(model: str):
 
 @app.post("/models/{model:path}/unload")
 async def unload_model_endpoint(model: str):
-    if process_manager.engine.model == model:
-        await process_manager.stop_engine()
+    if model in process_manager.engines:
+        await process_manager.stop_engine(model)
         return {"status": "unloaded"}
-    return {"status": "not_loaded", "currently_loaded": process_manager.engine.model}
+    return {"status": "not_loaded", "currently_loaded": process_manager.loaded_models()}
 
 
 # --- OpenAI-kompatibler Proxy mit Auto-Load -------------------------------
@@ -173,13 +174,13 @@ async def proxy_v1(path: str, request: Request):
         )
 
     try:
-        await process_manager.ensure_loaded(model)
+        engine_status = await process_manager.ensure_loaded(model)
     except (RuntimeError, TimeoutError) as e:
         telemetry.finish_request(rid, "error")
         raise HTTPException(503, str(e))
     telemetry.mark_ready(rid)
 
-    target = f"http://{cfg.engine_host}:{cfg.engine_port}/v1/{path}"
+    target = f"http://{cfg.engine_host}:{engine_status['port']}/v1/{path}"
     client = httpx.AsyncClient(timeout=None)
     fwd_headers = {k: v for k, v in request.headers.items() if k.lower() not in HOP_BY_HOP}
     req = client.build_request(request.method, target, content=body, headers=fwd_headers)

@@ -19,15 +19,39 @@ vllm.service (systemd, läuft immer)
       ├─ /models/{model}/load|unload  manuell steuern
       └─ /mcp          MCP-Server (Streamable HTTP) für KI-Zugriff
       │
-      └─ spawnt bei Bedarf als Kindprozess (127.0.0.1:18811, intern):
+      └─ spawnt bei Bedarf einen oder mehrere Kindprozesse (127.0.0.1:18811, 18812, ...):
          vllm serve <model> --gpu-memory-utilization ... --max-model-len ...
 ```
 
-Nur **ein** Modell läuft gleichzeitig (unified memory ist zwischen CPU/GPU geteilt,
-~121GB gesamt). Wird ein anderes Modell angefragt, wird das alte automatisch beendet
-und das neue gestartet. Es gibt **kein** automatisches Idle-Entladen
-(`idle_timeout_seconds: null` in der config.json) – ein Modell bleibt geladen, bis
-ein anderes angefragt oder es manuell entladen wird.
+### Hot Pool: mehrere Modelle gleichzeitig warmhalten
+
+`max_concurrent_models` in `config.json` (Default `2`) legt fest, wie viele
+`vllm serve`-Kindprozesse gleichzeitig laufen dürfen – jeder auf einem eigenen
+Port (`engine_port`, `engine_port+1`, ...). Solange ein angefragtes Modell
+bereits im Pool ist und bereit steht, ist der Wechsel **instant** (kein
+Kaltstart) – der Proxy routet den Request einfach an den passenden Port.
+
+Da die GB10 Unified Memory hat (CPU und GPU teilen sich denselben Speicher,
+~121GB gesamt) und jede Engine ihren Speicheranteil unabhängig von den anderen
+reserviert, gibt es zusätzlich `gpu_memory_ceiling` (Default `0.9`) als
+Sicherheitsnetz: die Summe der `gpu_memory_utilization` aller gleichzeitig
+laufenden Engines darf diesen Wert nicht überschreiten. Passt ein neu
+angefragtes Modell nicht mehr rein (Poolgröße voll ODER Speicherbudget
+überschritten), wird automatisch die am längsten ungenutzte Engine verdrängt
+(LRU) – Engines mit gerade aktiver Anfrage werden dabei nach Möglichkeit
+übersprungen. Bei `max_concurrent_models: 1` verhält sich der Manager wie vor
+diesem Feature: exklusiv, jeder Wechsel ist ein Kaltstart.
+
+**Praktisch heißt das:** zwei kleinere Modelle (z.B. `Qwen3-8B` +
+`NVIDIA-Nemotron-3-Nano-4B-FP8`, zusammen ~0.65 Speicherbudget) bleiben
+problemlos parallel geladen. Bei den großen 30B–80B-Modellen (0.5–0.7 Budget
+pro Modell) reduziert sich das Verhalten je nach Kombination automatisch
+wieder auf "immer nur eins" – das Sicherheitsnetz verhindert OOM, ohne dass
+man die Kombinationen von Hand ausschließen muss.
+
+Es gibt **kein** automatisches Idle-Entladen (`idle_timeout_seconds: null` in
+der config.json) – ein Modell bleibt geladen, bis es verdrängt, ein anderes
+Modell dasselbe Slot anfragt oder es manuell entladen wird.
 
 ## Dienst steuern
 
@@ -57,6 +81,8 @@ Wichtige Felder:
 | `host` / `port` | Wo der Manager lauscht (aktuell `0.0.0.0:11434`, netzwerkweit erreichbar – **keine Firewall-Regel** aktiv, siehe Sicherheit unten) |
 | `api_key.enabled` / `api_key.key` | API-Key-Pflicht an/aus. **Aktuell `false`** – Server ist ohne jeden Header nutzbar. Zum Aktivieren: `key` setzen, `enabled: true`, Dienst neu starten. Dann muss jeder Request `Authorization: Bearer <key>` mitschicken (außer `/health`). |
 | `idle_timeout_seconds` | `null` = nie automatisch entladen. Zahl (Sekunden) = Ollama-artiges Verhalten. |
+| `max_concurrent_models` | Größe des Hot Pools – so viele Modelle können gleichzeitig geladen bleiben (siehe Architektur oben). Default `2`. |
+| `gpu_memory_ceiling` | Obergrenze für die Summe der `gpu_memory_utilization` aller gleichzeitig laufenden Engines. Default `0.9`. |
 | `default_model` | Wird verwendet, wenn ein Request kein `"model"`-Feld mitschickt. |
 | `default_serve_args` | Fallback-Werte für `gpu_memory_utilization` / `max_model_len`, falls ein Modell keine eigenen hat. |
 | `models.<name>` | Pro-Modell-Overrides: `tool_call_parser`, `max_model_len`, `gpu_memory_utilization`, `enable_auto_tool_choice`, `extra_args` (Liste beliebiger zusätzlicher `vllm serve`-Flags), `hf_token`, `enabled` (auf `false` setzen um ein kaputtes/gesperrtes Modell zu deaktivieren, ohne den Eintrag zu löschen), `notes`. |
@@ -82,6 +108,32 @@ Verfügbare Modelle:
 curl http://<LAN-IP>:11434/models          # Management-Sicht: registriert/gecacht/geladen
 curl http://<LAN-IP>:11434/v1/models       # OpenAI-kompatible Liste
 ```
+
+## Ollama-Kompatibilität (für alte, gegen Ollama gebaute Tools)
+
+Eigene Skripte/Tools, die noch direkt gegen Ollamas native API sprechen (z.B.
+`POST {base_url}/api/chat` statt `/v1/chat/completions`), müssen **nicht**
+angepasst werden – der Manager übersetzt das automatisch:
+
+- `POST /api/chat`: nimmt Ollamas Request-Format entgegen (`model`, `messages`,
+  `format` als JSON-Schema, `think`, `options.temperature/top_p/num_predict`,
+  `stream`) und übersetzt es auf `/v1/chat/completions` (inkl. `format` →
+  `response_format: {type: json_schema, ...}` für strukturierten Output,
+  `think` → `chat_template_kwargs.enable_thinking`). Antwortet im
+  Ollama-Format (`{"message": {"content": ...}, "done": true, ...}`).
+  **Nur `"stream": false`** wird unterstützt (Ollamas NDJSON-Streaming-Format
+  ist nicht implementiert) – der Ollama-Default, und was reale Alt-Clients
+  bisher genutzt haben.
+- `GET /api/tags`: listet verfügbare Modelle im Ollama-Format.
+- Alte Ollama-Modellnamen (`qwen3.8:27b` usw.) werden automatisch auf die neuen
+  HuggingFace-Namen gemappt (Tabelle siehe unten) – man kann in der Config des
+  Alt-Tools also einfach den bisherigen `model`-Namen stehen lassen.
+- `keep_alive` wird entgegengenommen, aber ignoriert – das Idle-Verhalten wird
+  hier zentral über `idle_timeout_seconds` bzw. den Hot Pool gesteuert, nicht
+  pro Request.
+- Andere Ollama-Endpunkte (`/api/generate`, `/api/pull`, `/api/show`, ...) gibt
+  es nicht – bei Bedarf in [`vllm_manager/ollama_compat.py`](vllm_manager/ollama_compat.py)
+  nach demselben Muster ergänzen.
 
 ## Modelle herunterladen (mit Fortschritt)
 
@@ -119,21 +171,40 @@ curl -X POST http://<LAN-IP>:11434/models/Qwen%2FQwen3-8B/unload
 ## Live-Dashboard
 
 Erreichbar unter `http://<LAN-IP>:11434/dashboard` (z.B. `http://10.7.21.3:11434/dashboard`).
-Zeigt in Echtzeit (Server-Sent Events, kein Neuladen der Seite nötig):
+Zeigt in Echtzeit per WebSocket (kein Polling, kein Neuladen der Seite nötig):
 
-- Geladenes Modell + Laufzeit
+- **Geladene Modelle** (Hot Pool, siehe Architektur oben) als Tabelle: Modell, Status
+  (🥶 Kaltstart / ✅ bereit), Port, Laufzeit, Requests laufend/wartend, KV-Cache-
+  Auslastung, Ø TTFT / Ø ms-pro-Token, Tokens, und ein **"Entladen"-Button** je Zeile
+  zum manuellen Stoppen eines Modells (ruft `POST /models/{model}/unload` auf, nach
+  Bestätigung) – je Eintrag mit Live-Metriken direkt aus vLLMs eigenem
+  `/metrics`-Endpoint der jeweiligen Engine
+- **Pool-Speicherbudget**: Summe der `gpu_memory_utilization` aller geladenen Engines
+  gegen `gpu_memory_ceiling`, als Balken
 - Zeitpunkt des letzten Prompts ("vor Xs")
-- Requests laufend/wartend, KV-Cache-Auslastung, Ø TTFT / Ø ms-pro-Token (direkt aus
-  vLLMs eigenem `/metrics`-Endpoint, also die "echten" Engine-Werte)
 - Aktive Anfrage: Modell-Ladezeit (falls gerade ein Kaltstart lief) getrennt von der
   reinen Generierungs-TTFT, sowie Tokens grob live mitgezählt
-- Laufende Downloads (gleiche Daten wie `/models/pull`)
+- System-Auslastung: GPU-Auslastung/-Temperatur/-Leistung (`nvidia-smi`) und
+  RAM-Auslastung (`/proc/meminfo`, deckt wegen Unified Memory auch den
+  GPU-Speicherbedarf ab) als Live-Charts
+- Modell-Verlauf (wie `ollama ps`, aber historisch): welches Modell wann geladen/
+  entladen/verdrängt/abgestürzt ist, inkl. Grund
+- Laufende Downloads (gleiche Daten wie `/models/pull`), ganz unten auf der Seite
 - Tabelle der letzten ~30 Anfragen mit Dauer, TTFT, Prompt-/Completion-Tokens
+- Dark-Mode-Toggle oben rechts (merkt sich die Wahl in `localStorage`)
+- Sprachauswahl oben rechts (Dropdown): **Englisch ist Standardsprache**, Deutsch
+  wählbar, Wahl wird persistent in `localStorage` gespeichert. Übersetzungen liegen
+  in [`vllm_manager/languages/`](vllm_manager/languages/) – je eine `<code>.json`
+  pro Sprache (aktuell `en.json`, `de.json`), automatisch beim Serverstart geladen
+  und in die Seite eingebettet. Neue Sprache hinzufügen: einfach eine weitere
+  `<code>.json` mit denselben Schlüsseln in den Ordner legen, kein Code-Änderung
+  nötig – taucht dann automatisch im Dropdown auf.
 
-**Technik:** `GET /dashboard/events` liefert einen SSE-Stream, der bei jeder
-Zustandsänderung sofort pusht (neuer Request, Modellwechsel) und zusätzlich jede
-Sekunde einen Heartbeat sendet (damit auch reine Engine-Metriken wie
-KV-Cache-Auslastung aktuell bleiben, auch ohne neue Anfragen).
+**Technik:** `GET /dashboard/ws` (WebSocket) pusht bei jeder Zustandsänderung sofort
+(neuer Request, Modellwechsel, Verdrängung) und zusätzlich jede Sekunde einen
+Heartbeat (damit auch reine Engine-/System-Metriken aktuell bleiben, auch ohne neue
+Anfragen). `GET /dashboard/status` liefert denselben Snapshot einmalig als JSON, z.B.
+zum Debuggen mit `curl`.
 
 **Caveats:**
 - Token-Zählung pro aktivem Request ist eine Näherung (1 SSE-Chunk mit Content ≈ 1
@@ -146,15 +217,15 @@ KV-Cache-Auslastung aktuell bleiben, auch ohne neue Anfragen).
   immer korrekt.
 - Bei aktiviertem `api_key`: `/dashboard` selbst ist frei erreichbar (zeigt sonst
   nur eine leere Seite mit Passwort-Prompt), aber `/dashboard/status` und
-  `/dashboard/events` verlangen denselben Bearer-Token wie die restliche API. Die
-  Seite fragt den Key beim ersten Laden per Prompt ab und merkt ihn sich für die
+  `/dashboard/ws` verlangen denselben Bearer-Token wie die restliche API (bei der
+  WebSocket-Verbindung als erste Nachricht nach dem Verbindungsaufbau). Die Seite
+  fragt den Key beim ersten Laden per Prompt ab und merkt ihn sich für die
   Browser-Session (`sessionStorage`).
 
 ### Verfügbare Modelle (2-spaltige Liste + Klick-Modal)
 
-Ganz unten im Dashboard: alle registrierten (`config.json`) und zusätzlich lokal
-gecachten Modelle, mit Badges (gecacht/geladen/deaktiviert/Vision). Klick auf ein
-Modell öffnet ein Modal mit:
+Alle registrierten (`config.json`) und zusätzlich lokal gecachten Modelle, mit Badges
+(gecacht/geladen/deaktiviert/Vision). Klick auf ein Modell öffnet ein Modal mit:
 - Link zur HuggingFace-Seite (`https://huggingface.co/<model>`)
 - fertigem JSON-Schnipsel im `chatLanguageModels.json`-Format (siehe VS-Code-Setup
   weiter oben) zum direkten Einfügen ins `"models"`-Array eines

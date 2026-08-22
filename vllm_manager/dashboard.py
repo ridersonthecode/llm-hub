@@ -10,7 +10,9 @@ geprüft."""
 from __future__ import annotations
 
 import asyncio
+import json
 import time
+from pathlib import Path
 
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 from fastapi.responses import HTMLResponse
@@ -23,16 +25,35 @@ router = APIRouter()
 
 HEARTBEAT_SECONDS = 1.0
 
+# i18n: jede Datei in languages/ ist eine Sprache (Dateiname ohne .json = Code,
+# z.B. "en.json" -> "en"). Neue Sprache hinzufügen = neue Datei ablegen, kein
+# Code-Änderung nötig. Englisch ist die Standardsprache.
+LANGUAGES_DIR = Path(__file__).resolve().parent / "languages"
+DEFAULT_LANGUAGE = "en"
+
+
+def _load_languages() -> dict[str, dict[str, str]]:
+    langs: dict[str, dict[str, str]] = {}
+    for f in sorted(LANGUAGES_DIR.glob("*.json")):
+        with open(f, encoding="utf-8") as fh:
+            langs[f.stem] = json.load(fh)
+    return langs
+
+
+LANGUAGES = _load_languages()
+# Als JS-Objekt in die Seite eingebettet (kein Extra-Request nötig). "</" wird
+# maskiert, damit ein Übersetzungstext nicht versehentlich das <script>-Tag
+# beenden kann.
+_LANGUAGES_JS = json.dumps(LANGUAGES, ensure_ascii=False).replace("</", "<\\/")
+
 
 async def build_snapshot() -> dict:
     cfg = get_config()
-    engine_metrics = {}
-    if process_manager.engine.model:
-        engine_metrics = await telemetry.fetch_engine_metrics()
     now = time.time()
     return {
         "server_time": now,
-        "engine": process_manager.engine.status(),
+        "engines": await _engines_snapshot(),
+        "pool": _pool_budget(cfg),
         "default_model": cfg.default_model,
         "last_request_at": telemetry.last_request_at,
         "seconds_since_last_request": (
@@ -40,11 +61,39 @@ async def build_snapshot() -> dict:
         ),
         "active_requests": list(telemetry.active_requests.values()),
         "recent_requests": list(telemetry.recent_requests),
-        "engine_metrics": engine_metrics,
         "downloads": [j for j in downloader.list_jobs() if j["state"] != "done"][:10],
         "model_history": _model_history_with_current(),
         "models_catalog": _models_catalog(cfg),
         "system_metrics": await system_metrics.fetch_system_metrics(),
+    }
+
+
+async def _engines_snapshot() -> list[dict]:
+    """Status + Live-Metriken jeder aktuell laufenden Engine im Hot Pool
+    (bei max_concurrent_models=1 also höchstens eine)."""
+    engs = list(process_manager.engines.values())
+
+    async def _metrics(e: process_manager.EngineState) -> dict:
+        return await telemetry.fetch_engine_metrics(e.port) if e.state == "ready" else {}
+
+    metrics_list = await asyncio.gather(*[_metrics(e) for e in engs])
+    out = []
+    for eng, metrics in zip(engs, metrics_list):
+        d = eng.status()
+        d["metrics"] = metrics
+        out.append(d)
+    return out
+
+
+def _pool_budget(cfg) -> dict:
+    """GPU-Speicherbudget des Hot Pools: Summe der gpu_memory_utilization
+    aller aktuell laufenden Engines gegen gpu_memory_ceiling."""
+    used = sum(cfg.serve_args_for(e.model)[0] for e in process_manager.engines.values())
+    return {
+        "used": round(used, 3),
+        "ceiling": cfg.gpu_memory_ceiling,
+        "slots_used": len(process_manager.engines),
+        "slots_total": cfg.max_concurrent_models,
     }
 
 
@@ -59,7 +108,7 @@ def _models_catalog(cfg) -> list[dict]:
         out.append({
             "model": name,
             "cached": name in cached,
-            "loaded": process_manager.engine.model == name,
+            "loaded": process_manager.is_ready(name),
             "enabled": mcfg.enabled,
             "vision": mcfg.vision,
             "tool_calling": mcfg.enable_auto_tool_choice,
@@ -71,7 +120,7 @@ def _models_catalog(cfg) -> list[dict]:
         out.append({
             "model": name,
             "cached": True,
-            "loaded": process_manager.engine.model == name,
+            "loaded": process_manager.is_ready(name),
             "enabled": True,
             "vision": False,
             "tool_calling": False,
@@ -82,20 +131,23 @@ def _models_catalog(cfg) -> list[dict]:
 
 
 def _model_history_with_current() -> list[dict]:
-    """Verlauf wie 'ollama ps', aber historisch: aktuelle Session (falls
-    vorhanden) zuerst, dann vergangene Sessions (Wechsel/Entladen/Abstürze)."""
+    """Verlauf wie 'ollama ps', aber historisch: laufende Session(s) zuerst
+    (bei einem Hot Pool ggf. mehrere gleichzeitig), dann vergangene Sessions
+    (Wechsel/Verdrängung/Entladen/Abstürze)."""
     history = list(process_manager.model_history)[:19]
-    eng = process_manager.engine
-    if eng.model is not None and eng.state in ("loading", "ready"):
-        current = {
+    current = [
+        {
             "model": eng.model,
             "loaded_at": eng.started_at,
             "unloaded_at": None,
             "duration_seconds": None,
             "reason": eng.state,  # "loading" oder "ready" markiert die laufende Session
+            "error": None,
         }
-        return [current] + history
-    return history
+        for eng in process_manager.engines.values()
+    ]
+    current.sort(key=lambda c: c["loaded_at"] or 0, reverse=True)
+    return current + history
 
 
 @router.get("/dashboard/status")
@@ -143,7 +195,7 @@ async def dashboard_page():
 
 
 DASHBOARD_HTML = r"""<!doctype html>
-<html lang="de">
+<html lang="en">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
@@ -173,6 +225,7 @@ DASHBOARD_HTML = r"""<!doctype html>
   body { margin:0; background:var(--bg); color:var(--text); font-family: -apple-system, "Segoe UI", Roboto, sans-serif; padding: 24px; }
   h1 { font-size: 18px; margin: 0 0 4px; }
   .topbar { display:flex; align-items:flex-start; justify-content:space-between; }
+  .topbar-actions { display:flex; gap:8px; align-items:flex-start; flex:0 0 auto; }
   .sub { color: var(--text-dim); font-size: 13px; margin-bottom: 20px; }
   .conn { display:inline-flex; align-items:center; gap:6px; font-size:12px; color:var(--text-dim); }
   .dot { width:8px; height:8px; border-radius:50%; background: var(--bad); }
@@ -182,6 +235,17 @@ DASHBOARD_HTML = r"""<!doctype html>
     border-radius:8px; width:36px; height:36px; font-size:16px; cursor:pointer; flex:0 0 auto;
   }
   #theme-toggle:hover { background:var(--panel-2); }
+  #lang-select {
+    background:var(--panel); border:1px solid var(--border); color:var(--text);
+    border-radius:8px; height:36px; padding:0 8px; font-size:13px; cursor:pointer; flex:0 0 auto;
+  }
+  #lang-select:hover { background:var(--panel-2); }
+  .unload-btn {
+    background:var(--panel-2); border:1px solid var(--border); color:var(--text);
+    border-radius:6px; padding:4px 10px; font-size:12px; cursor:pointer;
+  }
+  .unload-btn:hover { border-color: var(--bad); color: var(--bad); }
+  .unload-btn:disabled { opacity:.5; cursor:default; }
   .grid { display:grid; grid-template-columns: repeat(auto-fit, minmax(220px,1fr)); gap:14px; margin-bottom: 20px; }
   .card { background:var(--panel); border:1px solid var(--border); border-radius:10px; padding:16px; }
   .card .label { color:var(--text-dim); font-size:12px; text-transform:uppercase; letter-spacing:.04em; margin-bottom:8px; }
@@ -258,60 +322,59 @@ DASHBOARD_HTML = r"""<!doctype html>
 <body>
   <div class="topbar">
     <div>
-      <h1>vLLM Manager – Live Status</h1>
-      <div class="sub"><span class="conn"><span class="dot" id="conn-dot"></span><span id="conn-text">verbinde…</span></span></div>
+      <h1 data-i18n="nav.title">vLLM Manager – Live Status</h1>
+      <div class="sub"><span class="conn"><span class="dot" id="conn-dot"></span><span id="conn-text" data-i18n="nav.connecting">connecting…</span></span></div>
     </div>
-    <button id="theme-toggle" title="Theme wechseln">🌙</button>
+    <div class="topbar-actions">
+      <select id="lang-select" data-i18n-title="lang.selectTitle" title="Language"></select>
+      <button id="theme-toggle" data-i18n-title="theme.toggleTitle" title="Toggle theme">🌙</button>
+    </div>
   </div>
 
   <div class="grid">
     <div class="card">
-      <div class="label">Geladenes Modell</div>
-      <div class="value small" id="loaded-model">– <span class="badge idle" id="model-state-badge">idle</span></div>
-      <div class="hint" id="model-uptime"></div>
+      <div class="label" data-i18n="card.loadedModels.label">Loaded Models</div>
+      <div class="value" id="loaded-count">– / –</div>
+      <div class="hint" id="loaded-list"></div>
     </div>
     <div class="card">
-      <div class="label">Letzter Prompt</div>
+      <div class="label" data-i18n="card.lastPrompt.label">Last Prompt</div>
       <div class="value" id="last-prompt">–</div>
       <div class="hint" id="last-prompt-abs"></div>
     </div>
     <div class="card">
-      <div class="label">Requests laufend / wartend</div>
+      <div class="label" data-i18n="card.requests.label">Requests running / waiting</div>
       <div class="value" id="running-waiting">–</div>
-      <div class="hint">vLLM-Engine-Scheduler</div>
+      <div class="hint" data-i18n="card.requests.hint">Sum across all loaded engines</div>
     </div>
     <div class="card">
-      <div class="label">KV-Cache-Auslastung</div>
-      <div class="value" id="kv-cache">–</div>
-      <div class="bar-bg"><div class="bar-fg" id="kv-cache-bar" style="width:0%"></div></div>
-    </div>
-    <div class="card">
-      <div class="label">Ø TTFT / Ø Token-Latenz</div>
-      <div class="value small" id="avg-ttft">–</div>
-      <div class="hint" id="avg-tpot"></div>
-    </div>
-    <div class="card">
-      <div class="label">Tokens gesamt (Prompt / Generiert)</div>
-      <div class="value small" id="token-totals">–</div>
+      <div class="label" data-i18n="card.poolBudget.label">Pool Memory Budget (GPU)</div>
+      <div class="value" id="pool-budget">–</div>
+      <div class="bar-bg"><div class="bar-fg" id="pool-budget-bar" style="width:0%"></div></div>
     </div>
   </div>
 
   <section>
-    <h2>Aktive Anfrage</h2>
+    <h2 data-i18n="section.loadedModels">Loaded Models</h2>
+    <div id="engines-box"></div>
+  </section>
+
+  <section>
+    <h2 data-i18n="section.activeRequest">Active Request</h2>
     <div id="active-request-box"></div>
   </section>
 
   <section>
-    <h2>System-Auslastung</h2>
+    <h2 data-i18n="section.systemUsage">System Usage</h2>
     <div class="chart-grid">
       <div class="card chart-card">
-        <div class="label">GPU-Auslastung</div>
+        <div class="label" data-i18n="section.gpuUsage">GPU Usage</div>
         <div class="value" id="gpu-percent">–</div>
         <div class="hint" id="gpu-extra"></div>
         <canvas id="gpu-chart" width="400" height="70"></canvas>
       </div>
       <div class="card chart-card">
-        <div class="label">RAM-Auslastung (Unified Memory)</div>
+        <div class="label" data-i18n="section.ramUsage">RAM Usage (Unified Memory)</div>
         <div class="value" id="ram-percent">–</div>
         <div class="hint" id="ram-extra"></div>
         <canvas id="ram-chart" width="400" height="70"></canvas>
@@ -320,22 +383,22 @@ DASHBOARD_HTML = r"""<!doctype html>
   </section>
 
   <section>
-    <h2>Modell-Verlauf</h2>
+    <h2 data-i18n="section.modelHistory">Model History</h2>
     <div id="history-box"></div>
   </section>
 
   <section>
-    <h2>Letzte Anfragen</h2>
+    <h2 data-i18n="section.recentRequests">Recent Requests</h2>
     <div id="recent-box"></div>
   </section>
 
   <section>
-    <h2>Verfügbare Modelle</h2>
+    <h2 data-i18n="section.availableModels">Available Models</h2>
     <div class="model-grid" id="models-catalog-box"></div>
   </section>
 
   <section>
-    <h2>Downloads (laufend)</h2>
+    <h2 data-i18n="section.downloads">Downloads (in progress)</h2>
     <div id="downloads-box"></div>
   </section>
 
@@ -344,10 +407,11 @@ DASHBOARD_HTML = r"""<!doctype html>
       <button class="close-btn" id="modal-close">✕</button>
       <h3 id="modal-title">–</h3>
       <div class="badges" id="modal-badges"></div>
-      <a class="hf-link" id="modal-hf-link" href="#" target="_blank" rel="noopener">🤗 Auf HuggingFace ansehen ↗</a>
+      <div id="modal-actions"></div>
+      <a class="hf-link" id="modal-hf-link" href="#" target="_blank" rel="noopener" data-i18n="modal.hfLink">🤗 View on HuggingFace ↗</a>
       <div class="json-label">
-        <span>VS Code Custom-Endpoint (chatLanguageModels.json)</span>
-        <button class="copy-btn" id="modal-copy-btn">Kopieren</button>
+        <span data-i18n="modal.jsonLabel">VS Code Custom Endpoint (chatLanguageModels.json)</span>
+        <button class="copy-btn" id="modal-copy-btn" data-i18n="modal.copy">Copy</button>
       </div>
       <pre id="modal-json"></pre>
     </div>
@@ -356,16 +420,57 @@ DASHBOARD_HTML = r"""<!doctype html>
 <script>
 const $ = (id) => document.getElementById(id);
 
+// --- i18n ----------------------------------------------------------------
+// Übersetzungen kommen vom Server (vllm_manager/languages/*.json), server-
+// seitig hier als JS-Objekt eingebettet - kein Extra-Request nötig.
+const TRANSLATIONS = __TRANSLATIONS_JSON__;
+const DEFAULT_LANG = "en";
+const LANG_NAMES = { en: "English", de: "Deutsch" };
+let currentLang = localStorage.getItem("vllm_dashboard_lang");
+if (!currentLang || !TRANSLATIONS[currentLang]) currentLang = DEFAULT_LANG;
+
+function t(key, vars) {
+  const table = TRANSLATIONS[currentLang] || {};
+  const fallback = TRANSLATIONS[DEFAULT_LANG] || {};
+  let s = table[key] ?? fallback[key] ?? key;
+  if (vars) {
+    for (const k in vars) s = s.split("{" + k + "}").join(vars[k]);
+  }
+  return s;
+}
+function localeFor(lang) { return lang === "de" ? "de-DE" : "en-US"; }
+
+function populateLangSelect() {
+  const sel = $("lang-select");
+  sel.innerHTML = Object.keys(TRANSLATIONS).sort().map(code =>
+    `<option value="${code}">${LANG_NAMES[code] || code}</option>`
+  ).join("");
+  sel.value = currentLang;
+}
+function applyStaticI18n() {
+  document.documentElement.lang = currentLang;
+  document.title = t("nav.title");
+  document.querySelectorAll("[data-i18n]").forEach(el => { el.textContent = t(el.dataset.i18n); });
+  document.querySelectorAll("[data-i18n-title]").forEach(el => { el.title = t(el.dataset.i18nTitle); });
+  updateConnText();
+}
+$("lang-select").addEventListener("change", (e) => {
+  currentLang = e.target.value;
+  localStorage.setItem("vllm_dashboard_lang", currentLang);
+  applyStaticI18n();
+  if (latestSnapshot) render(latestSnapshot);
+});
+
 function fmtAgo(seconds) {
-  if (seconds === null || seconds === undefined) return "noch keine";
-  if (seconds < 2) return "gerade eben";
-  if (seconds < 60) return Math.floor(seconds) + "s her";
-  if (seconds < 3600) return Math.floor(seconds/60) + "m her";
-  return Math.floor(seconds/3600) + "h her";
+  if (seconds === null || seconds === undefined) return t("ago.never");
+  if (seconds < 2) return t("ago.justNow");
+  if (seconds < 60) return t("ago.seconds", { n: Math.floor(seconds) });
+  if (seconds < 3600) return t("ago.minutes", { n: Math.floor(seconds/60) });
+  return t("ago.hours", { n: Math.floor(seconds/3600) });
 }
 function fmtMs(ms) { return (ms === null || ms === undefined) ? "–" : (ms < 1000 ? Math.round(ms) + " ms" : (ms/1000).toFixed(2) + " s"); }
 function fmtPct(x) { return (x === null || x === undefined) ? "–" : Math.round(x*100) + "%"; }
-// Menschenlesbare Dauer, z.B. 3000s -> "50m", 65s -> "1m 5s", 45s -> "45s"
+// Human-readable duration, e.g. 3000s -> "50m", 65s -> "1m 5s", 45s -> "45s"
 function fmtDuration(seconds) {
   if (seconds === null || seconds === undefined) return "–";
   seconds = Math.round(seconds);
@@ -379,22 +484,26 @@ function fmtDuration(seconds) {
 function esc(s) { return (s ?? "").toString().replace(/[&<>]/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;"}[c])); }
 function shortModel(m) { return m ? m.split("/").pop() : "–"; }
 function reasonLabel(r) {
-  if (r === "ready") return "aktuell geladen";
-  if (r === "loading") return "lädt gerade (Kaltstart)";
-  if (r === "manual_unload") return "manuell entladen";
-  if (r === "idle_timeout") return "Idle-Timeout";
-  if (r === "crashed") return "abgestürzt";
-  if (r === "timeout") return "Start-Timeout";
-  if (r === "shutdown") return "Dienst-Neustart";
-  if (r && r.startsWith("replaced_by:")) return "ersetzt durch " + esc(shortModel(r.slice(13)));
+  if (r === "ready") return t("reason.ready");
+  if (r === "loading") return t("reason.loading");
+  if (r === "manual_unload") return t("reason.manual_unload");
+  if (r === "idle_timeout") return t("reason.idle_timeout");
+  if (r === "crashed") return t("reason.crashed");
+  if (r === "timeout") return t("reason.timeout");
+  if (r === "shutdown") return t("reason.shutdown");
+  if (r === "restart") return t("reason.restart");
+  if (r && r.startsWith("replaced_by:")) return t("reason.replacedBy", { model: esc(shortModel(r.slice(13))) });
+  if (r && r.startsWith("evicted_for:")) return t("reason.evictedFor", { model: esc(shortModel(r.slice(12))) });
   return esc(r || "–");
 }
 function reasonBadgeClass(r) {
   if (r === "ready") return "ok";
   if (r === "loading") return "loading";
   if (r === "crashed" || r === "timeout") return "error";
+  if (r && r.startsWith("evicted_for:")) return "running";
   return "idle";
 }
+function jobStateLabel(s) { return (TRANSLATIONS[currentLang] || {})["job." + s] !== undefined || (TRANSLATIONS[DEFAULT_LANG] || {})["job." + s] !== undefined ? t("job." + s) : esc(s); }
 
 // --- Live-Charts (GPU/RAM) ----------------------------------------------
 // Reine Canvas-Sparklines ohne externe Lib: rollierender Verlauf im Browser,
@@ -439,32 +548,56 @@ function drawChart(canvas, history, varName) {
 }
 
 function render(data) {
-  const eng = data.engine || {};
-  const modelNameEl = $("loaded-model");
-  const badge = $("model-state-badge");
-  modelNameEl.childNodes[0].nodeValue = (eng.loaded_model ? shortModel(eng.loaded_model) : "kein Modell geladen") + " ";
-  if (eng.state === "loading") {
-    badge.className = "badge loading"; badge.textContent = "🥶 Kaltstart läuft…";
-  } else if (eng.state === "ready") {
-    badge.className = "badge ok"; badge.textContent = "✅ bereit";
+  latestSnapshot = data;
+  const engs = data.engines || [];
+  const pool = data.pool || {};
+
+  $("loaded-count").textContent = engs.length + " / " + (pool.slots_total ?? engs.length);
+  $("loaded-list").textContent = engs.length
+    ? engs.map(e => shortModel(e.loaded_model)).join(", ")
+    : t("card.loadedModels.none");
+
+  if (engs.length === 0) {
+    $("engines-box").innerHTML = `<div class="empty">${t("empty.noModelLoaded")}</div>`;
   } else {
-    badge.className = "badge idle"; badge.textContent = "idle";
+    $("engines-box").innerHTML = `<table><thead><tr>
+      <th>${t("th.model")}</th><th>${t("th.status")}</th><th>${t("th.port")}</th><th>${t("th.since")}</th><th>${t("th.requests")}</th><th>${t("th.kvCache")}</th><th>${t("th.avgTtft")}</th><th>${t("th.avgMsPerTok")}</th><th>${t("th.tokensPromptGen")}</th><th>${t("th.action")}</th>
+      </tr></thead><tbody>` + engs.map(e => {
+        const m = e.metrics || {};
+        let badge;
+        if (e.state === "loading") badge = `<span class="badge loading">${t("badge.coldStart")}</span>`;
+        else if (e.state === "ready") badge = `<span class="badge ok">${t("badge.ready")}</span>`;
+        else badge = `<span class="badge idle">${t("badge.idle")}</span>`;
+        const since = e.running
+          ? t(e.state === "loading" ? "engine.loadingSince" : "engine.runningSince", { duration: fmtDuration(e.uptime_seconds) })
+          : (e.last_error ? t("engine.error", { msg: esc(e.last_error.split("\n")[0]) }) : "–");
+        return `<tr>
+          <td>${esc(shortModel(e.loaded_model))}</td>
+          <td>${badge}</td>
+          <td class="mono">${e.port ?? "–"}</td>
+          <td class="mono">${since}</td>
+          <td class="mono">${(m.num_requests_running ?? "–") + " / " + (m.num_requests_waiting ?? "–")}</td>
+          <td class="mono">${fmtPct(m.kv_cache_usage_perc)}</td>
+          <td class="mono">${fmtMs(m.avg_ttft_ms)}</td>
+          <td class="mono">${fmtMs(m.avg_tpot_ms)}</td>
+          <td class="mono">${(m.prompt_tokens_total ?? "–") + " / " + (m.generation_tokens_total ?? "–")}</td>
+          <td><button class="unload-btn" data-model="${esc(e.loaded_model)}">${t("action.unload")}</button></td>
+        </tr>`;
+      }).join("") + `</tbody></table>`;
   }
-  $("model-uptime").textContent = eng.running
-    ? (eng.state === "loading" ? "lädt seit " : "läuft seit ") + fmtDuration(eng.uptime_seconds)
-    : (eng.last_error ? "Letzter Fehler: " + esc(eng.last_error) : "");
 
   $("last-prompt").textContent = fmtAgo(data.seconds_since_last_request);
   $("last-prompt-abs").textContent = data.last_request_at
-    ? new Date(data.last_request_at*1000).toLocaleString("de-DE") : "";
+    ? new Date(data.last_request_at*1000).toLocaleString(localeFor(currentLang)) : "";
 
-  const m = data.engine_metrics || {};
-  $("running-waiting").textContent = (m.num_requests_running ?? "–") + " / " + (m.num_requests_waiting ?? "–");
-  $("kv-cache").textContent = fmtPct(m.kv_cache_usage_perc);
-  $("kv-cache-bar").style.width = (m.kv_cache_usage_perc ? Math.round(m.kv_cache_usage_perc*100) : 0) + "%";
-  $("avg-ttft").textContent = "TTFT: " + fmtMs(m.avg_ttft_ms);
-  $("avg-tpot").textContent = "Ø ms/Token: " + fmtMs(m.avg_tpot_ms) + (m.avg_tpot_ms ? "  (~" + Math.round(1000/m.avg_tpot_ms) + " Tok/s)" : "");
-  $("token-totals").textContent = (m.prompt_tokens_total ?? "–") + " / " + (m.generation_tokens_total ?? "–");
+  const totRunning = engs.reduce((s, e) => s + ((e.metrics || {}).num_requests_running || 0), 0);
+  const totWaiting = engs.reduce((s, e) => s + ((e.metrics || {}).num_requests_waiting || 0), 0);
+  $("running-waiting").textContent = engs.length ? (totRunning + " / " + totWaiting) : "– / –";
+
+  const usedPct = pool.ceiling ? Math.round((pool.used || 0) * 100) : null;
+  const ceilPct = pool.ceiling ? Math.round(pool.ceiling * 100) : null;
+  $("pool-budget").textContent = usedPct !== null ? t("poolBudget.value", { used: usedPct, ceiling: ceilPct }) : "–";
+  $("pool-budget-bar").style.width = (pool.ceiling ? Math.min(100, Math.round((pool.used / pool.ceiling) * 100)) : 0) + "%";
 
   const sys = data.system_metrics || {};
   $("gpu-percent").textContent = fmtPct(sys.gpu_percent);
@@ -482,34 +615,35 @@ function render(data) {
 
   const active = data.active_requests || [];
   if (active.length === 0) {
-    $("active-request-box").innerHTML = '<div class="empty">Keine aktive Anfrage</div>';
+    $("active-request-box").innerHTML = `<div class="empty">${t("empty.noActiveRequest")}</div>`;
   } else {
     $("active-request-box").innerHTML = active.map(r => {
       const elapsed = (Date.now()/1000 - r.started_at);
-      const loadHint = r.queued_ms ? ` · Modell-Ladezeit: ${fmtMs(r.queued_ms)}` : "";
+      const loadHint = r.queued_ms ? t("active.loadTime", { ms: fmtMs(r.queued_ms) }) : "";
       return `<div class="card active-req">
-        <div class="value small">${esc(shortModel(r.model))} <span class="badge running">läuft</span></div>
-        <div class="hint">seit ${fmtDuration(elapsed)}${loadHint} · TTFT: ${fmtMs(r.ttft_ms)} · ~${r.tokens_streamed} Tokens gestreamt (approx.)</div>
+        <div class="value small">${esc(shortModel(r.model))} <span class="badge running">${t("badge.running")}</span></div>
+        <div class="hint">${t("active.since", { duration: fmtDuration(elapsed) })}${loadHint} · ${t("active.ttft", { ms: fmtMs(r.ttft_ms) })} · ${t("active.tokensStreamed", { n: r.tokens_streamed })}</div>
       </div>`;
     }).join("");
   }
 
   const hist = data.model_history || [];
   if (hist.length === 0) {
-    $("history-box").innerHTML = '<div class="empty">Noch kein Modell geladen seit Dienststart</div>';
+    $("history-box").innerHTML = `<div class="empty">${t("empty.noHistory")}</div>`;
   } else {
     $("history-box").innerHTML = `<table><thead><tr>
-      <th>Modell</th><th>Status</th><th>Geladen um</th><th>Entladen um</th><th>Dauer</th>
+      <th>${t("th.model")}</th><th>${t("th.status")}</th><th>${t("th.loadedAt")}</th><th>${t("th.unloadedAt")}</th><th>${t("th.duration")}</th>
       </tr></thead><tbody>` + hist.map(h => {
         const ongoing = h.unloaded_at === null || h.unloaded_at === undefined;
         const duration = ongoing
           ? fmtDuration(h.loaded_at ? (Date.now()/1000 - h.loaded_at) : null)
           : fmtDuration(h.duration_seconds);
+        const errHint = h.error ? `<div class="hint" style="margin-top:4px;">${esc(h.error.split("\n")[0])}</div>` : "";
         return `<tr>
         <td>${esc(shortModel(h.model))}</td>
-        <td><span class="badge ${reasonBadgeClass(h.reason)}">${reasonLabel(h.reason)}</span></td>
-        <td class="mono">${h.loaded_at ? new Date(h.loaded_at*1000).toLocaleTimeString("de-DE") : "–"}</td>
-        <td class="mono">${ongoing ? "–" : new Date(h.unloaded_at*1000).toLocaleTimeString("de-DE")}</td>
+        <td><span class="badge ${reasonBadgeClass(h.reason)}">${reasonLabel(h.reason)}</span>${errHint}</td>
+        <td class="mono">${h.loaded_at ? new Date(h.loaded_at*1000).toLocaleTimeString(localeFor(currentLang)) : "–"}</td>
+        <td class="mono">${ongoing ? "–" : new Date(h.unloaded_at*1000).toLocaleTimeString(localeFor(currentLang))}</td>
         <td class="mono">${duration}</td>
       </tr>`;
       }).join("") + `</tbody></table>`;
@@ -517,13 +651,13 @@ function render(data) {
 
   const dls = data.downloads || [];
   if (dls.length === 0) {
-    $("downloads-box").innerHTML = '<div class="empty">Keine laufenden Downloads</div>';
+    $("downloads-box").innerHTML = `<div class="empty">${t("empty.noDownloads")}</div>`;
   } else {
     $("downloads-box").innerHTML = `<table><thead><tr>
-      <th>Modell</th><th>Status</th><th>Fortschritt</th><th>Geschwindigkeit</th><th>ETA</th>
+      <th>${t("th.model")}</th><th>${t("th.status")}</th><th>${t("th.progress")}</th><th>${t("th.speed")}</th><th>${t("th.eta")}</th>
       </tr></thead><tbody>` + dls.map(j => `<tr>
         <td>${esc(j.model)}</td>
-        <td>${esc(j.state)}</td>
+        <td>${jobStateLabel(j.state)}</td>
         <td class="mono">${Math.min(j.percent,100)}% (${(Math.min(j.bytes_done,j.bytes_total)/1e9).toFixed(1)}/${(j.bytes_total/1e9).toFixed(1)} GB)</td>
         <td class="mono">${j.speed_mbps} MB/s</td>
         <td class="mono">${fmtDuration(j.eta_seconds)}</td>
@@ -532,14 +666,14 @@ function render(data) {
 
   const recent = data.recent_requests || [];
   if (recent.length === 0) {
-    $("recent-box").innerHTML = '<div class="empty">Noch keine Anfragen seit Dienststart</div>';
+    $("recent-box").innerHTML = `<div class="empty">${t("empty.noRecentRequests")}</div>`;
   } else {
     $("recent-box").innerHTML = `<table><thead><tr>
-      <th>Zeit</th><th>Modell</th><th>Status</th><th>Ladezeit</th><th>Dauer</th><th>TTFT</th><th>Prompt-Tok.</th><th>Compl.-Tok.</th>
+      <th>${t("th.time")}</th><th>${t("th.model")}</th><th>${t("th.status")}</th><th>${t("th.loadTime")}</th><th>${t("th.duration")}</th><th>${t("th.ttft")}</th><th>${t("th.promptTokens")}</th><th>${t("th.complTokens")}</th>
       </tr></thead><tbody>` + recent.map(r => `<tr>
-        <td class="mono">${new Date(r.started_at*1000).toLocaleTimeString("de-DE")}</td>
+        <td class="mono">${new Date(r.started_at*1000).toLocaleTimeString(localeFor(currentLang))}</td>
         <td>${esc(shortModel(r.model))}</td>
-        <td><span class="badge ${r.status === 'ok' ? 'ok' : 'error'}">${esc(r.status)}</span></td>
+        <td><span class="badge ${r.status === 'ok' ? 'ok' : 'error'}">${r.status === 'ok' ? t("status.ok") : t("status.error")}</span></td>
         <td class="mono">${r.queued_ms ? fmtMs(r.queued_ms) : "–"}</td>
         <td class="mono">${fmtMs(r.duration_ms)}</td>
         <td class="mono">${fmtMs(r.ttft_ms)}</td>
@@ -551,16 +685,16 @@ function render(data) {
   latestCatalog = data.models_catalog || [];
   const catalog = latestCatalog;
   if (catalog.length === 0) {
-    $("models-catalog-box").innerHTML = '<div class="empty">Keine Modelle bekannt</div>';
+    $("models-catalog-box").innerHTML = `<div class="empty">${t("empty.noModelsKnown")}</div>`;
   } else {
     $("models-catalog-box").innerHTML = catalog.map((m, i) => `
       <div class="model-item" data-idx="${i}">
         <div class="name">${esc(shortModel(m.model))}</div>
         <div class="badges">
-          ${m.loaded ? '<span class="badge running">geladen</span>' : ""}
-          <span class="badge ${m.cached ? 'ok' : 'idle'}">${m.cached ? 'gecacht' : 'nicht gecacht'}</span>
-          ${!m.enabled ? '<span class="badge error">deaktiviert</span>' : ""}
-          ${m.vision ? '<span class="badge idle">Vision</span>' : ""}
+          ${m.loaded ? `<span class="badge running">${t("badge.loaded")}</span>` : ""}
+          <span class="badge ${m.cached ? 'ok' : 'idle'}">${m.cached ? t("badge.cached") : t("badge.notCached")}</span>
+          ${!m.enabled ? `<span class="badge error">${t("badge.disabled")}</span>` : ""}
+          ${m.vision ? `<span class="badge idle">${t("badge.vision")}</span>` : ""}
         </div>
       </div>`).join("");
     document.querySelectorAll("#models-catalog-box .model-item").forEach(el => {
@@ -569,6 +703,29 @@ function render(data) {
   }
 }
 
+// --- Modell manuell entladen (Dashboard-Button) --------------------------
+async function unloadModel(model, btn) {
+  if (!confirm(t("confirm.unload", { model: shortModel(model) }))) return;
+  const original = btn.textContent;
+  btn.disabled = true;
+  btn.textContent = t("action.unloading");
+  try {
+    const headers = {};
+    if (apiKey) headers["Authorization"] = "Bearer " + apiKey;
+    const res = await fetch(`/models/${encodeURIComponent(model)}/unload`, { method: "POST", headers });
+    if (!res.ok) throw new Error(await res.text());
+    // Nächster Heartbeat (≤1s) aktualisiert die Tabelle automatisch.
+  } catch (e) {
+    alert(t("error.unloadFailed", { msg: e.message }));
+    btn.disabled = false;
+    btn.textContent = original;
+  }
+}
+$("engines-box").addEventListener("click", (e) => {
+  const btn = e.target.closest(".unload-btn");
+  if (btn) unloadModel(btn.dataset.model, btn);
+});
+
 // --- Modell-Katalog / Klick-Modal ---------------------------------------
 let latestCatalog = [];
 
@@ -576,22 +733,35 @@ function openModal(m) {
   $("modal-title").textContent = m.model;
   $("modal-hf-link").href = "https://huggingface.co/" + m.model;
   $("modal-badges").innerHTML = [
-    m.loaded ? '<span class="badge running">geladen</span>' : "",
-    `<span class="badge ${m.cached ? 'ok' : 'idle'}">${m.cached ? 'gecacht' : 'nicht gecacht'}</span>`,
-    !m.enabled ? '<span class="badge error">deaktiviert</span>' : '<span class="badge ok">aktiviert</span>',
-    m.vision ? '<span class="badge idle">Vision</span>' : "",
-    m.tool_calling ? '<span class="badge idle">Tool-Calling</span>' : "",
+    m.loaded ? `<span class="badge running">${t("badge.loaded")}</span>` : "",
+    `<span class="badge ${m.cached ? 'ok' : 'idle'}">${m.cached ? t("badge.cached") : t("badge.notCached")}</span>`,
+    !m.enabled ? `<span class="badge error">${t("badge.disabled")}</span>` : `<span class="badge ok">${t("badge.enabled")}</span>`,
+    m.vision ? `<span class="badge idle">${t("badge.vision")}</span>` : "",
+    m.tool_calling ? `<span class="badge idle">${t("badge.toolCalling")}</span>` : "",
   ].filter(Boolean).join("");
 
+  $("modal-actions").innerHTML = m.loaded
+    ? `<button class="unload-btn" id="modal-unload-btn" style="margin-bottom:16px;">${t("action.unload")}</button>`
+    : "";
+  if (m.loaded) {
+    $("modal-unload-btn").addEventListener("click", () => unloadModel(m.model, $("modal-unload-btn")));
+  }
+
   const url = `${location.protocol}//${location.host}/v1`;
+  // maxInputTokens + maxOutputTokens dürfen NICHT beide = max_model_len sein:
+  // vLLM lehnt input_tokens + output_tokens > max_model_len ab (400 Bad
+  // Request), und VS Code füllt den Input praktisch bis maxInputTokens auf -
+  // ohne Reserve für die Ausgabe schlägt dann jeder etwas längere Prompt fehl.
+  // Deshalb ein festes Ausgabe-Budget von der Kontextlänge abziehen.
+  const outputBudget = Math.max(512, Math.min(4096, Math.floor(m.max_model_len / 4)));
   const entry = {
     id: m.model,
     name: shortModel(m.model),
     url: url,
     toolCalling: !!m.tool_calling,
     vision: !!m.vision,
-    maxInputTokens: m.max_model_len,
-    maxOutputTokens: m.max_model_len,
+    maxInputTokens: Math.max(1, m.max_model_len - outputBudget),
+    maxOutputTokens: outputBudget,
   };
   $("modal-json").textContent = JSON.stringify(entry, null, 2);
 
@@ -609,7 +779,7 @@ $("modal-copy-btn").addEventListener("click", () => {
   navigator.clipboard.writeText($("modal-json").textContent).then(() => {
     const btn = $("modal-copy-btn");
     const old = btn.textContent;
-    btn.textContent = "Kopiert ✓";
+    btn.textContent = t("modal.copied");
     setTimeout(() => { btn.textContent = old; }, 1500);
   });
 });
@@ -634,6 +804,10 @@ $("theme-toggle").addEventListener("click", () => {
 
 // --- WebSocket-Verbindung ----------------------------------------------
 let apiKey = sessionStorage.getItem("vllm_dashboard_key") || "";
+let latestSnapshot = null;
+let connState = "connecting"; // "connecting" | "live" | "reconnecting"
+
+function updateConnText() { $("conn-text").textContent = t("nav." + connState); }
 
 function connect() {
   const proto = location.protocol === "https:" ? "wss:" : "ws:";
@@ -642,14 +816,15 @@ function connect() {
   ws.onopen = () => {
     ws.send(JSON.stringify({ api_key: apiKey }));
     $("conn-dot").classList.add("live");
-    $("conn-text").textContent = "live";
+    connState = "live";
+    updateConnText();
   };
 
   ws.onmessage = (ev) => {
     let data;
     try { data = JSON.parse(ev.data); } catch (e) { return; }
     if (data.type === "auth_error") {
-      const key = prompt("API-Key erforderlich (siehe config.json):");
+      const key = prompt(t("auth.apiKeyPrompt"));
       if (key) {
         apiKey = key;
         sessionStorage.setItem("vllm_dashboard_key", key);
@@ -662,14 +837,19 @@ function connect() {
 
   ws.onclose = () => {
     $("conn-dot").classList.remove("live");
-    $("conn-text").textContent = "verbindung unterbrochen, versuche erneut…";
+    connState = "reconnecting";
+    updateConnText();
     setTimeout(connect, 1500);
   };
   ws.onerror = () => ws.close();
 }
 
+populateLangSelect();
+applyStaticI18n();
 connect();
 </script>
 </body>
 </html>
 """
+
+DASHBOARD_HTML = DASHBOARD_HTML.replace("__TRANSLATIONS_JSON__", _LANGUAGES_JS)

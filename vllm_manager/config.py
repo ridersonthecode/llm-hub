@@ -39,7 +39,18 @@ class Config(BaseModel):
     vllm_bin: Optional[str] = None
     api_key: ApiKeyConfig = Field(default_factory=ApiKeyConfig)
     idle_timeout_seconds: Optional[int] = None
+    # Anzahl gleichzeitig laufender vLLM-Engine-Prozesse ("Hot Pool"). Bei 1
+    # (Default) verhält sich der Manager wie zuvor: exklusiv, jeder Wechsel ist
+    # ein Kaltstart. Bei >1 belegt jede Engine einen eigenen Port
+    # (engine_port, engine_port+1, ...) und bereits geladene Modelle bleiben
+    # beim Wechsel warm - solange gpu_memory_ceiling nicht überschritten wird.
     max_concurrent_models: int = 1
+    # Obergrenze für die Summe der gpu_memory_utilization aller gleichzeitig
+    # laufenden Engines (gemeinsame Unified Memory auf der GB10 - jede Engine
+    # reserviert ihren Anteil unabhängig, ohne von den anderen zu wissen).
+    # Wird diese beim Laden eines neuen Modells überschritten, wird die am
+    # längsten ungenutzte Engine zuerst verdrängt (LRU).
+    gpu_memory_ceiling: float = 0.90
     default_model: Optional[str] = None
     startup_timeout_seconds: int = 900
     default_serve_args: dict = Field(default_factory=dict)
