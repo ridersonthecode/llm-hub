@@ -1,0 +1,113 @@
+{
+  "host": "0.0.0.0",
+  "port": 11434,
+  "engine_host": "127.0.0.1",
+  "engine_port": 18811,
+  "hf_home": "/home/YOUR_USER/vllm/models",
+  "vllm_bin": null,
+  "api_key": {
+    "enabled": false,
+    "key": ""
+  },
+  "idle_timeout_seconds": null,
+  "max_concurrent_models": 1,
+  "default_model": "NousResearch/Hermes-3-Llama-3.1-8B",
+  "startup_timeout_seconds": 900,
+  "default_serve_args": {
+    "gpu_memory_utilization": 0.5,
+    "max_model_len": 32768
+  },
+  "models": {
+    "NousResearch/Hermes-3-Llama-3.1-8B": {
+      "tool_call_parser": "hermes",
+      "max_model_len": 65536,
+      "gpu_memory_utilization": 0.5,
+      "enable_auto_tool_choice": true,
+      "enabled": true,
+      "notes": "Aus dem alten Setup übernommen, bekannt funktionierend inkl. Tool-Calling."
+    },
+    "openai/gpt-oss-120b": {
+      "tool_call_parser": "openai",
+      "max_model_len": 32768,
+      "gpu_memory_utilization": 0.75,
+      "enable_auto_tool_choice": true,
+      "enabled": false,
+      "notes": "Stand 2026-07-28 defekt: aarch64-Bug in openai-harmony (github.com/openai/harmony/issues/46, github.com/NVIDIA/dgx-spark-playbooks/issues/17). Auf enabled:true setzen, sobald ein Fix existiert."
+    },
+    "Qwen/Qwen3-8B": {
+      "tool_call_parser": "qwen3_xml",
+      "max_model_len": 32768,
+      "gpu_memory_utilization": 0.35,
+      "enable_auto_tool_choice": true,
+      "enabled": true,
+      "notes": "Ersetzt Ollama-Modell qwen3:8b."
+    },
+    "nvidia/NVIDIA-Nemotron-3-Nano-4B-FP8": {
+      "tool_call_parser": "hermes",
+      "max_model_len": 32768,
+      "gpu_memory_utilization": 0.3,
+      "enable_auto_tool_choice": true,
+      "enabled": true,
+      "notes": "Ersetzt Ollama-Modell nemotron-3-nano:4b. Tool-Call-Parser ungetestet (hermes als Annahme), ggf. anpassen."
+    },
+    "Qwen/Qwen3.8-27B-FP8": {
+      "tool_call_parser": "qwen3_xml",
+      "max_model_len": 32768,
+      "gpu_memory_utilization": 0.5,
+      "enable_auto_tool_choice": true,
+      "vision": true,
+      "enabled": true,
+      "notes": "Ersetzt Ollama-Modell qwen3.8:27b."
+    },
+    "Qwen/Qwen3-Coder-30B-A3B-Instruct-FP8": {
+      "tool_call_parser": "qwen3_coder",
+      "max_model_len": 32768,
+      "gpu_memory_utilization": 0.5,
+      "enable_auto_tool_choice": true,
+      "enabled": true,
+      "notes": "Ersetzt Ollama-Modelle qwen3-coder:30b-a3b-q4_K_M und qwen3-coder-256k:latest (identisches Basismodell, nur ein Download nötig)."
+    },
+    "Qwen/Qwen3.6-35B-A3B-FP8": {
+      "tool_call_parser": "qwen3_xml",
+      "max_model_len": 32768,
+      "gpu_memory_utilization": 0.55,
+      "enable_auto_tool_choice": true,
+      "vision": true,
+      "enabled": true,
+      "notes": "Ersetzt Ollama-Modell qwen3.6:35b."
+    },
+    "nvidia/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-NVFP4": {
+      "tool_call_parser": "hermes",
+      "max_model_len": 32768,
+      "gpu_memory_utilization": 0.5,
+      "enable_auto_tool_choice": true,
+      "enabled": true,
+      "notes": "Ersetzt Ollama-Modell nemotron-3.5-lightning:latest. NVFP4 statt BF16 (65.8GB), GB10 unterstützt NVFP4 nativ. Tool-Call-Parser ungetestet (hermes als Annahme)."
+    },
+    "nvidia/Nemotron-Cascade-2-30B-A3B": {
+      "tool_call_parser": "hermes",
+      "max_model_len": 32768,
+      "gpu_memory_utilization": 0.65,
+      "enable_auto_tool_choice": true,
+      "enabled": true,
+      "notes": "Ersetzt Ollama-Modell nemotron-cascade-2:latest. Nur BF16 verfügbar (63.2GB), kein FP8/NVFP4 auf HF gefunden. Tool-Call-Parser ungetestet (hermes als Annahme)."
+    },
+    "nvidia/Qwen3-Next-80B-A3B-Instruct-NVFP4": {
+      "tool_call_parser": "qwen3_xml",
+      "max_model_len": 32768,
+      "gpu_memory_utilization": 0.7,
+      "enable_auto_tool_choice": true,
+      "enabled": true,
+      "notes": "Ersetzt Ollama-Modell qwen3-next:80b. NVFP4 statt FP8 (82.1GB). Größtes Modell hier (50.8GB) - bei OOM gpu_memory_utilization oder max_model_len senken."
+    },
+    "meta-llama/Llama-3.2-3B-Instruct": {
+      "tool_call_parser": "llama3_json",
+      "max_model_len": 32768,
+      "gpu_memory_utilization": 0.3,
+      "enable_auto_tool_choice": true,
+      "enabled": false,
+      "hf_token": null,
+      "notes": "Ersetzt Ollama-Modell llama3.2:latest. Gated Modell: erst auf huggingface.co/meta-llama/Llama-3.2-3B-Instruct eingeloggt die Lizenz akzeptieren, dann hf_token setzen und enabled:true."
+    }
+  }
+}

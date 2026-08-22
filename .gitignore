@@ -1,0 +1,19 @@
+# Python
+__pycache__/
+*.pyc
+.venv/
+
+# Laufzeitdaten - nicht Teil des Projekts, riesig und maschinenspezifisch
+models/
+logs/
+
+# Lokale, ggf. sensible Konfiguration (API-Key, HF-Token, absolute Pfade).
+# Vorlage siehe config.example.json.
+config.json
+
+# Claude Code lokale Projekt-Settings (Permissions dieser Maschine)
+.claude/settings.local.json
+
+# Alte, archivierte Skripte mit früher hartkodiertem API-Key im Klartext
+archive/Anleitung.txt.alt
+archive/setup_hermes_service.sh
