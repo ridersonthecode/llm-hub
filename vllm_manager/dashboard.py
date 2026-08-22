@@ -15,7 +15,7 @@ import time
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 from fastapi.responses import HTMLResponse
 
-from . import downloader, process_manager, telemetry
+from . import downloader, process_manager, system_metrics, telemetry
 from .catalog import list_cached_models
 from .config import get_config
 
@@ -44,6 +44,7 @@ async def build_snapshot() -> dict:
         "downloads": [j for j in downloader.list_jobs() if j["state"] != "done"][:10],
         "model_history": _model_history_with_current(),
         "models_catalog": _models_catalog(cfg),
+        "system_metrics": await system_metrics.fetch_system_metrics(),
     }
 
 
@@ -206,6 +207,9 @@ DASHBOARD_HTML = r"""<!doctype html>
   .bar-fg { background:var(--accent); height:100%; transition: width .3s; }
   .active-req { border-left: 3px solid var(--accent); padding-left:10px; }
 
+  .chart-grid { display:grid; grid-template-columns: repeat(auto-fit, minmax(280px,1fr)); gap:14px; }
+  .chart-card canvas { width:100%; height:70px; display:block; margin-top:8px; }
+
   .model-grid { display:grid; grid-template-columns: 1fr 1fr; gap:10px; }
   @media (max-width: 640px) { .model-grid { grid-template-columns: 1fr; } }
   .model-item {
@@ -298,13 +302,26 @@ DASHBOARD_HTML = r"""<!doctype html>
   </section>
 
   <section>
-    <h2>Modell-Verlauf</h2>
-    <div id="history-box"></div>
+    <h2>System-Auslastung</h2>
+    <div class="chart-grid">
+      <div class="card chart-card">
+        <div class="label">GPU-Auslastung</div>
+        <div class="value" id="gpu-percent">–</div>
+        <div class="hint" id="gpu-extra"></div>
+        <canvas id="gpu-chart" width="400" height="70"></canvas>
+      </div>
+      <div class="card chart-card">
+        <div class="label">RAM-Auslastung (Unified Memory)</div>
+        <div class="value" id="ram-percent">–</div>
+        <div class="hint" id="ram-extra"></div>
+        <canvas id="ram-chart" width="400" height="70"></canvas>
+      </div>
+    </div>
   </section>
 
   <section>
-    <h2>Downloads (laufend)</h2>
-    <div id="downloads-box"></div>
+    <h2>Modell-Verlauf</h2>
+    <div id="history-box"></div>
   </section>
 
   <section>
@@ -315,6 +332,11 @@ DASHBOARD_HTML = r"""<!doctype html>
   <section>
     <h2>Verfügbare Modelle</h2>
     <div class="model-grid" id="models-catalog-box"></div>
+  </section>
+
+  <section>
+    <h2>Downloads (laufend)</h2>
+    <div id="downloads-box"></div>
   </section>
 
   <div class="modal-overlay" id="model-modal-overlay">
@@ -374,6 +396,48 @@ function reasonBadgeClass(r) {
   return "idle";
 }
 
+// --- Live-Charts (GPU/RAM) ----------------------------------------------
+// Reine Canvas-Sparklines ohne externe Lib: rollierender Verlauf im Browser,
+// gefüttert von jedem WS-Snapshot (~1x/s durch den Heartbeat).
+const MAX_POINTS = 120;
+const gpuHistory = [];
+const ramHistory = [];
+
+function pushHistory(arr, val) {
+  arr.push(typeof val === "number" ? val : null);
+  if (arr.length > MAX_POINTS) arr.shift();
+}
+function cssVar(name) { return getComputedStyle(document.documentElement).getPropertyValue(name).trim(); }
+function drawChart(canvas, history, varName) {
+  const ctx = canvas.getContext("2d");
+  const w = canvas.width, h = canvas.height;
+  ctx.clearRect(0, 0, w, h);
+  const pts = history.filter(v => v !== null).length;
+  if (pts < 2) return;
+  const color = cssVar(varName) || "#888";
+  const step = w / (MAX_POINTS - 1);
+  const offset = MAX_POINTS - history.length;
+  ctx.beginPath();
+  let started = false;
+  history.forEach((v, i) => {
+    if (v === null || v === undefined) return;
+    const x = (offset + i) * step;
+    const y = h - Math.max(0, Math.min(1, v)) * (h - 4) - 2;
+    if (!started) { ctx.moveTo(x, y); started = true; } else { ctx.lineTo(x, y); }
+  });
+  ctx.strokeStyle = color;
+  ctx.lineWidth = 2;
+  ctx.lineJoin = "round";
+  ctx.stroke();
+  ctx.lineTo((offset + history.length - 1) * step, h);
+  ctx.lineTo(offset * step, h);
+  ctx.closePath();
+  ctx.globalAlpha = 0.15;
+  ctx.fillStyle = color;
+  ctx.fill();
+  ctx.globalAlpha = 1;
+}
+
 function render(data) {
   const eng = data.engine || {};
   const modelNameEl = $("loaded-model");
@@ -401,6 +465,20 @@ function render(data) {
   $("avg-ttft").textContent = "TTFT: " + fmtMs(m.avg_ttft_ms);
   $("avg-tpot").textContent = "Ø ms/Token: " + fmtMs(m.avg_tpot_ms) + (m.avg_tpot_ms ? "  (~" + Math.round(1000/m.avg_tpot_ms) + " Tok/s)" : "");
   $("token-totals").textContent = (m.prompt_tokens_total ?? "–") + " / " + (m.generation_tokens_total ?? "–");
+
+  const sys = data.system_metrics || {};
+  $("gpu-percent").textContent = fmtPct(sys.gpu_percent);
+  $("gpu-extra").textContent = [
+    sys.gpu_temp_c != null ? sys.gpu_temp_c + " °C" : null,
+    sys.gpu_power_w != null ? Math.round(sys.gpu_power_w) + " W" : null,
+  ].filter(Boolean).join(" · ");
+  pushHistory(gpuHistory, sys.gpu_percent);
+  drawChart($("gpu-chart"), gpuHistory, "--accent");
+
+  $("ram-percent").textContent = fmtPct(sys.ram_percent);
+  $("ram-extra").textContent = sys.ram_used_gb != null ? `${sys.ram_used_gb} / ${sys.ram_total_gb} GB` : "";
+  pushHistory(ramHistory, sys.ram_percent);
+  drawChart($("ram-chart"), ramHistory, "--good");
 
   const active = data.active_requests || [];
   if (active.length === 0) {
