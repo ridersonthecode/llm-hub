@@ -502,17 +502,17 @@ DASHBOARD_HTML = r"""<!doctype html>
 
   <section>
     <h2 data-i18n="section.loadedModels">Loaded Models</h2>
-    <div id="engines-box"></div>
+    <div id="engines-box" class="table-scroll"></div>
   </section>
 
   <section>
     <h2 data-i18n="section.activeRequest">Active Request</h2>
-    <div id="active-request-box"></div>
+    <div id="active-request-box" class="table-scroll"></div>
   </section>
 
   <section>
     <h2 data-i18n="section.recentRequests">Recent Requests</h2>
-    <div id="recent-box"></div>
+    <div id="recent-box" class="table-scroll"></div>
   </section>
 
   <section>
@@ -527,7 +527,7 @@ DASHBOARD_HTML = r"""<!doctype html>
 
   <section>
     <h2 data-i18n="section.downloads">Downloads (in progress)</h2>
-    <div id="downloads-box"></div>
+    <div id="downloads-box" class="table-scroll"></div>
   </section>
 
   <div class="modal-overlay" id="model-modal-overlay">
@@ -873,7 +873,7 @@ function render(data) {
   if (engs.length === 0) {
     safeSetHTML($("engines-box"), `<div class="empty">${t("empty.noModelLoaded")}</div>`);
   } else {
-    safeSetHTML($("engines-box"), `<div class="table-scroll"><table><thead><tr>
+    safeSetHTML($("engines-box"), `<table><thead><tr>
       <th>${t("th.model")}</th><th>${t("th.status")}</th><th>${t("th.port")}</th><th>${t("th.since")}</th><th>${t("th.requests")}${helpIcon("requestsEngine")}</th><th>${t("th.kvCache")}${helpIcon("kvCache")}</th><th>${t("th.avgTtft")}${helpIcon("avgTtft")}</th><th>${t("th.avgMsPerTok")}${helpIcon("avgMsPerTok")}</th><th>${t("th.tokensPromptGen")}${helpIcon("tokensPromptGen")}</th><th>${t("th.action")}</th>
       </tr></thead><tbody>` + engs.map(e => {
         const m = e.metrics || {};
@@ -896,7 +896,7 @@ function render(data) {
           <td class="mono">${(m.prompt_tokens_total ?? "–") + " / " + (m.generation_tokens_total ?? "–")}</td>
           <td><button class="unload-btn" data-model="${esc(e.loaded_model)}">${t("action.unload")}</button></td>
         </tr>`;
-      }).join("") + `</tbody></table></div>`);
+      }).join("") + `</tbody></table>`);
   }
 
   $("last-prompt").textContent = fmtAgo(data.seconds_since_last_request);
@@ -930,7 +930,7 @@ function render(data) {
   if (active.length === 0) {
     safeSetHTML($("active-request-box"), `<div class="empty">${t("empty.noActiveRequest")}</div>`);
   } else {
-    safeSetHTML($("active-request-box"), `<div class="table-scroll"><table><thead><tr>
+    safeSetHTML($("active-request-box"), `<table><thead><tr>
       <th>${t("th.model")}</th><th>${t("th.app")}</th><th>${t("th.endpoint")}</th><th>${t("th.port")}</th><th>${t("th.rag")}${helpIcon("rag")}</th><th>${t("th.phase")}${helpIcon("phase")}</th><th>${t("th.elapsed")}</th><th>${t("th.loadTime")}${helpIcon("loadTime")}</th><th>${t("th.ttft")}${helpIcon("ttft")}</th><th>${t("th.tokensPromptGen")}${helpIcon("liveTokens")}</th><th>${t("th.reasoningTokens")}${helpIcon("liveTokens")}</th><th>${t("th.throughput")}${helpIcon("throughput")}</th><th>${t("th.cost")}${helpIcon("cost")}</th>
       </tr></thead><tbody>` + active.map(r => {
         const elapsed = Date.now()/1000 - r.started_at;
@@ -971,7 +971,7 @@ function render(data) {
           <td class="mono">${throughput}</td>
           <td class="mono" title="${esc(t("cost.hint.soFarOutputOnly"))}">${fmtUsd(r.estimated_output_cost_usd) ?? "–"} <span class="hint">${t("cost.soFar")}</span></td>
         </tr>`;
-      }).join("") + `</tbody></table></div>`);
+      }).join("") + `</tbody></table>`);
   }
 
   updateHistoryTable(data.model_history || []);
@@ -980,7 +980,7 @@ function render(data) {
   if (dls.length === 0) {
     safeSetHTML($("downloads-box"), `<div class="empty">${t("empty.noDownloads")}</div>`);
   } else {
-    safeSetHTML($("downloads-box"), `<div class="table-scroll"><table><thead><tr>
+    safeSetHTML($("downloads-box"), `<table><thead><tr>
       <th>${t("th.model")}</th><th>${t("th.status")}</th><th>${t("th.progress")}</th><th>${t("th.speed")}</th><th>${t("th.eta")}</th><th>${t("th.action")}</th>
       </tr></thead><tbody>` + dls.map(j => {
         const cancellable = j.state === "queued" || j.state === "resolving" || j.state === "downloading";
@@ -992,14 +992,14 @@ function render(data) {
         <td class="mono">${fmtDuration(j.eta_seconds)}</td>
         <td>${cancellable ? `<button class="btn danger cancel-download-btn" data-job-id="${esc(j.job_id)}" data-model="${esc(j.model)}">${t("action.cancelDownload")}</button>` : "–"}</td>
       </tr>`;
-      }).join("") + `</tbody></table></div>`);
+      }).join("") + `</tbody></table>`);
   }
 
   const recent = data.recent_requests || [];
   if (recent.length === 0) {
     safeSetHTML($("recent-box"), `<div class="empty">${t("empty.noRecentRequests")}</div>`);
   } else {
-    safeSetHTML($("recent-box"), `<div class="table-scroll"><table><thead><tr>
+    safeSetHTML($("recent-box"), `<table><thead><tr>
       <th>${t("th.time")}</th><th>${t("th.model")}</th><th>${t("th.app")}</th><th>${t("th.rag")}${helpIcon("rag")}</th><th>${t("th.status")}</th><th>${t("th.loadTime")}${helpIcon("loadTime")}</th><th>${t("th.duration")}</th><th>${t("th.ttft")}${helpIcon("ttft")}</th><th>${t("th.promptTokens")}${helpIcon("requestTokens")}</th><th>${t("th.complTokens")}${helpIcon("requestTokens")}</th><th>${t("th.throughput")}${helpIcon("avgThroughput")}</th><th>${t("th.cost")}${helpIcon("cost")}</th>
       </tr></thead><tbody>` + recent.map(r => {
         // Gleiche Formel wie bei Active Requests (siehe "throughput" oben):
@@ -1025,7 +1025,7 @@ function render(data) {
         <td class="mono">${avgThroughput}</td>
         <td class="mono">${fmtUsd(r.cost_usd) ?? "–"}</td>
       </tr>`;
-      }).join("") + `</tbody></table></div>`);
+      }).join("") + `</tbody></table>`);
   }
 
   latestCatalog = data.models_catalog || [];

@@ -235,7 +235,7 @@ COST_DASHBOARD_HTML = r"""<!doctype html>
 
   <section>
     <h2 data-i18n="cost.section.byModel">Cost by Model</h2>
-    <div id="by-model-box"></div>
+    <div id="by-model-box" class="table-scroll"></div>
   </section>
 
   <section>
@@ -482,14 +482,14 @@ function render(data) {
   if (byModel.length === 0) {
     safeSetHTML($("by-model-box"), `<div class="empty">${t("cost.empty.noRecords")}</div>`);
   } else {
-    safeSetHTML($("by-model-box"), `<div class="table-scroll"><table><thead><tr>
+    safeSetHTML($("by-model-box"), `<table><thead><tr>
       <th>${t("th.model")}</th><th class="num">${t("th.requests")}</th><th class="num">${t("cost.card.pricedRequests")}</th><th class="num">${t("th.cost")}</th>
       </tr></thead><tbody>` + byModel.map(m => `<tr>
         <td>${esc(m.model)}</td>
         <td class="mono num">${m.requests}</td>
         <td class="mono num">${m.priced_requests}</td>
         <td class="mono num">${fmtUsd(m.cost_usd) ?? "$0.00"}</td>
-      </tr>`).join("") + `</tbody></table></div>`);
+      </tr>`).join("") + `</tbody></table>`);
   }
 
   updateRecordsTable(records);
