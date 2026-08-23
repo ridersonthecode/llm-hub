@@ -251,6 +251,8 @@ DASHBOARD_HTML = r"""<!doctype html>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>vLLM Manager – Live Status</title>
+<link rel="stylesheet" href="/static/vendor/datatables/dataTables.dataTables.min.css">
+<link rel="stylesheet" href="/static/vendor/datatables/dataTables.inputPaging.min.css">
 <style>
   :root {
     --bg:#f5f6f8; --panel:#ffffff; --panel-2:#eef0f4; --border:#dfe3ea;
@@ -391,6 +393,55 @@ DASHBOARD_HTML = r"""<!doctype html>
   }
   .help-icon:hover { background:var(--accent-bg); color:var(--accent); border-color:var(--accent); }
   #help-modal-body { white-space:pre-line; line-height:1.6; font-size:14px; margin:0; }
+  .app-footer {
+    margin-top:32px; padding-top:16px; border-top:1px solid var(--border);
+    display:flex; align-items:center; justify-content:center; gap:6px;
+    font-size:12px; color:var(--text-dim); flex-wrap:wrap;
+  }
+  .app-footer a { display:inline-flex; align-items:center; gap:4px; color:var(--text-dim); text-decoration:none; }
+  .app-footer a:hover { color:var(--accent); }
+  .app-footer img { width:16px; height:16px; border-radius:50%; object-fit:cover; flex:0 0 auto; }
+  .app-footer .claude-mark { display:inline-flex; align-items:center; gap:4px; }
+  .app-footer .sep { opacity:.5; }
+
+  /* DataTables: an das App-Theme anpassen (Bibliothek unter /static/vendor/datatables/, siehe README dort).
+     Farben laufen wo moeglich ueber die von DataTables selbst vorgesehenen
+     --dt-*-Variablen (siehe dataTables.dataTables.css) statt eigener Selektor-
+     Overrides - deren Original-Regeln haben oft hoehere Spezifitaet als ein
+     einfacher Klassen-Override, egal in welcher Reihenfolge im Dokument. */
+  :root {
+    --dt-control_color: var(--text-dim);
+    --dt-body_border: 1px solid var(--border);
+    --dt-header_border: 1px solid var(--border);
+    --dt-footer_border: 1px solid var(--border);
+    --dt-input_background: var(--panel);
+    --dt-input_border: 1px solid var(--border);
+    --dt-input_border-radius: 6px;
+    --dt-input_color: var(--text);
+    --dt-paging-button_background: var(--panel);
+    --dt-paging-button_background-hover: var(--panel-2);
+    --dt-paging-button_background-current: var(--accent);
+    --dt-paging-button_background-current-hover: var(--accent);
+    --dt-paging-button_background-disabled: transparent;
+    --dt-paging-button_border: 1px solid var(--border);
+    --dt-paging-button_border-hover: 1px solid var(--border);
+    --dt-paging-button_border-current: 1px solid var(--accent);
+    --dt-paging-button_border-current-hover: 1px solid var(--accent);
+    --dt-paging-button_border-disabled: 1px solid transparent;
+    --dt-paging-button_border-radius: 6px;
+    --dt-paging-button_color: var(--text);
+    --dt-paging-button_color-hover: var(--text);
+    --dt-paging-button_color-current: #fff;
+    --dt-paging-button_color-current-hover: #fff;
+    --dt-paging-button_color-disabled: var(--text-dim);
+  }
+  .dt-container { color:var(--text); font-family:inherit; margin-top:10px; }
+  .dt-container .dt-length select, .dt-paging-input input {
+    background:var(--panel); border:1px solid var(--border); color:var(--text);
+    border-radius:6px; padding:4px 6px; font-size:13px;
+  }
+  .dt-paging-input input { width:3.5em; text-align:center; }
+  table.dataTable tbody tr:hover td { background:var(--panel-2); }
 </style>
 </head>
 <body>
@@ -466,7 +517,7 @@ DASHBOARD_HTML = r"""<!doctype html>
 
   <section>
     <h2 data-i18n="section.modelHistory">Model History</h2>
-    <div id="history-box"></div>
+    <table id="history-table" class="display" style="width:100%"></table>
   </section>
 
   <section>
@@ -504,6 +555,22 @@ DASHBOARD_HTML = r"""<!doctype html>
     </div>
   </div>
 
+  <footer class="app-footer">
+    <span>© 2026</span>
+    <a href="https://github.com/ridersonthecode" target="_blank" rel="noopener noreferrer" title="ridersonthecode on GitHub">
+      <img src="https://github.com/ridersonthecode.png?s=64" alt="ridersonthecode" loading="lazy">
+      ridersonthecode
+    </a>
+    <span class="sep">·</span>
+    <span class="claude-mark" title="Entwickelt mit Claude Code">
+      <img src="https://claude.ai/images/claude_app_icon.png" alt="Claude" loading="lazy">
+      Entwickelt mit Claude Code
+    </span>
+  </footer>
+
+<script src="/static/vendor/datatables/dataTables.min.js"></script>
+<script src="/static/vendor/datatables/dataTables.dataTables.min.js"></script>
+<script src="/static/vendor/datatables/dataTables.inputPaging.min.js"></script>
 <script>
 const $ = (id) => document.getElementById(id);
 
@@ -566,6 +633,7 @@ $("lang-select").addEventListener("change", (e) => {
   currentLang = e.target.value;
   localStorage.setItem("vllm_dashboard_lang", currentLang);
   applyStaticI18n();
+  initHistoryTable();
   if (latestSnapshot) render(latestSnapshot);
 });
 
@@ -667,6 +735,65 @@ function reasonBadgeClass(r) {
   return "idle";
 }
 function jobStateLabel(s) { return (TRANSLATIONS[currentLang] || {})["job." + s] !== undefined || (TRANSLATIONS[DEFAULT_LANG] || {})["job." + s] !== undefined ? t("job." + s) : esc(s); }
+
+// --- Model History (DataTables, siehe /static/vendor/datatables/README.md) -
+// Rollierendes Log (process_manager.MAX_HISTORY=50) - wächst laufend weiter,
+// daher paginiert statt als eine lange Liste. Spaltentitel/Leertext hängen
+// von der Sprache ab -> bei Sprachwechsel komplett neu aufgebaut (siehe
+// lang-select-Handler unten), statt Header live zu patchen.
+let historyTable = null;
+let historyFingerprint = null;
+
+function initHistoryTable() {
+  if (historyTable) { historyTable.destroy(); $("history-table").innerHTML = ""; }
+  historyFingerprint = null;
+  historyTable = new DataTable("#history-table", {
+    data: [],
+    order: [],
+    pageLength: 10,
+    layout: { bottomEnd: "inputPaging" },
+    language: { emptyTable: t("empty.noHistory") },
+    columns: [
+      { title: t("th.model"), data: null, render: (h, type) => type === "display" ? esc(modelName(h.model)) : (modelName(h.model) || "") },
+      {
+        title: t("th.status"), data: null, render: (h, type) => {
+          if (type !== "display") return h.reason || "";
+          const errHint = h.error ? `<div class="hint" style="margin-top:4px;">${esc(h.error.split("\n")[0])}</div>` : "";
+          return `<span class="badge ${reasonBadgeClass(h.reason)}">${reasonLabel(h.reason)}</span>${errHint}`;
+        },
+      },
+      {
+        title: t("th.loadedAt"), data: null, render: (h, type) => {
+          if (type !== "display") return h.loaded_at ?? 0;
+          return h.loaded_at ? new Date(h.loaded_at * 1000).toLocaleTimeString(localeFor(currentLang)) : "–";
+        },
+      },
+      {
+        title: t("th.unloadedAt"), data: null, render: (h, type) => {
+          const ongoing = h.unloaded_at === null || h.unloaded_at === undefined;
+          if (type !== "display") return ongoing ? Number.MAX_SAFE_INTEGER : h.unloaded_at;
+          return ongoing ? "–" : new Date(h.unloaded_at * 1000).toLocaleTimeString(localeFor(currentLang));
+        },
+      },
+      {
+        title: t("th.duration"), data: null, render: (h, type) => {
+          const ongoing = h.unloaded_at === null || h.unloaded_at === undefined;
+          const seconds = ongoing ? (h.loaded_at ? (Date.now() / 1000 - h.loaded_at) : null) : h.duration_seconds;
+          return type !== "display" ? (seconds ?? 0) : fmtDuration(seconds);
+        },
+      },
+    ],
+  });
+}
+
+function updateHistoryTable(hist) {
+  const fp = JSON.stringify(hist);
+  if (fp === historyFingerprint) return;
+  historyFingerprint = fp;
+  historyTable.clear();
+  historyTable.rows.add(hist);
+  historyTable.draw(false);
+}
 
 // Status einer abgeschlossenen Anfrage (Letzte Anfragen) - "aborted_loop"
 // (siehe main.py _has_repetition_loop) bekommt eine eigene, erkennbare
@@ -847,27 +974,7 @@ function render(data) {
       }).join("") + `</tbody></table></div>`);
   }
 
-  const hist = data.model_history || [];
-  if (hist.length === 0) {
-    safeSetHTML($("history-box"), `<div class="empty">${t("empty.noHistory")}</div>`);
-  } else {
-    safeSetHTML($("history-box"), `<div class="table-scroll"><table><thead><tr>
-      <th>${t("th.model")}</th><th>${t("th.status")}</th><th>${t("th.loadedAt")}</th><th>${t("th.unloadedAt")}</th><th>${t("th.duration")}</th>
-      </tr></thead><tbody>` + hist.map(h => {
-        const ongoing = h.unloaded_at === null || h.unloaded_at === undefined;
-        const duration = ongoing
-          ? fmtDuration(h.loaded_at ? (Date.now()/1000 - h.loaded_at) : null)
-          : fmtDuration(h.duration_seconds);
-        const errHint = h.error ? `<div class="hint" style="margin-top:4px;">${esc(h.error.split("\n")[0])}</div>` : "";
-        return `<tr>
-        <td>${esc(modelName(h.model))}</td>
-        <td><span class="badge ${reasonBadgeClass(h.reason)}">${reasonLabel(h.reason)}</span>${errHint}</td>
-        <td class="mono">${h.loaded_at ? new Date(h.loaded_at*1000).toLocaleTimeString(localeFor(currentLang)) : "–"}</td>
-        <td class="mono">${ongoing ? "–" : new Date(h.unloaded_at*1000).toLocaleTimeString(localeFor(currentLang))}</td>
-        <td class="mono">${duration}</td>
-      </tr>`;
-      }).join("") + `</tbody></table></div>`);
-  }
+  updateHistoryTable(data.model_history || []);
 
   const dls = data.downloads || [];
   if (dls.length === 0) {
@@ -1225,6 +1332,7 @@ function connect() {
 
 populateLangSelect();
 applyStaticI18n();
+initHistoryTable();
 connect();
 </script>
 </body>

@@ -28,6 +28,8 @@ CONFIG_DASHBOARD_HTML = r"""<!doctype html>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>vLLM Manager – Config</title>
+<link rel="stylesheet" href="/static/vendor/datatables/dataTables.dataTables.min.css">
+<link rel="stylesheet" href="/static/vendor/datatables/dataTables.inputPaging.min.css">
 <style>
   :root {
     --bg:#f5f6f8; --panel:#ffffff; --panel-2:#eef0f4; --border:#dfe3ea;
@@ -141,6 +143,55 @@ CONFIG_DASHBOARD_HTML = r"""<!doctype html>
     color:var(--text-dim); font-size:20px; cursor:pointer; line-height:1;
   }
   #help-modal-body { white-space:pre-line; line-height:1.6; font-size:14px; margin:0; }
+  .app-footer {
+    margin-top:32px; padding-top:16px; border-top:1px solid var(--border);
+    display:flex; align-items:center; justify-content:center; gap:6px;
+    font-size:12px; color:var(--text-dim); flex-wrap:wrap;
+  }
+  .app-footer a { display:inline-flex; align-items:center; gap:4px; color:var(--text-dim); text-decoration:none; }
+  .app-footer a:hover { color:var(--accent); }
+  .app-footer img { width:16px; height:16px; border-radius:50%; object-fit:cover; flex:0 0 auto; }
+  .app-footer .claude-mark { display:inline-flex; align-items:center; gap:4px; }
+  .app-footer .sep { opacity:.5; }
+
+  /* DataTables: an das App-Theme anpassen (Bibliothek unter /static/vendor/datatables/, siehe README dort).
+     Farben laufen wo moeglich ueber die von DataTables selbst vorgesehenen
+     --dt-*-Variablen (siehe dataTables.dataTables.css) statt eigener Selektor-
+     Overrides - deren Original-Regeln haben oft hoehere Spezifitaet als ein
+     einfacher Klassen-Override, egal in welcher Reihenfolge im Dokument. */
+  :root {
+    --dt-control_color: var(--text-dim);
+    --dt-body_border: 1px solid var(--border);
+    --dt-header_border: 1px solid var(--border);
+    --dt-footer_border: 1px solid var(--border);
+    --dt-input_background: var(--panel);
+    --dt-input_border: 1px solid var(--border);
+    --dt-input_border-radius: 6px;
+    --dt-input_color: var(--text);
+    --dt-paging-button_background: var(--panel);
+    --dt-paging-button_background-hover: var(--panel-2);
+    --dt-paging-button_background-current: var(--accent);
+    --dt-paging-button_background-current-hover: var(--accent);
+    --dt-paging-button_background-disabled: transparent;
+    --dt-paging-button_border: 1px solid var(--border);
+    --dt-paging-button_border-hover: 1px solid var(--border);
+    --dt-paging-button_border-current: 1px solid var(--accent);
+    --dt-paging-button_border-current-hover: 1px solid var(--accent);
+    --dt-paging-button_border-disabled: 1px solid transparent;
+    --dt-paging-button_border-radius: 6px;
+    --dt-paging-button_color: var(--text);
+    --dt-paging-button_color-hover: var(--text);
+    --dt-paging-button_color-current: #fff;
+    --dt-paging-button_color-current-hover: #fff;
+    --dt-paging-button_color-disabled: var(--text-dim);
+  }
+  .dt-container { color:var(--text); font-family:inherit; margin-top:10px; }
+  .dt-container .dt-length select, .dt-paging-input input {
+    background:var(--panel); border:1px solid var(--border); color:var(--text);
+    border-radius:6px; padding:4px 6px; font-size:13px;
+  }
+  .dt-paging-input input { width:3.5em; text-align:center; }
+  table.dataTable tbody tr:hover td { background:var(--panel-2); }
 </style>
 </head>
 <body>
@@ -335,6 +386,16 @@ CONFIG_DASHBOARD_HTML = r"""<!doctype html>
           <input type="number" id="f-rag_auto_rag_min_score" min="0" max="1" step="0.05">
         </div>
       </div>
+      <div class="row">
+        <div>
+          <label><span data-i18n="cfg.field.lessonsLearnedCollection">Lessons Learned collection</span><span class="help-icon" data-help="cfg_lessonsLearnedCollection" data-i18n-title="help.clickForInfo" title="Click for more info">?</span></label>
+          <input type="text" id="f-rag_lessons_learned_collection">
+        </div>
+      </div>
+      <div class="check-row">
+        <input type="checkbox" id="f-rag_lessons_learned_auto_inject">
+        <label for="f-rag_lessons_learned_auto_inject" data-i18n="cfg.field.lessonsLearnedAutoInject">Auto-inject Lessons Learned into every request</label><span class="help-icon" data-help="cfg_lessonsLearnedAutoInject" data-i18n-title="help.clickForInfo" title="Click for more info">?</span>
+      </div>
     </div>
   </section>
 
@@ -348,9 +409,25 @@ CONFIG_DASHBOARD_HTML = r"""<!doctype html>
 
   <section>
     <h2 data-i18n="cfg.section.backups">Backups</h2>
-    <div id="backups-box"></div>
+    <table id="backups-table" class="display" style="width:100%"></table>
   </section>
 
+  <footer class="app-footer">
+    <span>© 2026</span>
+    <a href="https://github.com/ridersonthecode" target="_blank" rel="noopener noreferrer" title="ridersonthecode on GitHub">
+      <img src="https://github.com/ridersonthecode.png?s=64" alt="ridersonthecode" loading="lazy">
+      ridersonthecode
+    </a>
+    <span class="sep">·</span>
+    <span class="claude-mark" title="Entwickelt mit Claude Code">
+      <img src="https://claude.ai/images/claude_app_icon.png" alt="Claude" loading="lazy">
+      Entwickelt mit Claude Code
+    </span>
+  </footer>
+
+<script src="/static/vendor/datatables/dataTables.min.js"></script>
+<script src="/static/vendor/datatables/dataTables.dataTables.min.js"></script>
+<script src="/static/vendor/datatables/dataTables.inputPaging.min.js"></script>
 <script>
 const $ = (id) => document.getElementById(id);
 
@@ -409,6 +486,7 @@ $("lang-select").addEventListener("change", (e) => {
   localStorage.setItem("vllm_dashboard_lang", currentLang);
   applyStaticI18n();
   renderModels();
+  initBackupsTable();
   renderBackups();
 });
 
@@ -535,6 +613,8 @@ function renderForm() {
   $("f-rag_chunk_overlap_chars").value = rag.chunk_overlap_chars ?? 200;
   $("f-rag_auto_rag_top_k").value = rag.auto_rag_top_k ?? 3;
   $("f-rag_auto_rag_min_score").value = rag.auto_rag_min_score ?? 0.5;
+  $("f-rag_lessons_learned_collection").value = rag.lessons_learned_collection ?? "lessons_learned";
+  $("f-rag_lessons_learned_auto_inject").checked = rag.lessons_learned_auto_inject !== false;
 
   populateModelSelects();
   $("f-default_model").value = state.default_model ?? "";
@@ -548,6 +628,7 @@ function renderForm() {
     + "#f-pricing_input_per_mtok,#f-pricing_output_per_mtok,"
     + "#f-rag_enabled,#f-rag_qdrant_host,#f-rag_qdrant_port,#f-rag_default_collection,"
     + "#f-rag_chunk_size_chars,#f-rag_chunk_overlap_chars,#f-rag_auto_rag_top_k,#f-rag_auto_rag_min_score,"
+    + "#f-rag_lessons_learned_collection,#f-rag_lessons_learned_auto_inject,"
     + "#f-default_model,#f-rag_embedding_model")
     .forEach(el => { el.oninput = markDirty; el.onchange = markDirty; });
 }
@@ -947,6 +1028,8 @@ function buildPayload() {
       chunk_overlap_chars: parseInt($("f-rag_chunk_overlap_chars").value, 10),
       auto_rag_top_k: parseInt($("f-rag_auto_rag_top_k").value, 10),
       auto_rag_min_score: parseFloat($("f-rag_auto_rag_min_score").value),
+      lessons_learned_collection: $("f-rag_lessons_learned_collection").value,
+      lessons_learned_auto_inject: $("f-rag_lessons_learned_auto_inject").checked,
     },
   };
 }
@@ -1049,38 +1132,56 @@ async function loadBackups() {
   backupsCache = data.backups || [];
   renderBackups();
 }
-function renderBackups() {
-  const box = $("backups-box");
-  if (backupsCache.length === 0) {
-    box.innerHTML = `<div class="empty">${t("cfg.status.noBackups")}</div>`;
-    return;
-  }
-  box.innerHTML = `<div class="table-scroll"><table><thead><tr>
-    <th>${t("th.time")}</th><th>${t("cfg.th.filename")}</th><th>${t("cfg.th.size")}</th><th>${t("th.action")}</th>
-    </tr></thead><tbody>` + backupsCache.map(b => `<tr>
-      <td class="mono">${new Date(b.modified_at * 1000).toLocaleString(currentLang === "de" ? "de-DE" : "en-US")}</td>
-      <td class="mono">${esc(b.filename)}</td>
-      <td class="mono">${(b.size / 1024).toFixed(1)} KB</td>
-      <td><button class="btn b-restore" data-filename="${esc(b.filename)}">${t("cfg.action.restore")}</button></td>
-    </tr>`).join("") + `</tbody></table></div>`;
-  document.querySelectorAll(".b-restore").forEach(el => {
-    el.addEventListener("click", async () => {
-      const filename = el.dataset.filename;
-      if (!confirm(t("confirm.restoreBackup", { name: filename }))) return;
-      const statusEl = $("save-status");
-      try {
-        const res = await fetch("/config/restore", { method: "POST", headers: authHeaders(), body: JSON.stringify({ filename }) });
-        const data = await res.json();
-        if (!res.ok) throw new Error(formatValidationError(data.detail ?? data));
-        statusEl.className = "status-msg ok";
-        statusEl.textContent = t("cfg.status.restored");
-        await loadConfig();
-      } catch (e) {
-        statusEl.className = "status-msg error";
-        statusEl.textContent = t("cfg.status.saveFailed", { msg: e.message });
-      }
+// --- Backups (DataTables, siehe /static/vendor/datatables/README.md) -------
+// config-broken-*-Backups (siehe config_editor.py _quarantine_broken_config)
+// werden nie automatisch aufgeräumt, die Liste kann also unbegrenzt wachsen -
+// daher paginiert. Spaltentitel hängen von der Sprache ab -> bei Sprachwechsel
+// komplett neu aufgebaut (siehe lang-select-Handler oben).
+let backupsTable = null;
+
+function initBackupsTable() {
+  if (backupsTable) { backupsTable.destroy(); $("backups-table").innerHTML = ""; }
+  backupsTable = new DataTable("#backups-table", {
+    data: [],
+    order: [],
+    pageLength: 10,
+    layout: { bottomEnd: "inputPaging" },
+    language: { emptyTable: t("cfg.status.noBackups") },
+    columns: [
+      { title: t("th.time"), data: null, render: (b, type) => type !== "display" ? b.modified_at : new Date(b.modified_at * 1000).toLocaleString(currentLang === "de" ? "de-DE" : "en-US") },
+      { title: t("cfg.th.filename"), data: null, render: (b, type) => type === "display" ? esc(b.filename) : (b.filename || "") },
+      { title: t("cfg.th.size"), data: null, render: (b, type) => type !== "display" ? b.size : (b.size / 1024).toFixed(1) + " KB" },
+      { title: t("th.action"), data: null, orderable: false, render: (b) => `<button class="btn b-restore" data-filename="${esc(b.filename)}">${t("cfg.action.restore")}</button>` },
+    ],
+  });
+  // Restore-Buttons werden bei jedem draw() (auch beim Seitenwechsel) neu
+  // erzeugt - Listener daher hier statt einmalig binden.
+  backupsTable.on("draw", () => {
+    document.querySelectorAll("#backups-table .b-restore").forEach(el => {
+      el.addEventListener("click", async () => {
+        const filename = el.dataset.filename;
+        if (!confirm(t("confirm.restoreBackup", { name: filename }))) return;
+        const statusEl = $("save-status");
+        try {
+          const res = await fetch("/config/restore", { method: "POST", headers: authHeaders(), body: JSON.stringify({ filename }) });
+          const data = await res.json();
+          if (!res.ok) throw new Error(formatValidationError(data.detail ?? data));
+          statusEl.className = "status-msg ok";
+          statusEl.textContent = t("cfg.status.restored");
+          await loadConfig();
+        } catch (e) {
+          statusEl.className = "status-msg error";
+          statusEl.textContent = t("cfg.status.saveFailed", { msg: e.message });
+        }
+      });
     });
   });
+}
+
+function renderBackups() {
+  backupsTable.clear();
+  backupsTable.rows.add(backupsCache);
+  backupsTable.draw(false);
 }
 
 window.addEventListener("beforeunload", (e) => {
@@ -1089,6 +1190,7 @@ window.addEventListener("beforeunload", (e) => {
 
 populateLangSelect();
 applyStaticI18n();
+initBackupsTable();
 loadConfig();
 </script>
 </body>

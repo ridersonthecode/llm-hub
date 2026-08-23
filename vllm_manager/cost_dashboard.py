@@ -77,6 +77,8 @@ COST_DASHBOARD_HTML = r"""<!doctype html>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>vLLM Manager – Costs</title>
+<link rel="stylesheet" href="/static/vendor/datatables/dataTables.dataTables.min.css">
+<link rel="stylesheet" href="/static/vendor/datatables/dataTables.inputPaging.min.css">
 <style>
   :root {
     --bg:#f5f6f8; --panel:#ffffff; --panel-2:#eef0f4; --border:#dfe3ea;
@@ -141,6 +143,55 @@ COST_DASHBOARD_HTML = r"""<!doctype html>
   .actions-row .spacer { flex:1; }
   input[type=checkbox] { width:15px; height:15px; cursor:pointer; }
   .unpriced { color:var(--text-dim); }
+  .app-footer {
+    margin-top:32px; padding-top:16px; border-top:1px solid var(--border);
+    display:flex; align-items:center; justify-content:center; gap:6px;
+    font-size:12px; color:var(--text-dim); flex-wrap:wrap;
+  }
+  .app-footer a { display:inline-flex; align-items:center; gap:4px; color:var(--text-dim); text-decoration:none; }
+  .app-footer a:hover { color:var(--accent); }
+  .app-footer img { width:16px; height:16px; border-radius:50%; object-fit:cover; flex:0 0 auto; }
+  .app-footer .claude-mark { display:inline-flex; align-items:center; gap:4px; }
+  .app-footer .sep { opacity:.5; }
+
+  /* DataTables: an das App-Theme anpassen (Bibliothek unter /static/vendor/datatables/, siehe README dort).
+     Farben laufen wo moeglich ueber die von DataTables selbst vorgesehenen
+     --dt-*-Variablen (siehe dataTables.dataTables.css) statt eigener Selektor-
+     Overrides - deren Original-Regeln haben oft hoehere Spezifitaet als ein
+     einfacher Klassen-Override, egal in welcher Reihenfolge im Dokument. */
+  :root {
+    --dt-control_color: var(--text-dim);
+    --dt-body_border: 1px solid var(--border);
+    --dt-header_border: 1px solid var(--border);
+    --dt-footer_border: 1px solid var(--border);
+    --dt-input_background: var(--panel);
+    --dt-input_border: 1px solid var(--border);
+    --dt-input_border-radius: 6px;
+    --dt-input_color: var(--text);
+    --dt-paging-button_background: var(--panel);
+    --dt-paging-button_background-hover: var(--panel-2);
+    --dt-paging-button_background-current: var(--accent);
+    --dt-paging-button_background-current-hover: var(--accent);
+    --dt-paging-button_background-disabled: transparent;
+    --dt-paging-button_border: 1px solid var(--border);
+    --dt-paging-button_border-hover: 1px solid var(--border);
+    --dt-paging-button_border-current: 1px solid var(--accent);
+    --dt-paging-button_border-current-hover: 1px solid var(--accent);
+    --dt-paging-button_border-disabled: 1px solid transparent;
+    --dt-paging-button_border-radius: 6px;
+    --dt-paging-button_color: var(--text);
+    --dt-paging-button_color-hover: var(--text);
+    --dt-paging-button_color-current: #fff;
+    --dt-paging-button_color-current-hover: #fff;
+    --dt-paging-button_color-disabled: var(--text-dim);
+  }
+  .dt-container { color:var(--text); font-family:inherit; margin-top:10px; }
+  .dt-container .dt-length select, .dt-paging-input input {
+    background:var(--panel); border:1px solid var(--border); color:var(--text);
+    border-radius:6px; padding:4px 6px; font-size:13px;
+  }
+  .dt-paging-input input { width:3.5em; text-align:center; }
+  table.dataTable tbody tr:hover td { background:var(--panel-2); }
 </style>
 </head>
 <body>
@@ -195,9 +246,25 @@ COST_DASHBOARD_HTML = r"""<!doctype html>
       <div class="spacer"></div>
       <span class="hint" id="records-status"></span>
     </div>
-    <div id="records-box"></div>
+    <table id="records-table" class="display" style="width:100%"></table>
   </section>
 
+  <footer class="app-footer">
+    <span>© 2026</span>
+    <a href="https://github.com/ridersonthecode" target="_blank" rel="noopener noreferrer" title="ridersonthecode on GitHub">
+      <img src="https://github.com/ridersonthecode.png?s=64" alt="ridersonthecode" loading="lazy">
+      ridersonthecode
+    </a>
+    <span class="sep">·</span>
+    <span class="claude-mark" title="Entwickelt mit Claude Code">
+      <img src="https://claude.ai/images/claude_app_icon.png" alt="Claude" loading="lazy">
+      Entwickelt mit Claude Code
+    </span>
+  </footer>
+
+<script src="/static/vendor/datatables/dataTables.min.js"></script>
+<script src="/static/vendor/datatables/dataTables.dataTables.min.js"></script>
+<script src="/static/vendor/datatables/dataTables.inputPaging.min.js"></script>
 <script>
 const $ = (id) => document.getElementById(id);
 
@@ -252,6 +319,7 @@ $("lang-select").addEventListener("change", (e) => {
   currentLang = e.target.value;
   localStorage.setItem("vllm_dashboard_lang", currentLang);
   applyStaticI18n();
+  initRecordsTable();
   if (latestSnapshot) render(latestSnapshot);
 });
 function updateConnText() { $("conn-text").textContent = t("nav." + connState); }
@@ -308,6 +376,98 @@ function updateDeleteBtn() {
   btn.textContent = t("cost.action.deleteSelected", { n: selected.size });
 }
 
+// --- All Requests (DataTables, siehe /static/vendor/datatables/README.md) --
+// costs.jsonl wächst dauerhaft (nie automatisch aufgeräumt, siehe
+// cost_tracker.py) - daher paginiert statt als eine lange Liste. Spaltentitel
+// hängen von der Sprache ab -> bei Sprachwechsel komplett neu aufgebaut (siehe
+// lang-select-Handler unten).
+let recordsTable = null;
+let recordsFingerprint = null;
+let currentRecords = [];
+
+function initRecordsTable() {
+  if (recordsTable) { recordsTable.destroy(); $("records-table").innerHTML = ""; }
+  recordsFingerprint = null;
+  recordsTable = new DataTable("#records-table", {
+    data: [],
+    order: [],
+    pageLength: 25,
+    layout: { bottomEnd: "inputPaging" },
+    language: { emptyTable: t("cost.empty.noRecords") },
+    columns: [
+      {
+        title: `<input type="checkbox" id="select-all-cb">`, data: null, orderable: false,
+        render: (r) => `<input type="checkbox" class="row-cb" data-id="${esc(r.id)}" ${selected.has(r.id) ? "checked" : ""}>`,
+      },
+      { title: t("th.time"), data: null, render: (r, type) => type !== "display" ? r.finished_at : new Date(r.finished_at * 1000).toLocaleString(localeFor(currentLang)) },
+      { title: t("th.model"), data: null, render: (r, type) => type === "display" ? esc(r.model) : (r.model || "") },
+      { title: t("th.app"), data: null, orderable: false, render: (r) => appCell(r.user_agent) },
+      { title: t("th.endpoint"), data: null, render: (r, type) => type === "display" ? esc(r.path || "–") : (r.path || "") },
+      { title: t("th.promptTokens"), data: null, render: (r, type) => type !== "display" ? (r.prompt_tokens ?? -1) : (r.prompt_tokens ?? "–") },
+      { title: t("th.complTokens"), data: null, render: (r, type) => type !== "display" ? (r.completion_tokens ?? -1) : (r.completion_tokens ?? "–") },
+      {
+        title: t("th.cost"), data: null,
+        render: (r, type) => {
+          if (type !== "display") return r.cost_usd ?? -1;
+          const cost = fmtUsd(r.cost_usd);
+          return cost !== null
+            ? `<span title="${esc(t("cost.hint.rateTooltip", { in: r.pricing_input_per_mtok, out: r.pricing_output_per_mtok }))}">${cost}</span>`
+            : `<span class="unpriced" title="${esc(t("cost.hint.noUsage"))}">–</span>`;
+        },
+      },
+      {
+        title: t("th.status"), data: null,
+        render: (r, type) => type !== "display" ? r.status : `<span class="badge ${r.status === 'ok' ? 'ok' : 'error'}">${r.status === 'ok' ? t("status.ok") : t("status.error")}</span>`,
+      },
+      { title: "", data: null, orderable: false, render: (r) => `<button class="row-del" data-id="${esc(r.id)}" title="${esc(t('action.delete'))}">🗑</button>` },
+    ],
+  });
+
+  // Select-all: EIN Header-Element, bleibt über draw()-Aufrufe hinweg erhalten
+  // (nur tbody wird pro draw() neu erzeugt) - Listener daher nur einmal hier
+  // binden. Wirkt bewusst auf ALLE Datensätze, nicht nur die sichtbare Seite -
+  // entspricht dem bisherigen Verhalten vor der Pagination.
+  $("select-all-cb").addEventListener("change", (e) => {
+    if (e.target.checked) currentRecords.forEach(r => selected.add(r.id));
+    else selected.clear();
+    document.querySelectorAll("#records-table tbody .row-cb").forEach(cb => { cb.checked = selected.has(cb.dataset.id); });
+    updateDeleteBtn();
+  });
+
+  // Zeilen-Checkboxen/Löschen-Buttons werden bei jedem draw() (auch beim
+  // Seitenwechsel) neu erzeugt - Listener daher hier statt einmalig binden.
+  recordsTable.on("draw", () => {
+    document.querySelectorAll("#records-table tbody .row-cb").forEach(cb => {
+      cb.addEventListener("change", (e) => {
+        const id = e.target.dataset.id;
+        if (e.target.checked) selected.add(id); else selected.delete(id);
+        $("select-all-cb").checked = currentRecords.length > 0 && currentRecords.every(r => selected.has(r.id));
+        updateDeleteBtn();
+      });
+    });
+    document.querySelectorAll("#records-table tbody .row-del").forEach(btn => {
+      btn.addEventListener("click", () => deleteOne(btn.dataset.id));
+    });
+  });
+}
+
+function updateRecordsTable(records) {
+  // Auswahl bereinigen: Datensätze, die nicht mehr existieren (gelöscht/reset), rausnehmen.
+  const stillThere = new Set(records.map(r => r.id));
+  selected = new Set([...selected].filter(id => stillThere.has(id)));
+  currentRecords = records;
+
+  $("select-all-cb").checked = records.length > 0 && records.every(r => selected.has(r.id));
+  updateDeleteBtn();
+
+  const fp = JSON.stringify(records);
+  if (fp === recordsFingerprint) return;
+  recordsFingerprint = fp;
+  recordsTable.clear();
+  recordsTable.rows.add(records);
+  recordsTable.draw(false);
+}
+
 function render(data) {
   latestSnapshot = data;
   const summary = data.summary || {};
@@ -332,61 +492,7 @@ function render(data) {
       </tr>`).join("") + `</tbody></table></div>`);
   }
 
-  // Auswahl bereinigen: Datensätze, die nicht mehr existieren (gelöscht/reset), rausnehmen.
-  const stillThere = new Set(records.map(r => r.id));
-  selected = new Set([...selected].filter(id => stillThere.has(id)));
-
-  if (records.length === 0) {
-    safeSetHTML($("records-box"), `<div class="empty">${t("cost.empty.noRecords")}</div>`);
-  } else {
-    const allSelected = records.length > 0 && records.every(r => selected.has(r.id));
-    const recordsHtml = `<div class="table-scroll"><table><thead><tr>
-      <th><input type="checkbox" id="select-all-cb" ${allSelected ? "checked" : ""}></th>
-      <th>${t("th.time")}</th><th>${t("th.model")}</th><th>${t("th.app")}</th><th>${t("th.endpoint")}</th>
-      <th class="num">${t("th.promptTokens")}</th><th class="num">${t("th.complTokens")}</th>
-      <th class="num">${t("th.cost")}</th><th>${t("th.status")}</th><th></th>
-      </tr></thead><tbody>` + records.map(r => {
-        const cost = fmtUsd(r.cost_usd);
-        const costCell = cost !== null
-          ? `<span title="${esc(t("cost.hint.rateTooltip", { in: r.pricing_input_per_mtok, out: r.pricing_output_per_mtok }))}">${cost}</span>`
-          : `<span class="unpriced" title="${esc(t("cost.hint.noUsage"))}">–</span>`;
-        return `<tr>
-          <td><input type="checkbox" class="row-cb" data-id="${esc(r.id)}" ${selected.has(r.id) ? "checked" : ""}></td>
-          <td class="mono">${new Date(r.finished_at*1000).toLocaleString(localeFor(currentLang))}</td>
-          <td>${esc(r.model)}</td>
-          <td class="mono">${appCell(r.user_agent)}</td>
-          <td class="mono">${esc(r.path || "–")}</td>
-          <td class="mono num">${r.prompt_tokens ?? "–"}</td>
-          <td class="mono num">${r.completion_tokens ?? "–"}</td>
-          <td class="mono num">${costCell}</td>
-          <td><span class="badge ${r.status === 'ok' ? 'ok' : 'error'}">${r.status === 'ok' ? t("status.ok") : t("status.error")}</span></td>
-          <td><button class="row-del" data-id="${esc(r.id)}" title="${esc(t('action.delete'))}">🗑</button></td>
-        </tr>`;
-      }).join("") + `</tbody></table></div>`;
-
-    // Event-Listener nur neu binden, wenn safeSetHTML das DOM auch wirklich
-    // ersetzt hat - sonst würden bei jedem Tick doppelte Listener anfallen
-    // bzw. (im übersprungenen Fall) gar keine Elemente zum Binden existieren.
-    if (safeSetHTML($("records-box"), recordsHtml)) {
-      $("select-all-cb").addEventListener("change", (e) => {
-        if (e.target.checked) records.forEach(r => selected.add(r.id));
-        else selected.clear();
-        render(latestSnapshot);
-      });
-      document.querySelectorAll(".row-cb").forEach(cb => {
-        cb.addEventListener("change", (e) => {
-          const id = e.target.dataset.id;
-          if (e.target.checked) selected.add(id); else selected.delete(id);
-          updateDeleteBtn();
-        });
-      });
-      document.querySelectorAll(".row-del").forEach(btn => {
-        btn.addEventListener("click", () => deleteOne(btn.dataset.id));
-      });
-    }
-  }
-
-  updateDeleteBtn();
+  updateRecordsTable(records);
 }
 
 // --- Aktionen --------------------------------------------------------------
@@ -460,6 +566,7 @@ function connect() {
 
 populateLangSelect();
 applyStaticI18n();
+initRecordsTable();
 connect();
 </script>
 </body>

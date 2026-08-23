@@ -190,16 +190,30 @@ async def apply_auto_rag(model: str, messages: list) -> Optional[dict]:
     (OpenAI-API wie VS Code, Ollama-API-Alt-Tools) davon profitieren, ohne
     selbst irgendetwas Besonderes unterstützen zu müssen.
 
+    Durchsucht - unabhängig von der modell-eigenen rag_collection - zusätzlich
+    IMMER auch die Lessons-Learned-Collection (siehe
+    RagConfig.lessons_learned_collection/lessons_learned_auto_inject und
+    mcp_tools.remember_lesson/search_lessons), sofern aktiviert: ein Sicherheits-
+    netz für den Fall, dass ein Agent (z.B. Qwen in VS Code) search_lessons
+    nicht selbst proaktiv aufruft.
+
     Gibt None zurück, wenn nichts angewendet wurde (kein rag_collection
-    konfiguriert, RAG global nicht aktiviert, kein Suchtext in der letzten
-    User-Nachricht, keine ausreichend relevanten Treffer, oder ein Fehler bei
-    Qdrant/Embedding-Modell - RAG ist ein Zusatz und darf den eigentlichen
-    Chat nie zum Scheitern bringen), sonst {"collection": ..., "hits": N}
-    fürs Telemetrie-Tracking im Dashboard (Active/Recent Requests)."""
+    konfiguriert UND Lessons-Learned-Auto-Inject aus, RAG global nicht
+    aktiviert, kein Suchtext in der letzten User-Nachricht, keine ausreichend
+    relevanten Treffer in beiden Collections, oder ein Fehler bei Qdrant/
+    Embedding-Modell - RAG ist ein Zusatz und darf den eigentlichen Chat nie
+    zum Scheitern bringen), sonst {"collections": [...], "hits": N} fürs
+    Telemetrie-Tracking im Dashboard (Active/Recent Requests)."""
     cfg = get_config()
+    if not cfg.rag.enabled or not cfg.rag.embedding_model:
+        return None
     mcfg = cfg.models.get(model)
-    collection = mcfg.rag_collection if mcfg else None
-    if not collection or not cfg.rag.enabled or not cfg.rag.embedding_model:
+    collections = []
+    if mcfg and mcfg.rag_collection:
+        collections.append(mcfg.rag_collection)
+    if cfg.rag.lessons_learned_auto_inject and cfg.rag.lessons_learned_collection not in collections:
+        collections.append(cfg.rag.lessons_learned_collection)
+    if not collections:
         return None
     query_text = ""
     for m in reversed(messages or []):
@@ -208,27 +222,36 @@ async def apply_auto_rag(model: str, messages: list) -> Optional[dict]:
             break
     if not query_text.strip():
         return None
-    try:
-        results = await search(collection, query_text, top_k=cfg.rag.auto_rag_top_k)
-    except Exception as e:
-        logger.warning(
-            "Automatisches RAG für Modell '%s' (Collection '%s') fehlgeschlagen, "
-            "fahre ohne RAG-Kontext fort: %s", model, collection, e,
+
+    blocks = []
+    hit_collections = []
+    for collection in collections:
+        try:
+            results = await search(collection, query_text, top_k=cfg.rag.auto_rag_top_k)
+        except Exception as e:
+            logger.warning(
+                "Automatisches RAG für Modell '%s' (Collection '%s') fehlgeschlagen, "
+                "fahre ohne RAG-Kontext aus dieser Collection fort: %s", model, collection, e,
+            )
+            continue
+        relevant = [r for r in results if (r.get("score") or 0) >= cfg.rag.auto_rag_min_score]
+        if not relevant:
+            continue
+        context_block = "\n\n".join(f"[{r.get('source') or '?'}] {r.get('text') or ''}" for r in relevant)
+        blocks.append(
+            f"Relevanter Kontext aus der Wissensdatenbank \"{collection}\" "
+            f"(nur nutzen, falls er zur Frage passt):\n\n{context_block}"
         )
+        hit_collections.append(collection)
+    if not blocks:
         return None
-    relevant = [r for r in results if (r.get("score") or 0) >= cfg.rag.auto_rag_min_score]
-    if not relevant:
-        return None
-    context_block = "\n\n".join(f"[{r.get('source') or '?'}] {r.get('text') or ''}" for r in relevant)
-    header = (
-        f"Relevanter Kontext aus der Wissensdatenbank \"{collection}\" "
-        f"(nur nutzen, falls er zur Frage passt):\n\n{context_block}"
-    )
+
+    header = "\n\n---\n".join(blocks)
     if messages and messages[0].get("role") == "system":
         messages[0]["content"] = f"{messages[0].get('content') or ''}\n\n---\n{header}"
     else:
         messages.insert(0, {"role": "system", "content": header})
-    return {"collection": collection, "hits": len(relevant)}
+    return {"collections": hit_collections, "hits": len(blocks)}
 
 
 async def search(collection: str, query: str, top_k: int = 5) -> list[dict]:

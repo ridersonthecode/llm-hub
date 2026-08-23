@@ -6,12 +6,14 @@ import json
 import logging
 import time
 from contextlib import asynccontextmanager
+from pathlib import Path
 from typing import Optional
 
 import asyncio
 import httpx
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import StreamingResponse
+from fastapi.staticfiles import StaticFiles
 
 from pydantic import ValidationError
 
@@ -88,6 +90,9 @@ async def lifespan(_app: FastAPI):
 
 app = FastAPI(title="vLLM Manager", lifespan=lifespan)
 app.mount("/mcp", mcp.streamable_http_app())
+# Vendorte Frontend-Bibliotheken (siehe static/vendor/datatables/README.md) -
+# lokal statt CDN, damit die Dashboards auch ohne Internetzugang funktionieren.
+app.mount("/static", StaticFiles(directory=Path(__file__).resolve().parent / "static"), name="static")
 app.include_router(dashboard_router)
 app.include_router(ollama_router)
 app.include_router(rag_dashboard_router)
@@ -611,7 +616,7 @@ async def proxy_v1(path: str, request: Request):
     if parsed_body is not None and path == "chat/completions":
         rag_result = await rag.apply_auto_rag(model, parsed_body.get("messages") or [])
         if rag_result:
-            telemetry.mark_rag_used(rid, rag_result["collection"], rag_result["hits"])
+            telemetry.mark_rag_used(rid, ", ".join(rag_result["collections"]), rag_result["hits"])
             body = json.dumps(parsed_body).encode("utf-8")
 
     target = f"http://{cfg.engine_host}:{engine_status['port']}/v1/{path}"

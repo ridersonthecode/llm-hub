@@ -149,7 +149,7 @@ async def api_chat(request: Request):
     # Ollama-kompatible /api/chat statt der OpenAI-API nutzen.
     rag_result = await rag.apply_auto_rag(model, openai_body.get("messages") or [])
     if rag_result:
-        telemetry.mark_rag_used(rid, rag_result["collection"], rag_result["hits"])
+        telemetry.mark_rag_used(rid, ", ".join(rag_result["collections"]), rag_result["hits"])
 
     target = f"http://{cfg.engine_host}:{engine_status['port']}/v1/chat/completions"
     started = time.time()

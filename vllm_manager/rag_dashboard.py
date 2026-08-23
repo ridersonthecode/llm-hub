@@ -23,6 +23,8 @@ RAG_DASHBOARD_HTML = r"""<!doctype html>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>vLLM Manager – RAG</title>
+<link rel="stylesheet" href="/static/vendor/datatables/dataTables.dataTables.min.css">
+<link rel="stylesheet" href="/static/vendor/datatables/dataTables.inputPaging.min.css">
 <style>
   :root {
     --bg:#f5f6f8; --panel:#ffffff; --panel-2:#eef0f4; --border:#dfe3ea;
@@ -92,6 +94,55 @@ RAG_DASHBOARD_HTML = r"""<!doctype html>
   .score-bar-bg { background:var(--panel-2); border-radius:6px; height:6px; overflow:hidden; margin-top:4px; width:80px; }
   .score-bar-fg { background:var(--accent); height:100%; }
   .snippet { color:var(--text-dim); font-size:12px; margin-top:4px; max-width:480px; }
+  .app-footer {
+    margin-top:32px; padding-top:16px; border-top:1px solid var(--border);
+    display:flex; align-items:center; justify-content:center; gap:6px;
+    font-size:12px; color:var(--text-dim); flex-wrap:wrap;
+  }
+  .app-footer a { display:inline-flex; align-items:center; gap:4px; color:var(--text-dim); text-decoration:none; }
+  .app-footer a:hover { color:var(--accent); }
+  .app-footer img { width:16px; height:16px; border-radius:50%; object-fit:cover; flex:0 0 auto; }
+  .app-footer .claude-mark { display:inline-flex; align-items:center; gap:4px; }
+  .app-footer .sep { opacity:.5; }
+
+  /* DataTables: an das App-Theme anpassen (Bibliothek unter /static/vendor/datatables/, siehe README dort).
+     Farben laufen wo moeglich ueber die von DataTables selbst vorgesehenen
+     --dt-*-Variablen (siehe dataTables.dataTables.css) statt eigener Selektor-
+     Overrides - deren Original-Regeln haben oft hoehere Spezifitaet als ein
+     einfacher Klassen-Override, egal in welcher Reihenfolge im Dokument. */
+  :root {
+    --dt-control_color: var(--text-dim);
+    --dt-body_border: 1px solid var(--border);
+    --dt-header_border: 1px solid var(--border);
+    --dt-footer_border: 1px solid var(--border);
+    --dt-input_background: var(--panel);
+    --dt-input_border: 1px solid var(--border);
+    --dt-input_border-radius: 6px;
+    --dt-input_color: var(--text);
+    --dt-paging-button_background: var(--panel);
+    --dt-paging-button_background-hover: var(--panel-2);
+    --dt-paging-button_background-current: var(--accent);
+    --dt-paging-button_background-current-hover: var(--accent);
+    --dt-paging-button_background-disabled: transparent;
+    --dt-paging-button_border: 1px solid var(--border);
+    --dt-paging-button_border-hover: 1px solid var(--border);
+    --dt-paging-button_border-current: 1px solid var(--accent);
+    --dt-paging-button_border-current-hover: 1px solid var(--accent);
+    --dt-paging-button_border-disabled: 1px solid transparent;
+    --dt-paging-button_border-radius: 6px;
+    --dt-paging-button_color: var(--text);
+    --dt-paging-button_color-hover: var(--text);
+    --dt-paging-button_color-current: #fff;
+    --dt-paging-button_color-current-hover: #fff;
+    --dt-paging-button_color-disabled: var(--text-dim);
+  }
+  .dt-container { color:var(--text); font-family:inherit; margin-top:10px; }
+  .dt-container .dt-length select, .dt-paging-input input {
+    background:var(--panel); border:1px solid var(--border); color:var(--text);
+    border-radius:6px; padding:4px 6px; font-size:13px;
+  }
+  .dt-paging-input input { width:3.5em; text-align:center; }
+  table.dataTable tbody tr:hover td { background:var(--panel-2); }
 </style>
 </head>
 <body>
@@ -153,7 +204,8 @@ RAG_DASHBOARD_HTML = r"""<!doctype html>
 
     <section>
       <h2 data-i18n="section.documents">Documents</h2>
-      <div id="documents-box" class="empty" data-i18n="empty.selectCollection"></div>
+      <div id="documents-empty-hint" class="empty" data-i18n="empty.selectCollection"></div>
+      <table id="documents-table" class="display" style="width:100%; display:none;"></table>
     </section>
 
     <section>
@@ -180,6 +232,22 @@ RAG_DASHBOARD_HTML = r"""<!doctype html>
     </section>
   </div>
 
+  <footer class="app-footer">
+    <span>© 2026</span>
+    <a href="https://github.com/ridersonthecode" target="_blank" rel="noopener noreferrer" title="ridersonthecode on GitHub">
+      <img src="https://github.com/ridersonthecode.png?s=64" alt="ridersonthecode" loading="lazy">
+      ridersonthecode
+    </a>
+    <span class="sep">·</span>
+    <span class="claude-mark" title="Entwickelt mit Claude Code">
+      <img src="https://claude.ai/images/claude_app_icon.png" alt="Claude" loading="lazy">
+      Entwickelt mit Claude Code
+    </span>
+  </footer>
+
+<script src="/static/vendor/datatables/dataTables.min.js"></script>
+<script src="/static/vendor/datatables/dataTables.dataTables.min.js"></script>
+<script src="/static/vendor/datatables/dataTables.inputPaging.min.js"></script>
 <script>
 const $ = (id) => document.getElementById(id);
 
@@ -218,6 +286,7 @@ $("lang-select").addEventListener("change", (e) => {
   currentLang = e.target.value;
   localStorage.setItem("vllm_dashboard_lang", currentLang);
   applyStaticI18n();
+  initDocumentsTable();
   refreshAll();
 });
 
@@ -314,9 +383,55 @@ function renderCollections() {
       await fetch(`/rag/collections/${encodeURIComponent(btn.dataset.name)}`, { method: "DELETE", headers: authHeaders() });
       if (selectedCollection === btn.dataset.name) {
         selectedCollection = null;
-        $("documents-box").outerHTML = `<div id="documents-box" class="empty">${t("empty.selectCollection")}</div>`;
+        documentsTable.table().container().style.display = "none";
+        $("documents-empty-hint").style.display = "";
       }
       loadCollections();
+    });
+  });
+}
+
+// --- Documents (DataTables, siehe /static/vendor/datatables/README.md) -----
+// Kann mit vielen Dokumenten pro Collection wachsen (insbesondere die
+// automatische "lessons_learned"-Collection) - daher paginiert. Spaltentitel
+// hängen von der Sprache ab -> bei Sprachwechsel komplett neu aufgebaut (siehe
+// lang-select-Handler unten).
+let documentsTable = null;
+
+function initDocumentsTable() {
+  if (documentsTable) { documentsTable.destroy(); $("documents-table").innerHTML = ""; }
+  documentsTable = new DataTable("#documents-table", {
+    data: [],
+    order: [],
+    pageLength: 10,
+    layout: { bottomEnd: "inputPaging" },
+    language: { emptyTable: t("empty.noDocuments") },
+    columns: [
+      { title: t("th.source"), data: null, render: (d, type) => type === "display" ? esc(d.filename || d.source || "–") : (d.filename || d.source || "") },
+      { title: t("th.chunks"), data: null, render: (d, type) => type !== "display" ? (d.chunk_count ?? -1) : (d.chunk_count ?? "–") },
+      { title: t("th.addedAt"), data: null, render: (d, type) => type !== "display" ? (d.added_at ?? 0) : (d.added_at ? new Date(d.added_at * 1000).toLocaleString(localeFor(currentLang)) : "–") },
+      { title: t("th.action"), data: null, orderable: false, render: (d) => `<button class="btn danger del-doc-btn" data-id="${esc(d.document_id)}">${t("action.delete")}</button>` },
+    ],
+  });
+  // Wrapper (Suche/Paging/Tabelle) initial ausblenden - erst loadDocuments()
+  // (bei Auswahl einer Collection) blendet ihn wieder ein. Die "display:none"
+  // am statischen <table>-Tag selbst greift nach der DataTables-Initialisierung
+  // nicht mehr, da DataTables das <table> in einen eigenen Wrapper verschiebt.
+  documentsTable.table().container().style.display = "none";
+  // Löschen-Buttons werden bei jedem draw() (auch beim Seitenwechsel) neu
+  // erzeugt - Listener daher hier statt einmalig binden. selectedCollection
+  // (globaler State) statt eines geschlossenen Parameters, da draw() nicht
+  // pro loadDocuments()-Aufruf neu gebunden wird.
+  documentsTable.on("draw", () => {
+    document.querySelectorAll("#documents-table .del-doc-btn").forEach(btn => {
+      btn.addEventListener("click", async () => {
+        if (!confirm(t("confirm.deleteDocument"))) return;
+        await fetch(`/rag/collections/${encodeURIComponent(selectedCollection)}/documents/${encodeURIComponent(btn.dataset.id)}`, {
+          method: "DELETE", headers: authHeaders(),
+        });
+        loadDocuments(selectedCollection);
+        loadCollections();
+      });
     });
   });
 }
@@ -325,30 +440,11 @@ async function loadDocuments(collection) {
   const res = await fetch(`/rag/collections/${encodeURIComponent(collection)}/documents`, { headers: authHeaders() });
   const data = await res.json();
   const docs = data.documents || [];
-  if (docs.length === 0) {
-    $("documents-box").innerHTML = `<div class="empty">${t("empty.noDocuments")}</div>`;
-    return;
-  }
-  $("documents-box").innerHTML = `<table><thead><tr>
-    <th>${t("th.source")}</th><th>${t("th.chunks")}</th><th>${t("th.addedAt")}</th><th>${t("th.action")}</th>
-    </tr></thead><tbody>` + docs.map(d => `
-      <tr>
-        <td>${esc(d.filename || d.source || "–")}</td>
-        <td class="mono">${d.chunk_count ?? "–"}</td>
-        <td class="mono">${d.added_at ? new Date(d.added_at * 1000).toLocaleString(localeFor(currentLang)) : "–"}</td>
-        <td><button class="btn danger del-doc-btn" data-id="${esc(d.document_id)}">${t("action.delete")}</button></td>
-      </tr>`).join("") + `</tbody></table>`;
-
-  $("documents-box").querySelectorAll(".del-doc-btn").forEach(btn => {
-    btn.addEventListener("click", async () => {
-      if (!confirm(t("confirm.deleteDocument"))) return;
-      await fetch(`/rag/collections/${encodeURIComponent(collection)}/documents/${encodeURIComponent(btn.dataset.id)}`, {
-        method: "DELETE", headers: authHeaders(),
-      });
-      loadDocuments(collection);
-      loadCollections();
-    });
-  });
+  $("documents-empty-hint").style.display = "none";
+  documentsTable.table().container().style.display = "";
+  documentsTable.clear();
+  documentsTable.rows.add(docs);
+  documentsTable.draw(false);
 }
 
 // --- Add Content ---------------------------------------------------------
@@ -450,6 +546,7 @@ function refreshAll() {
 
 populateLangSelect();
 applyStaticI18n();
+initDocumentsTable();
 loadCollections();
 </script>
 </body>
