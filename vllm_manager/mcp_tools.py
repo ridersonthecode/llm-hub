@@ -39,7 +39,7 @@ mcp = FastMCP(
 async def list_models() -> dict:
     """Listet registrierte, lokal gecachte und aktuell geladene Modelle."""
     cfg = get_config()
-    cached = list_cached_models(cfg.hf_home)
+    cached = await list_cached_models(cfg.hf_home)
     return {
         "registered": [
             {"model": name, "enabled": m.enabled, "notes": m.notes}

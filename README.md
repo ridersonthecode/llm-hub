@@ -18,6 +18,9 @@ Dashboard, MCP): siehe [Anleitung.md](Anleitung.md).
   (je ein Kindprozess auf eigenem Port) – Wechsel zwischen bereits warmen Modellen
   ist instant statt eines Kaltstarts. Speicherbudget (`gpu_memory_ceiling`) und
   Poolgröße werden per LRU-Verdrängung automatisch eingehalten.
+- **Automatisches Nachladen nach Neustart**: das zuletzt genutzte Modell wird bei
+  jedem Dienststart im Hintergrund automatisch wieder geladen (abschaltbar über
+  `auto_reload_last_model`), ohne den Serverstart zu blockieren.
 - **OpenAI-kompatibler Proxy** unter `/v1/*`
 - **Ollama-Kompatibilität** unter `/api/chat` + `/api/tags` – alte, gegen Ollama
   gebaute Tools laufen unverändert weiter (inkl. Mapping alter Modellnamen)
@@ -41,6 +44,11 @@ Dashboard, MCP): siehe [Anleitung.md](Anleitung.md).
   Speichern, Live-Übernahme ohne Neustart (bis auf `host`/`port`) oder
   optionalem vollem Dienst-Neustart, und Fallback auf die letzte funktionierende
   Config, falls `config.json` beim Start mal nicht lädt
+- **Kostentracking** unter `/dashboard/costs` (rein fiktiv, der lokale Betrieb
+  ist kostenlos): rechnet jede Anfrage gegen konfigurierbare $/MTok-Preise um
+  (Default: Claude-Sonnet-5-Standardpreise) zum Vergleich "was hätte das über
+  eine Cloud-API gekostet" - persistent, live per WebSocket, mit
+  Einzel-/Mehrfach-Löschen und Reset
 - **Optionaler API-Key** (standardmäßig deaktiviert), zentrale `config.json`
   (kein `sudo` zum Ändern nötig)
 

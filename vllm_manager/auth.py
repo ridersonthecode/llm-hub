@@ -18,7 +18,7 @@ from starlette.types import ASGIApp, Receive, Scope, Send
 
 from .config import get_config
 
-EXEMPT_PATHS = {"/health", "/dashboard", "/dashboard/rag", "/dashboard/config"}
+EXEMPT_PATHS = {"/health", "/dashboard", "/dashboard/rag", "/dashboard/config", "/dashboard/costs"}
 
 
 class ApiKeyMiddleware:

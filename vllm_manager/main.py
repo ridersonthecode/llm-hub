@@ -14,11 +14,12 @@ from fastapi.responses import StreamingResponse
 
 from pydantic import ValidationError
 
-from . import config_editor, downloader, process_manager, rag, telemetry
+from . import config_editor, cost_tracker, downloader, process_manager, rag, telemetry
 from .auth import ApiKeyMiddleware
 from .catalog import list_cached_models
 from .config import get_config
 from .config_dashboard import router as config_dashboard_router
+from .cost_dashboard import router as cost_dashboard_router
 from .dashboard import router as dashboard_router
 from .mcp_tools import mcp
 from .ollama_compat import router as ollama_router
@@ -43,13 +44,43 @@ async def _idle_watchdog() -> None:
                 await process_manager.stop_engine(eng.model, reason="idle_timeout")
 
 
+async def _auto_reload_last_model() -> None:
+    """Ollama-artiges Verhalten (config.auto_reload_last_model, Default an):
+    lädt beim Dienststart automatisch das zuletzt genutzte Modell nach. Läuft
+    als eigener Background-Task (siehe lifespan()) - blockiert also NICHT den
+    Serverstart selbst (uvicorn nimmt sofort Requests an), auch wenn der
+    Kaltstart hier 1-5 Minuten dauert. ensure_loaded() hält dabei wie bei jedem
+    anderen Kaltstart auch den Pool-Lock (siehe process_manager.py) - ein
+    echter Request für ein ANDERES, noch nicht geladenes Modell muss in dieser
+    Zeit entsprechend warten, das ist bestehendes Verhalten des Hot Pools und
+    kein neues Problem durch diese Funktion."""
+    cfg = get_config()
+    if not cfg.auto_reload_last_model:
+        return
+    model = process_manager.load_last_active_model()
+    if not model:
+        return
+    ok, reason = process_manager.is_model_enabled(cfg, model)
+    if not ok:
+        logger.info("Automatisches Nachladen von '%s' übersprungen: %s", model, reason)
+        return
+    logger.info("Lade zuletzt aktives Modell '%s' automatisch im Hintergrund nach...", model)
+    try:
+        await process_manager.ensure_loaded(model)
+        logger.info("Automatisches Nachladen von '%s' abgeschlossen.", model)
+    except Exception as e:
+        logger.warning("Automatisches Nachladen von '%s' fehlgeschlagen: %s", model, e)
+
+
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
     config_editor.load_config_with_fallback()
     watchdog = asyncio.create_task(_idle_watchdog())
+    auto_reload = asyncio.create_task(_auto_reload_last_model())
     async with mcp.session_manager.run():
         yield
     watchdog.cancel()
+    auto_reload.cancel()
     await process_manager.stop_engine(reason="shutdown")
 
 
@@ -59,6 +90,7 @@ app.include_router(dashboard_router)
 app.include_router(ollama_router)
 app.include_router(rag_dashboard_router)
 app.include_router(config_dashboard_router)
+app.include_router(cost_dashboard_router)
 # Reine ASGI-Middleware statt @app.middleware("http") - siehe auth.py
 # Docstring: BaseHTTPMiddleware bricht Streaming-Responses (stream: true).
 app.add_middleware(ApiKeyMiddleware)
@@ -72,7 +104,7 @@ async def health():
 @app.get("/models")
 async def list_models_endpoint():
     cfg = get_config()
-    cached = set(list_cached_models(cfg.hf_home))
+    cached = set(await list_cached_models(cfg.hf_home))
     out = []
     for name, mcfg in cfg.models.items():
         out.append({
@@ -264,9 +296,57 @@ async def restart_service_endpoint():
     return {"ok": True, "message": message}
 
 
+# --- Kostentracking (/dashboard/costs) --------------------------------------
+# Fiktive Kosten pro Anfrage ggü. einer Cloud-API, siehe cost_tracker.py.
+# Lese-/Live-Endpoints liegen bei der Seite selbst (cost_dashboard.py), analog
+# zu dashboard.py - hier nur die state-ändernden Aktionen (Löschen/Reset).
+
+
+@app.delete("/costs/{record_id}")
+async def delete_cost_record_endpoint(record_id: str):
+    removed = cost_tracker.delete_records([record_id])
+    if not removed:
+        raise HTTPException(404, f"Kostendatensatz '{record_id}' nicht gefunden.")
+    return {"ok": True, "removed": removed}
+
+
+@app.post("/costs/delete")
+async def delete_cost_records_endpoint(body: dict):
+    ids = body.get("ids") or []
+    if not ids:
+        raise HTTPException(400, "'ids' fehlt oder ist leer im Request-Body.")
+    removed = cost_tracker.delete_records(ids)
+    return {"ok": True, "removed": removed}
+
+
+@app.post("/costs/reset")
+async def reset_cost_records_endpoint():
+    removed = cost_tracker.reset_all()
+    return {"ok": True, "removed": removed}
+
+
 # --- OpenAI-kompatibler Proxy mit Auto-Load -------------------------------
 
 HOP_BY_HOP = {"host", "authorization", "content-length", "connection"}
+
+
+def _finish_and_record(rid: str, status: str, prompt_tokens=None, completion_tokens=None) -> None:
+    """telemetry.finish_request() + Persistieren fürs fiktive Kostentracking
+    (cost_tracker.py) in einem Rutsch - auch für früh abgebrochene Anfragen
+    (unbekanntes Modell, Ladefehler), damit die Kostenseite wirklich jede
+    Anfrage zeigt (cost_usd bleibt dann None, siehe cost_tracker.compute_cost)."""
+    finished = telemetry.finish_request(rid, status, prompt_tokens, completion_tokens)
+    if finished is not None:
+        cost_tracker.record_request(
+            model=finished["model"],
+            path=finished["path"],
+            started_at=finished["started_at"],
+            finished_at=finished["finished_at"],
+            status=finished["status"],
+            prompt_tokens=finished.get("prompt_tokens"),
+            completion_tokens=finished.get("completion_tokens"),
+            user_agent=finished.get("user_agent"),
+        )
 
 
 @app.api_route("/v1/{path:path}", methods=["GET", "POST"])
@@ -275,7 +355,7 @@ async def proxy_v1(path: str, request: Request):
     body = await request.body()
 
     if path == "models" and request.method == "GET":
-        cached = list_cached_models(cfg.hf_home)
+        cached = await list_cached_models(cfg.hf_home)
         names = sorted(set(cfg.models.keys()) | set(cached))
         return {
             "object": "list",
@@ -295,11 +375,13 @@ async def proxy_v1(path: str, request: Request):
     if not model:
         raise HTTPException(400, "Kein 'model' im Request-Body und kein default_model in config.json konfiguriert.")
 
-    rid = telemetry.start_request(model, path, is_stream)
+    rid = telemetry.start_request(model, path, is_stream, request.headers.get("user-agent"))
 
-    cached = set(list_cached_models(cfg.hf_home))
-    if model not in cfg.models and model not in cached:
-        telemetry.finish_request(rid, "error")
+    # Cache-Scan nur, wenn wirklich nötig - im Normalfall (registriertes
+    # Modell in config.json) spart das den Disk-I/O-Aufruf auf jeder einzelnen
+    # Chat-Anfrage komplett, siehe catalog.py-Docstring.
+    if model not in cfg.models and model not in await list_cached_models(cfg.hf_home):
+        _finish_and_record(rid, "error")
         raise HTTPException(
             404,
             f"Modell '{model}' ist unbekannt. Erst per POST /models/pull herunterladen "
@@ -309,7 +391,7 @@ async def proxy_v1(path: str, request: Request):
     try:
         engine_status = await process_manager.ensure_loaded(model)
     except (RuntimeError, TimeoutError) as e:
-        telemetry.finish_request(rid, "error")
+        _finish_and_record(rid, "error")
         raise HTTPException(503, str(e))
     telemetry.mark_ready(rid)
 
@@ -347,8 +429,16 @@ async def proxy_v1(path: str, request: Request):
                             except Exception:
                                 continue
                             choices = obj.get("choices") or []
-                            if choices and (choices[0].get("delta") or {}).get("content"):
+                            delta = (choices[0].get("delta") or {}) if choices else {}
+                            if delta.get("content"):
                                 telemetry.increment_tokens(rid)
+                            # reasoning_content: separates Feld für den Denkprozess bei
+                            # Modellen mit reasoning_parser (siehe config.json) - zählt
+                            # NICHT in "content" hinein, deshalb eigener Zähler.
+                            if delta.get("reasoning_content"):
+                                telemetry.increment_reasoning_tokens(rid)
+                            if delta.get("tool_calls"):
+                                telemetry.mark_tool_call(rid)
                             usage = obj.get("usage")
                             if usage:
                                 prompt_tokens = usage.get("prompt_tokens", prompt_tokens)
@@ -368,7 +458,7 @@ async def proxy_v1(path: str, request: Request):
             status = "error"
             raise
         finally:
-            telemetry.finish_request(rid, status, prompt_tokens, completion_tokens)
+            _finish_and_record(rid, status, prompt_tokens, completion_tokens)
             await upstream.aclose()
             await client.aclose()
 

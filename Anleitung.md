@@ -38,9 +38,16 @@ Sicherheitsnetz: die Summe der `gpu_memory_utilization` aller gleichzeitig
 laufenden Engines darf diesen Wert nicht überschreiten. Passt ein neu
 angefragtes Modell nicht mehr rein (Poolgröße voll ODER Speicherbudget
 überschritten), wird automatisch die am längsten ungenutzte Engine verdrängt
-(LRU) – Engines mit gerade aktiver Anfrage werden dabei nach Möglichkeit
-übersprungen. Bei `max_concurrent_models: 1` verhält sich der Manager wie vor
-diesem Feature: exklusiv, jeder Wechsel ist ein Kaltstart.
+(LRU). Bei `max_concurrent_models: 1` verhält sich der Manager wie vor diesem
+Feature: exklusiv, jeder Wechsel ist ein Kaltstart.
+
+**Engines mit einer gerade laufenden Anfrage werden NIE automatisch verdrängt**
+(würde die Antwort mitten drin abbrechen). Reicht der Platz nur durch
+Verdrängen einer beschäftigten Engine, schlägt das Laden des neuen Modells
+stattdessen mit HTTP 503 fehl - die Fehlermeldung nennt das/die blockierende(n)
+Modell(e) und verweist auf manuelles Entladen (Dashboard-Button oder
+`POST /models/<model>/unload`). Sind mehrere Engines geladen und nur eine
+davon ist gerade beschäftigt, wird ganz normal eine der freien verdrängt.
 
 **Praktisch heißt das:** zwei kleinere Modelle (z.B. `Qwen3-8B` +
 `NVIDIA-Nemotron-3-Nano-4B-FP8`, zusammen ~0.65 Speicherbudget) bleiben
@@ -169,6 +176,27 @@ curl -X POST http://<LAN-IP>:11434/models/Qwen%2FQwen3-8B/load     # blockiert b
 curl -X POST http://<LAN-IP>:11434/models/Qwen%2FQwen3-8B/unload
 ```
 
+## Automatisches Nachladen nach Neustart
+
+Ollama-artiges Verhalten (Default an, `auto_reload_last_model` in `config.json`
+bzw. im Config-Editor unter "Hot Pool & Limits"): das zuletzt genutzte Modell
+wird bei jedem Dienststart automatisch im Hintergrund nachgeladen, ohne den
+Start des Managers selbst oder andere Requests zu blockieren.
+
+- Der Zeiger aufs zuletzt genutzte Modell (`last_active_model.json` neben
+  `config.json`, nicht Teil von Git) wird bei jeder Nutzung eines bereiten
+  Modells aktualisiert - sowohl nach einem frischen Kaltstart als auch bei
+  Wiederverwendung eines bereits warmen Modells. Bei mehreren gleichzeitig
+  geladenen Modellen (Hot Pool) zählt jeweils das zuletzt tatsächlich genutzte.
+- Ein **manuelles Entladen** (Dashboard-Button oder `POST .../unload`) löscht
+  diesen Zeiger wieder - ein bewusst entladenes Modell soll nach einem
+  Neustart nicht ungefragt zurückkommen. Automatische Vorgänge (Idle-Timeout,
+  Verdrängung durch ein anderes Modell, Absturz) lassen den Zeiger dagegen
+  unangetastet.
+- Zum Deaktivieren: `"auto_reload_last_model": false` in `config.json`, oder
+  die Checkbox im Config-Editor - dann startet der Hot Pool nach einem
+  Neustart bewusst leer.
+
 ## Live-Dashboard
 
 Erreichbar unter `http://<LAN-IP>:11434/dashboard` (z.B. `http://10.7.21.3:11434/dashboard`).
@@ -184,10 +212,17 @@ Zeigt in Echtzeit per WebSocket (kein Polling, kein Neuladen der Seite nötig):
   gegen `gpu_memory_ceiling`, als Balken
 - Zeitpunkt des letzten Prompts ("vor Xs")
 - Aktive Anfragen als Tabelle (eine Zeile je laufender Anfrage - bei Hot Pool
-  ggf. mehrere gleichzeitig): Modell, Endpoint (`chat/completions`, `embeddings`,
-  ...) inkl. Stream-Badge, Engine-Port, Status (🥶 Kaltstart falls gerade das
-  Modell noch lädt / läuft), Gesamtlaufzeit, Modell-Ladezeit getrennt von der
-  reinen Generierungs-TTFT, Tokens, und live berechneter Durchsatz (Tokens/Sek.)
+  ggf. mehrere gleichzeitig): Modell, **App** (roher `User-Agent`-Header des
+  aufrufenden Clients - "Unbekannt", falls keiner mitgeschickt wird; gekürzt
+  mit vollem Wert im Tooltip - dieselbe Spalte auch bei Letzte Anfragen und auf
+  der Kostenseite), Endpoint (`chat/completions`, `embeddings`, ...) inkl.
+  Stream-Badge, Engine-Port, Status (🥶 Kaltstart falls gerade das Modell noch
+  lädt / läuft), Gesamtlaufzeit, Modell-Ladezeit getrennt von der reinen
+  Generierungs-TTFT, Tokens, Reasoning-Tokens (separat gezählt - Text aus
+  `delta.reasoning_content` bei Modellen mit `reasoning_parser`, siehe
+  config.json, zählt NICHT in die normale Tokens-Spalte hinein), und live
+  berechneter Durchsatz (Tokens/Sek., bezieht sich nur auf die normale
+  Antwort-Spalte, nicht auf Reasoning-Tokens)
 - System-Auslastung: GPU-Auslastung/-Temperatur/-Leistung (`nvidia-smi`) und
   RAM-Auslastung (`/proc/meminfo`, deckt wegen Unified Memory auch den
   GPU-Speicherbedarf ab) als Live-Charts - direkt unter der Kachel-Übersicht,
@@ -211,6 +246,19 @@ Zeigt in Echtzeit per WebSocket (kein Polling, kein Neuladen der Seite nötig):
 Heartbeat (damit auch reine Engine-/System-Metriken aktuell bleiben, auch ohne neue
 Anfragen). `GET /dashboard/status` liefert denselben Snapshot einmalig als JSON, z.B.
 zum Debuggen mit `curl`.
+
+**Performance:** der Dienst läuft single-threaded auf einem asyncio-Event-Loop -
+WebSocket-Heartbeat und Chat-Proxy teilen sich denselben Thread. Der Scan des
+lokalen HF-Caches (`catalog.list_cached_models()`, u.a. für die
+"Available Models"-Liste UND bei jeder `/v1/*`-Chat-Anfrage zur Modell-Validierung)
+sowie `GET .../metrics`-Abrufe der laufenden Engine sind deshalb kurz gecacht
+(3s bzw. 0.8s TTL, mit Lock-Dedup gegen mehrere gleichzeitig offene Dashboard-Tabs)
+und laufen bei einem Cache-Miss in einem Thread statt den Event-Loop zu blockieren -
+sonst kann kurzzeitige Disk-I/O-Last (Modell lädt, Download läuft) das
+WebSocket-Ping/Pong-Keepalive verpassen lassen ("Verbindung unterbrochen", erholt
+sich nach ein paar Sekunden von selbst) und im schlimmsten Fall auch laufende
+Chat-Antworten kurz stocken lassen. Nach einem abgeschlossenen Download wird der
+Cache sofort invalidiert statt bis zu 3s zu warten.
 
 **Caveats:**
 - Token-Zählung pro aktivem Request ist eine Näherung (1 SSE-Chunk mit Content ≈ 1
@@ -278,6 +326,37 @@ auffällige Warnung oben im Config-Editor an (inkl. Fehlermeldung). Die defekte
 `config.json` bleibt dabei unangetastet auf der Platte liegen - ein Speichern
 über den Editor (der ja die aktuell laufende, funktionierende Config anzeigt)
 repariert sie beim nächsten Save automatisch wieder.
+
+## Kostentracking (fiktiv)
+
+Rein informativer Vergleichswert unter `/dashboard/costs` (Link "💰 Costs →" im
+Haupt-Dashboard): der lokale Betrieb ist und bleibt kostenlos - diese Seite
+rechnet lediglich aus, was dieselben Tokens über eine Cloud-API (Default:
+offizielle **Claude-Sonnet-5**-Standardpreise, $3/$15 pro 1 Mio. Input-/Output-
+Tokens) gekostet hätten. Reasoning-Tokens zählen dabei zur Ausgabe, analog zu
+Anthropics eigener Abrechnung.
+
+**Preise konfigurieren:** im [Config-Editor](#config-editor-dashboardconfig)
+unter "Cost Tracking" - global (`default_pricing`) und optional pro Modell
+überschreibbar (`models.<name>.pricing`, z.B. für einen Vergleich mit einem
+günstigeren Referenzmodell).
+
+**Wo die Kosten auftauchen:**
+- Haupt-Dashboard, **Aktive Anfragen**: Live-Schätzung "so far" aus den bisher
+  gestreamten Tokens - bewusst nur die Ausgabeseite, die Prompt-Größe ist erst
+  nach Requestende bekannt.
+- Haupt-Dashboard, **Letzte Anfragen**: exakte Kosten, sobald `prompt_tokens`/
+  `completion_tokens` bekannt sind (siehe Caveat oben zu `stream_options.
+  include_usage`) - sonst "–", bewusst keine geschätzte Zahl.
+- **`/dashboard/costs`**: persistente Historie *jeder* abgeschlossenen Anfrage
+  (auch fehlgeschlagene, dann ohne Kostenwert), inkl. Gesamtsumme und
+  Aufschlüsselung pro Modell. Live per WebSocket. Jeder Datensatz hält den zum
+  Zeitpunkt der Anfrage gültigen Preis fest (ändert sich also nicht rückwirkend,
+  wenn später die Konfiguration angepasst wird - anders als die Live-Ansichten
+  im Haupt-Dashboard, die immer gegen die aktuelle Preiskonfiguration rechnen).
+  Datensätze einzeln löschbar, per Checkbox mehrfach auswählbar ("Alle
+  auswählen" in der Kopfzeile) oder komplett zurücksetzbar.
+- Persistiert als `costs.jsonl` neben `config.json` (nicht Teil von Git).
 
 ## MCP-Server (für KI-Agenten)
 

@@ -55,7 +55,7 @@ async def api_tags():
     damit, welche Modelle überhaupt verfügbar sind. Enthält sowohl die neuen
     HF-Namen als auch die alten Ollama-Aliase, sofern deren Ziel verfügbar ist."""
     cfg = get_config()
-    cached = set(list_cached_models(cfg.hf_home))
+    cached = set(await list_cached_models(cfg.hf_home))
     available = set(cfg.models.keys()) | cached
     names = set(available)
     for alias, target in OLLAMA_MODEL_ALIASES.items():
@@ -93,7 +93,7 @@ async def api_chat(request: Request):
     if not ollama_model:
         raise HTTPException(400, "'model' fehlt im Request-Body.")
 
-    cached = set(list_cached_models(cfg.hf_home))
+    cached = set(await list_cached_models(cfg.hf_home))
     model = _resolve_model(ollama_model, cfg, cached)
     if model not in cfg.models and model not in cached:
         raise HTTPException(
@@ -124,7 +124,7 @@ async def api_chat(request: Request):
         if src in options:
             openai_body[dst] = options[src]
 
-    rid = telemetry.start_request(model, "api/chat")
+    rid = telemetry.start_request(model, "api/chat", user_agent=request.headers.get("user-agent"))
     try:
         engine_status = await process_manager.ensure_loaded(model)
     except (RuntimeError, TimeoutError) as e:

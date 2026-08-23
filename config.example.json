@@ -12,11 +12,16 @@
   "idle_timeout_seconds": null,
   "max_concurrent_models": 2,
   "gpu_memory_ceiling": 0.9,
+  "auto_reload_last_model": true,
   "default_model": "NousResearch/Hermes-3-Llama-3.1-8B",
   "startup_timeout_seconds": 900,
   "default_serve_args": {
     "gpu_memory_utilization": 0.5,
     "max_model_len": 32768
+  },
+  "default_pricing": {
+    "input_per_mtok": 3.0,
+    "output_per_mtok": 15.0
   },
   "models": {
     "NousResearch/Hermes-3-Llama-3.1-8B": {

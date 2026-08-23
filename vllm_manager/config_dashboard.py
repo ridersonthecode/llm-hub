@@ -216,6 +216,11 @@ CONFIG_DASHBOARD_HTML = r"""<!doctype html>
       </div>
       <label data-i18n="cfg.field.defaultModel">Default model (used when a request has no "model")</label>
       <select id="f-default_model"></select>
+
+      <div class="check-row">
+        <input type="checkbox" id="f-auto_reload_last_model">
+        <label for="f-auto_reload_last_model" data-i18n="cfg.field.autoReloadLastModel">Auto-reload last used model on service restart</label>
+      </div>
     </div>
   </section>
 
@@ -231,6 +236,23 @@ CONFIG_DASHBOARD_HTML = r"""<!doctype html>
         <div>
           <label data-i18n="cfg.field.defaultMaxModelLen">Max model length</label>
           <input type="number" id="f-dsa_max_model_len" min="1">
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <section>
+    <h2 data-i18n="cfg.section.pricing">Cost Tracking</h2>
+    <div class="card">
+      <div class="hint" data-i18n="cfg.hint.pricing">Fictional prices for cost comparison (see the Costs page) - default is standard Claude Sonnet 5 pricing. Purely informational, no effect on actual (free) local operation. Per-model overrides are set on each model below.</div>
+      <div class="row">
+        <div>
+          <label data-i18n="cfg.field.pricingInput">Input $ / MTok</label>
+          <input type="number" id="f-pricing_input_per_mtok" min="0" step="0.01">
+        </div>
+        <div>
+          <label data-i18n="cfg.field.pricingOutput">Output $ / MTok</label>
+          <input type="number" id="f-pricing_output_per_mtok" min="0" step="0.01">
         </div>
       </div>
     </div>
@@ -421,6 +443,10 @@ function renderForm() {
   $("f-dsa_gpu_memory_utilization").value = dsa.gpu_memory_utilization ?? "";
   $("f-dsa_max_model_len").value = dsa.max_model_len ?? "";
 
+  const pricing = state.default_pricing || {};
+  $("f-pricing_input_per_mtok").value = pricing.input_per_mtok ?? 3.0;
+  $("f-pricing_output_per_mtok").value = pricing.output_per_mtok ?? 15.0;
+
   const rag = state.rag || {};
   $("f-rag_enabled").checked = !!rag.enabled;
   $("f-rag_qdrant_host").value = rag.qdrant_host ?? "127.0.0.1";
@@ -431,11 +457,14 @@ function renderForm() {
 
   populateModelSelects();
   $("f-default_model").value = state.default_model ?? "";
+  $("f-auto_reload_last_model").checked = state.auto_reload_last_model !== false;
   $("f-rag_embedding_model").value = rag.embedding_model ?? "";
 
   document.querySelectorAll("#f-host,#f-port,#f-engine_host,#f-engine_port,#f-hf_home,#f-vllm_bin,"
     + "#f-api_key_enabled,#f-api_key_key,#f-max_concurrent_models,#f-gpu_memory_ceiling,"
-    + "#f-idle_timeout_seconds,#f-startup_timeout_seconds,#f-dsa_gpu_memory_utilization,#f-dsa_max_model_len,"
+    + "#f-idle_timeout_seconds,#f-startup_timeout_seconds,#f-auto_reload_last_model,"
+    + "#f-dsa_gpu_memory_utilization,#f-dsa_max_model_len,"
+    + "#f-pricing_input_per_mtok,#f-pricing_output_per_mtok,"
     + "#f-rag_enabled,#f-rag_qdrant_host,#f-rag_qdrant_port,#f-rag_default_collection,"
     + "#f-rag_chunk_size_chars,#f-rag_chunk_overlap_chars,#f-default_model,#f-rag_embedding_model")
     .forEach(el => { el.oninput = markDirty; el.onchange = markDirty; });
@@ -513,6 +542,17 @@ function renderModels() {
           <label for="m-vision-${i}" data-i18n="badge.vision">Vision</label>
         </div>
 
+        <div class="row">
+          <div>
+            <label data-i18n="cfg.field.pricingInputOverride">Cost tracking: input $/MTok (empty = default)</label>
+            <input type="number" class="m-field" data-idx="${i}" data-field="pricing_input_per_mtok" min="0" step="0.01" value="${(m.pricing && m.pricing.input_per_mtok != null) ? m.pricing.input_per_mtok : ""}">
+          </div>
+          <div>
+            <label data-i18n="cfg.field.pricingOutputOverride">Cost tracking: output $/MTok (empty = default)</label>
+            <input type="number" class="m-field" data-idx="${i}" data-field="pricing_output_per_mtok" min="0" step="0.01" value="${(m.pricing && m.pricing.output_per_mtok != null) ? m.pricing.output_per_mtok : ""}">
+          </div>
+        </div>
+
         <label data-i18n="cfg.field.hfToken">HF token (optional, for gated models)</label>
         <input type="text" class="m-field" data-idx="${i}" data-field="hf_token" value="${esc(m.hf_token ?? "")}">
 
@@ -557,7 +597,17 @@ function renderModels() {
       else if (field === "max_model_len") val = el.value === "" ? null : parseInt(el.value, 10);
       else if (field === "gpu_memory_utilization") val = el.value === "" ? null : parseFloat(el.value);
       else val = el.value;
-      modelsList[idx][field] = val === "" && (field === "tool_call_parser" || field === "reasoning_parser" || field === "hf_token" || field === "notes") ? null : val;
+      if (field === "pricing_input_per_mtok" || field === "pricing_output_per_mtok") {
+        // Verschachteltes Feld (ModelConfig.pricing.*) statt eines flachen -
+        // beide leer = kompletter Override entfernt (null -> default_pricing gilt).
+        const sub = field === "pricing_input_per_mtok" ? "input_per_mtok" : "output_per_mtok";
+        const num = el.value === "" ? null : parseFloat(el.value);
+        const pricing = Object.assign({}, modelsList[idx].pricing || {});
+        if (num === null) delete pricing[sub]; else pricing[sub] = num;
+        modelsList[idx].pricing = Object.keys(pricing).length ? pricing : null;
+      } else {
+        modelsList[idx][field] = val === "" && (field === "tool_call_parser" || field === "reasoning_parser" || field === "hf_token" || field === "notes") ? null : val;
+      }
       markDirty();
       if (field === "name" || field === "task") { populateModelSelects(); }
       if (field === "name") {
@@ -604,11 +654,25 @@ function buildPayload() {
   const dsaMml = num("f-dsa_max_model_len");
   if (dsaGmu === null) delete dsa.gpu_memory_utilization; else dsa.gpu_memory_utilization = dsaGmu;
   if (dsaMml === null) delete dsa.max_model_len; else dsa.max_model_len = dsaMml;
+  // Fürs Backfill unvollständiger Pricing-Overrides: der aktuell im Formular
+  // stehende globale Default (nicht Pricing()'s eingebauter Klassen-Default -
+  // sonst würde ein Override von nur EINER Seite die andere Seite überraschend
+  // auf 3.0/15.0 zurücksetzen statt auf den eigenen konfigurierten Default).
+  const currentDefaultPricing = {
+    input_per_mtok: num("f-pricing_input_per_mtok") ?? 3.0,
+    output_per_mtok: num("f-pricing_output_per_mtok") ?? 15.0,
+  };
   const models = {};
   for (const m of modelsList) {
     const name = (m.name || "").trim();
     if (!name) continue;
     const { name: _drop, ...rest } = m;
+    if (rest.pricing) {
+      rest.pricing = {
+        input_per_mtok: rest.pricing.input_per_mtok ?? currentDefaultPricing.input_per_mtok,
+        output_per_mtok: rest.pricing.output_per_mtok ?? currentDefaultPricing.output_per_mtok,
+      };
+    }
     models[name] = rest;
   }
   return {
@@ -623,8 +687,13 @@ function buildPayload() {
     max_concurrent_models: parseInt($("f-max_concurrent_models").value, 10),
     gpu_memory_ceiling: parseFloat($("f-gpu_memory_ceiling").value),
     default_model: $("f-default_model").value || null,
+    auto_reload_last_model: $("f-auto_reload_last_model").checked,
     startup_timeout_seconds: parseInt($("f-startup_timeout_seconds").value, 10),
     default_serve_args: dsa,
+    default_pricing: {
+      input_per_mtok: parseFloat($("f-pricing_input_per_mtok").value),
+      output_per_mtok: parseFloat($("f-pricing_output_per_mtok").value),
+    },
     models,
     rag: {
       enabled: $("f-rag_enabled").checked,

@@ -17,7 +17,7 @@ from pathlib import Path
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 from fastapi.responses import HTMLResponse
 
-from . import downloader, process_manager, system_metrics, telemetry
+from . import cost_tracker, downloader, process_manager, system_metrics, telemetry
 from .catalog import list_cached_models
 from .config import get_config
 
@@ -59,13 +59,43 @@ async def build_snapshot() -> dict:
         "seconds_since_last_request": (
             round(now - telemetry.last_request_at, 1) if telemetry.last_request_at else None
         ),
-        "active_requests": list(telemetry.active_requests.values()),
-        "recent_requests": list(telemetry.recent_requests),
+        "active_requests": _active_requests_with_cost(),
+        "recent_requests": _recent_requests_with_cost(),
         "downloads": [j for j in downloader.list_jobs() if j["state"] != "done"][:10],
         "model_history": _model_history_with_current(),
-        "models_catalog": _models_catalog(cfg),
+        "models_catalog": await _models_catalog(cfg),
         "system_metrics": await system_metrics.fetch_system_metrics(),
     }
+
+
+def _active_requests_with_cost() -> list[dict]:
+    """Live-Schätzung fürs fiktive Kostentracking (siehe cost_tracker.py):
+    NUR die Ausgabeseite, aus den approximativen Chunk-Zählern (tokens_streamed
+    + reasoning_tokens_streamed) - die Prompt-Größe ist erst nach Requestende
+    bekannt, daher bewusst nicht mitgerechnet (kein falscher Gesamtbetrag)."""
+    out = []
+    for r in telemetry.active_requests.values():
+        d = dict(r)
+        tokens_so_far = (r.get("tokens_streamed") or 0) + (r.get("reasoning_tokens_streamed") or 0)
+        _, out_rate = cost_tracker.pricing_for(r["model"])
+        d["estimated_output_cost_usd"] = round(tokens_so_far / 1_000_000 * out_rate, 6)
+        out.append(d)
+    return out
+
+
+def _recent_requests_with_cost() -> list[dict]:
+    """Exakte Kosten (nur wenn prompt_tokens/completion_tokens bekannt sind -
+    siehe cost_tracker.compute_cost) für die letzten ~30 Anfragen. Wird bei
+    jedem Snapshot live gegen die AKTUELLE Preiskonfiguration neu berechnet
+    (anders als der persistente Datensatz auf /dashboard/costs, der den Preis
+    zum Zeitpunkt der Anfrage festhält, siehe cost_tracker.record_request)."""
+    out = []
+    for r in telemetry.recent_requests:
+        d = dict(r)
+        cost = cost_tracker.compute_cost(r["model"], r.get("prompt_tokens"), r.get("completion_tokens"))
+        d["cost_usd"] = cost["cost_usd"] if cost else None
+        out.append(d)
+    return out
 
 
 async def _engines_snapshot() -> list[dict]:
@@ -97,11 +127,11 @@ def _pool_budget(cfg) -> dict:
     }
 
 
-def _models_catalog(cfg) -> list[dict]:
+async def _models_catalog(cfg) -> list[dict]:
     """Alle nutzbaren Modelle fürs Dashboard: registrierte (config.json) +
     zusätzlich lokal gecachte, aber nicht registrierte. Liefert die Felder, die
     das Klick-Modal für den HF-Link und den VS-Code-JSON-Schnipsel braucht."""
-    cached = set(list_cached_models(cfg.hf_home))
+    cached = set(await list_cached_models(cfg.hf_home))
     default_mml = (cfg.default_serve_args or {}).get("max_model_len", 32768)
     out = []
     for name, mcfg in cfg.models.items():
@@ -240,12 +270,12 @@ DASHBOARD_HTML = r"""<!doctype html>
     border-radius:8px; height:36px; padding:0 8px; font-size:13px; cursor:pointer; flex:0 0 auto;
   }
   #lang-select:hover { background:var(--panel-2); }
-  #rag-link, #config-link {
+  #rag-link, #config-link, #costs-link {
     display:inline-flex; align-items:center; background:var(--panel); border:1px solid var(--border);
     color:var(--text); text-decoration:none; border-radius:8px; height:36px; padding:0 12px;
     font-size:13px; flex:0 0 auto; box-sizing:border-box;
   }
-  #rag-link:hover, #config-link:hover { background:var(--panel-2); border-color: var(--accent); }
+  #rag-link:hover, #config-link:hover, #costs-link:hover { background:var(--panel-2); border-color: var(--accent); }
   .unload-btn {
     background:var(--panel-2); border:1px solid var(--border); color:var(--text);
     border-radius:6px; padding:4px 10px; font-size:12px; cursor:pointer;
@@ -332,6 +362,7 @@ DASHBOARD_HTML = r"""<!doctype html>
     </div>
     <div class="topbar-actions">
       <a href="/dashboard/config" id="config-link" data-i18n="nav.configLink">⚙️ Config →</a>
+      <a href="/dashboard/costs" id="costs-link" data-i18n="nav.costsLink">💰 Costs →</a>
       <a href="/dashboard/rag" id="rag-link" data-i18n="nav.ragLink">RAG →</a>
       <select id="lang-select" data-i18n-title="lang.selectTitle" title="Language"></select>
       <button id="theme-toggle" data-i18n-title="theme.toggleTitle" title="Toggle theme">🌙</button>
@@ -477,6 +508,13 @@ function fmtAgo(seconds) {
 }
 function fmtMs(ms) { return (ms === null || ms === undefined) ? "–" : (ms < 1000 ? Math.round(ms) + " ms" : (ms/1000).toFixed(2) + " s"); }
 function fmtPct(x) { return (x === null || x === undefined) ? "–" : Math.round(x*100) + "%"; }
+// Fiktive Kosten (siehe cost_tracker.py) - kleine Beträge brauchen mehr
+// Nachkommastellen, sonst rundet alles unter einem Cent auf $0.00.
+function fmtUsd(x) {
+  if (x === null || x === undefined) return null;
+  if (x === 0) return "$0.00";
+  return x < 0.01 ? "$" + x.toFixed(6) : "$" + x.toFixed(4);
+}
 // Human-readable duration, e.g. 3000s -> "50m", 65s -> "1m 5s", 45s -> "45s"
 function fmtDuration(seconds) {
   if (seconds === null || seconds === undefined) return "–";
@@ -493,6 +531,14 @@ function esc(s) { return (s ?? "").toString().replace(/[&<>]/g, c => ({"&":"&amp
 // Modelle können denselben Kurznamen haben (z.B. lokal quantisierte Modelle
 // vs. HF-Repos mit demselben Dateinamen), das führt sonst zu Verwechslungen.
 function modelName(m) { return m || "–"; }
+// Welche App den Request geschickt hat, aus dem rohen User-Agent-Header (siehe
+// telemetry.start_request) - unverändert angezeigt (keine Rate-/Vermutungslogik,
+// um nichts falsch zu klassifizieren), lang truncated mit vollem Wert im Tooltip.
+function appCell(userAgent) {
+  if (!userAgent) return `<span class="hint">${esc(t("app.unknown"))}</span>`;
+  const short = userAgent.length > 28 ? userAgent.slice(0, 27) + "…" : userAgent;
+  return `<span title="${esc(userAgent)}">${esc(short)}</span>`;
+}
 function reasonLabel(r) {
   if (r === "ready") return t("reason.ready");
   if (r === "loading") return t("reason.loading");
@@ -514,6 +560,20 @@ function reasonBadgeClass(r) {
   return "idle";
 }
 function jobStateLabel(s) { return (TRANSLATIONS[currentLang] || {})["job." + s] !== undefined || (TRANSLATIONS[DEFAULT_LANG] || {})["job." + s] !== undefined ? t("job." + s) : esc(s); }
+
+// Phasen einer aktiven Anfrage (siehe telemetry.py _set_phase): was die
+// Engine gerade tut, für die Active-Requests-Tabelle im Dashboard.
+const PHASE_META = {
+  loading:   { icon: "🥶", key: "phase.loading",   badgeClass: "loading" },
+  prefill:   { icon: "⏳", key: "phase.prefill",   badgeClass: "idle" },
+  thinking:  { icon: "💭", key: "phase.thinking",  badgeClass: "running" },
+  tool_call: { icon: "🔧", key: "phase.toolCall",  badgeClass: "running" },
+  generating:{ icon: "✍️", key: "phase.generating",badgeClass: "running" },
+};
+function phaseInfo(phase) {
+  const meta = PHASE_META[phase] || { icon: "•", key: null, badgeClass: "idle" };
+  return { icon: meta.icon, badgeClass: meta.badgeClass, label: () => meta.key ? t(meta.key) : (phase || "–") };
+}
 
 // --- Live-Charts (GPU/RAM) ----------------------------------------------
 // Reine Canvas-Sparklines ohne externe Lib: rollierender Verlauf im Browser,
@@ -628,7 +688,7 @@ function render(data) {
     $("active-request-box").innerHTML = `<div class="empty">${t("empty.noActiveRequest")}</div>`;
   } else {
     $("active-request-box").innerHTML = `<table><thead><tr>
-      <th>${t("th.model")}</th><th>${t("th.endpoint")}</th><th>${t("th.port")}</th><th>${t("th.status")}</th><th>${t("th.elapsed")}</th><th>${t("th.loadTime")}</th><th>${t("th.ttft")}</th><th>${t("th.tokens")}</th><th>${t("th.throughput")}</th>
+      <th>${t("th.model")}</th><th>${t("th.app")}</th><th>${t("th.endpoint")}</th><th>${t("th.port")}</th><th>${t("th.phase")}</th><th>${t("th.elapsed")}</th><th>${t("th.loadTime")}</th><th>${t("th.ttft")}</th><th>${t("th.tokens")}</th><th>${t("th.reasoningTokens")}</th><th>${t("th.throughput")}</th><th>${t("th.cost")}</th>
       </tr></thead><tbody>` + active.map(r => {
         const elapsed = Date.now()/1000 - r.started_at;
         const port = (engs.find(e => e.loaded_model === r.model) || {}).port;
@@ -636,23 +696,36 @@ function render(data) {
         // telemetry.mark_ready) - bis dahin wartet die Anfrage auf einen
         // Kaltstart/Modellwechsel, es wird also noch nichts generiert.
         const loading = r.queued_ms === null || r.queued_ms === undefined;
-        const badge = loading
-          ? `<span class="badge loading">${t("badge.coldStart")}</span>`
-          : `<span class="badge running">${t("badge.running")}</span>`;
         const genElapsedSec = loading ? null : Math.max(0, elapsed - r.queued_ms / 1000);
         const throughput = (!loading && r.tokens_streamed > 0 && genElapsedSec > 0.05)
           ? (r.tokens_streamed / genElapsedSec).toFixed(1) + " tok/s"
           : "–";
+        const history = r.phase_history || [];
+        const lastChange = history.length ? history[history.length - 1] : null;
+        const phaseSinceSec = lastChange ? Math.max(0, Date.now()/1000 - lastChange.at) : elapsed;
+        const pi = phaseInfo(r.phase);
+        // Hover-Tooltip: kleine Zeitleiste aller Phasenwechsel seit Requeststart.
+        const timeline = history.map((h, i) => {
+          const from = fmtDuration(h.at - r.started_at);
+          const to = (i + 1 < history.length) ? fmtDuration(history[i + 1].at - r.started_at) : t("phase.now");
+          return `${phaseInfo(h.phase).label()} ${from} → ${to}`;
+        }).join("\n");
         return `<tr>
           <td>${esc(modelName(r.model))}</td>
+          <td class="mono">${appCell(r.user_agent)}</td>
           <td class="mono">${esc(r.path || "–")}${r.is_stream ? ` <span class="badge idle">${t("badge.stream")}</span>` : ""}</td>
           <td class="mono">${port ?? "–"}</td>
-          <td>${badge}</td>
+          <td>
+            <span class="badge ${pi.badgeClass}" title="${esc(timeline)}">${pi.icon} ${esc(pi.label())}</span>
+            <div class="hint">${esc(t("phase.since", { duration: fmtDuration(phaseSinceSec) }))}</div>
+          </td>
           <td class="mono">${fmtDuration(elapsed)}</td>
           <td class="mono">${r.queued_ms ? fmtMs(r.queued_ms) : "–"}</td>
           <td class="mono">${fmtMs(r.ttft_ms)}</td>
           <td class="mono">${r.tokens_streamed ?? 0}</td>
+          <td class="mono">${r.reasoning_tokens_streamed ?? 0}</td>
           <td class="mono">${throughput}</td>
+          <td class="mono" title="${esc(t("cost.hint.soFarOutputOnly"))}">${fmtUsd(r.estimated_output_cost_usd) ?? "–"} <span class="hint">${t("cost.soFar")}</span></td>
         </tr>`;
       }).join("") + `</tbody></table>`;
   }
@@ -699,16 +772,18 @@ function render(data) {
     $("recent-box").innerHTML = `<div class="empty">${t("empty.noRecentRequests")}</div>`;
   } else {
     $("recent-box").innerHTML = `<table><thead><tr>
-      <th>${t("th.time")}</th><th>${t("th.model")}</th><th>${t("th.status")}</th><th>${t("th.loadTime")}</th><th>${t("th.duration")}</th><th>${t("th.ttft")}</th><th>${t("th.promptTokens")}</th><th>${t("th.complTokens")}</th>
+      <th>${t("th.time")}</th><th>${t("th.model")}</th><th>${t("th.app")}</th><th>${t("th.status")}</th><th>${t("th.loadTime")}</th><th>${t("th.duration")}</th><th>${t("th.ttft")}</th><th>${t("th.promptTokens")}</th><th>${t("th.complTokens")}</th><th>${t("th.cost")}</th>
       </tr></thead><tbody>` + recent.map(r => `<tr>
         <td class="mono">${new Date(r.started_at*1000).toLocaleTimeString(localeFor(currentLang))}</td>
         <td>${esc(modelName(r.model))}</td>
+        <td class="mono">${appCell(r.user_agent)}</td>
         <td><span class="badge ${r.status === 'ok' ? 'ok' : 'error'}">${r.status === 'ok' ? t("status.ok") : t("status.error")}</span></td>
         <td class="mono">${r.queued_ms ? fmtMs(r.queued_ms) : "–"}</td>
         <td class="mono">${fmtMs(r.duration_ms)}</td>
         <td class="mono">${fmtMs(r.ttft_ms)}</td>
         <td class="mono">${r.prompt_tokens ?? "–"}</td>
         <td class="mono">${r.completion_tokens ?? "–"}</td>
+        <td class="mono">${fmtUsd(r.cost_usd) ?? "–"}</td>
       </tr>`).join("") + `</tbody></table>`;
   }
 

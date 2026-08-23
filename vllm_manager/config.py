@@ -18,6 +18,15 @@ class ApiKeyConfig(BaseModel):
     key: str = ""
 
 
+class Pricing(BaseModel):
+    """Rein fiktive Kostenkalkulation zum Vergleich mit einer Cloud-API (siehe
+    cost_tracker.py) - hat KEINERLEI Einfluss auf den tatsächlichen (kostenlosen)
+    lokalen Betrieb. Default: offizielle Claude-Sonnet-5-Standardpreise
+    (USD pro 1 Mio. Tokens, Stand siehe Anthropic-Preisliste)."""
+    input_per_mtok: float = 3.0
+    output_per_mtok: float = 15.0  # gilt auch für Reasoning-Tokens, wie bei Anthropics eigener Abrechnung
+
+
 class ModelConfig(BaseModel):
     tool_call_parser: Optional[str] = None
     # Trennt vLLMs Antwort in "reasoning_content" (Denkprozess) und "content"
@@ -39,6 +48,8 @@ class ModelConfig(BaseModel):
     hf_token: Optional[str] = None
     notes: Optional[str] = None
     enabled: bool = True
+    # Override für dieses Modell - None = default_pricing (siehe Config unten) gilt.
+    pricing: Optional[Pricing] = None
 
 
 class RagConfig(BaseModel):
@@ -75,11 +86,19 @@ class Config(BaseModel):
     # Wird diese beim Laden eines neuen Modells überschritten, wird die am
     # längsten ungenutzte Engine zuerst verdrängt (LRU).
     gpu_memory_ceiling: float = 0.90
+    # Ollama-artiges Verhalten: das zuletzt genutzte Modell wird beim nächsten
+    # Dienststart automatisch im Hintergrund nachgeladen (siehe process_manager.py
+    # load_last_active_model()/_persist_last_active()). Auf false setzen, um nach
+    # einem Neustart bewusst mit leerem Hot Pool zu starten.
+    auto_reload_last_model: bool = True
     default_model: Optional[str] = None
     startup_timeout_seconds: int = 900
     default_serve_args: dict = Field(default_factory=dict)
     models: dict[str, ModelConfig] = Field(default_factory=dict)
     rag: RagConfig = Field(default_factory=RagConfig)
+    # Fallback-Preise fürs fiktive Kostentracking (siehe cost_tracker.py) für
+    # Modelle ohne eigenen models.<name>.pricing-Override.
+    default_pricing: Pricing = Field(default_factory=Pricing)
 
     def resolved_vllm_bin(self) -> str:
         if self.vllm_bin:

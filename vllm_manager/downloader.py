@@ -12,6 +12,7 @@ from typing import Optional
 
 from huggingface_hub import HfApi, snapshot_download
 
+from . import catalog
 from .config import get_config
 
 logger = logging.getLogger("vllm_manager.downloader")
@@ -114,7 +115,10 @@ async def _run_job(job: dict, hf_token: Optional[str]) -> None:
     last_bytes, last_t = 0, time.time()
     while not download_future.done():
         await asyncio.sleep(POLL_INTERVAL)
-        now_bytes = _dir_size(blobs_dir)
+        # _dir_size() ist blockierende Disk-I/O (os.walk + stat je Datei) - im
+        # Thread ausführen, sonst friert das der Event-Loop für alle anderen
+        # Requests/den Dashboard-Heartbeat kurz ein, siehe catalog.py-Docstring.
+        now_bytes = await asyncio.to_thread(_dir_size, blobs_dir)
         now_t = time.time()
         dt = now_t - last_t
         if dt > 0:
@@ -130,10 +134,14 @@ async def _run_job(job: dict, hf_token: Optional[str]) -> None:
 
     try:
         await download_future
-        job["bytes_done"] = job["bytes_total"] or _dir_size(blobs_dir)
+        job["bytes_done"] = job["bytes_total"] or await asyncio.to_thread(_dir_size, blobs_dir)
         job["percent"] = 100.0
         job["state"] = "done"
         logger.info("Download abgeschlossen: %s", model)
+        # Sofort sichtbar machen statt bis zu _CACHE_TTL Sekunden zu warten -
+        # das neu heruntergeladene Modell soll im Dashboard/den APIs direkt
+        # als "gecacht" auftauchen.
+        catalog.invalidate_cache(cfg.hf_home)
     except Exception as e:
         logger.exception("Download fehlgeschlagen: %s", model)
         job["state"] = "error"

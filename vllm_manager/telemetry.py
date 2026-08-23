@@ -39,7 +39,7 @@ def _publish(event: dict) -> None:
             pass  # Dashboard bekommt beim nächsten Heartbeat ohnehin einen frischen Snapshot
 
 
-def start_request(model: str, path: str, is_stream: bool = False) -> str:
+def start_request(model: str, path: str, is_stream: bool = False, user_agent: Optional[str] = None) -> str:
     global last_request_at, _request_counter
     _request_counter += 1
     rid = f"{int(time.time() * 1000)}-{_request_counter}"
@@ -49,17 +49,39 @@ def start_request(model: str, path: str, is_stream: bool = False) -> str:
         "model": model,
         "path": path,
         "is_stream": is_stream,
+        # Roher User-Agent-Header des aufrufenden Clients ("welche App hat den
+        # Request geschickt") - None, falls der Client keinen mitschickt; die
+        # Anzeige "unbekannt"/"unknown" übernimmt das Frontend (i18n), damit es
+        # in beiden Sprachen passt statt hier fest verdrahtet zu sein.
+        "user_agent": user_agent,
         "started_at": last_request_at,
         "ready_at": None,  # gesetzt sobald das Modell geladen ist und die Anfrage weitergereicht wird
         "queued_ms": None,  # Wartezeit auf Modell-Autostart/-Wechsel, falls nötig
         "ttft_ms": None,  # Zeit bis zum ersten Token AB ready_at (reine Generierungs-TTFT)
         "tokens_streamed": 0,
+        "reasoning_tokens_streamed": 0,  # separat gezählt: Denkprozess-Chunks (delta.reasoning_content, siehe reasoning_parser in config.json)
         "prompt_tokens": None,
         "completion_tokens": None,
         "status": "running",
+        # Phasen-Tracking fürs Dashboard ("was macht das Modell gerade"):
+        # loading (Kaltstart/Modell wird geladen) -> prefill (Modell bereit,
+        # Prompt wird verarbeitet, noch kein Output) -> thinking (Reasoning-
+        # Content, siehe reasoning_parser) / tool_call / generating (normale
+        # Antwort). phase_history sammelt jeden Wechsel mit Zeitstempel, damit
+        # das Dashboard eine kleine Zeitleiste zeigen kann.
+        "phase": "loading",
+        "phase_history": [{"phase": "loading", "at": last_request_at}],
     }
     _publish({"type": "request_start"})
     return rid
+
+
+def _set_phase(rid: str, phase: str) -> None:
+    r = active_requests.get(rid)
+    if r is not None and r.get("phase") != phase:
+        r["phase"] = phase
+        r["phase_history"].append({"phase": phase, "at": time.time()})
+        _publish({"type": "phase_change"})
 
 
 def mark_ready(rid: str) -> None:
@@ -68,6 +90,7 @@ def mark_ready(rid: str) -> None:
     if r is not None and r["ready_at"] is None:
         r["ready_at"] = time.time()
         r["queued_ms"] = round((r["ready_at"] - r["started_at"]) * 1000, 1)
+        _set_phase(rid, "prefill")
         _publish({"type": "ready"})
 
 
@@ -83,6 +106,18 @@ def increment_tokens(rid: str) -> None:
     r = active_requests.get(rid)
     if r is not None:
         r["tokens_streamed"] += 1
+    _set_phase(rid, "generating")
+
+
+def increment_reasoning_tokens(rid: str) -> None:
+    r = active_requests.get(rid)
+    if r is not None:
+        r["reasoning_tokens_streamed"] += 1
+    _set_phase(rid, "thinking")
+
+
+def mark_tool_call(rid: str) -> None:
+    _set_phase(rid, "tool_call")
 
 
 def finish_request(
@@ -90,10 +125,13 @@ def finish_request(
     status: str,
     prompt_tokens: Optional[int] = None,
     completion_tokens: Optional[int] = None,
-) -> None:
+) -> Optional[dict]:
+    """Gibt den fertigen Request-Datensatz zurück (None, falls rid unbekannt) -
+    genutzt von main.py, um denselben Datensatz an cost_tracker.record_request()
+    weiterzureichen, ohne started_at/finished_at doppelt zu berechnen."""
     r = active_requests.pop(rid, None)
     if r is None:
-        return
+        return None
     r["status"] = status
     r["finished_at"] = time.time()
     r["duration_ms"] = round((r["finished_at"] - r["started_at"]) * 1000, 1)
@@ -103,21 +141,56 @@ def finish_request(
         r["completion_tokens"] = completion_tokens
     recent_requests.appendleft(r)
     _publish({"type": "request_end"})
+    return r
+
+
+_metrics_client: Optional[httpx.AsyncClient] = None
+_METRICS_CACHE_TTL = 0.8  # wie system_metrics.py - mehrere offene Dashboard-Tabs teilen sich einen Abruf
+_metrics_cache: dict[int, dict] = {}
+_metrics_cache_at: dict[int, float] = {}
+_metrics_locks: dict[int, asyncio.Lock] = {}
+
+
+def _get_metrics_client() -> httpx.AsyncClient:
+    """Ein wiederverwendeter Client statt einem neuen pro Aufruf - vermeidet
+    unnötigen Verbindungsaufbau bei jedem WS-Heartbeat/jeder Engine/jedem
+    offenen Dashboard-Tab (Keep-Alive-Verbindung wird wiederverwendet)."""
+    global _metrics_client
+    if _metrics_client is None:
+        _metrics_client = httpx.AsyncClient(timeout=2)
+    return _metrics_client
 
 
 async def fetch_engine_metrics(port: Optional[int] = None) -> dict:
     """Ruft vLLMs eigenen /metrics-Endpoint ab und extrahiert die wichtigsten
     Werte. `port` adressiert eine bestimmte Engine aus dem Hot Pool - ohne
-    Angabe wird der konfigurierte Default-Port verwendet."""
+    Angabe wird der konfigurierte Default-Port verwendet. Kurz gecacht pro
+    Port (mit Lock-Dedup wie catalog.py) - mehrere gleichzeitig offene
+    Dashboard-Tabs lösen so nur EINEN echten Abruf pro Engine/Sekunde aus,
+    nicht einen pro Tab."""
     cfg = get_config()
-    url = f"http://{cfg.engine_host}:{port or cfg.engine_port}/metrics"
-    try:
-        async with httpx.AsyncClient(timeout=2) as client:
-            r = await client.get(url)
+    resolved_port = port or cfg.engine_port
+    now = time.time()
+    if resolved_port in _metrics_cache and (now - _metrics_cache_at.get(resolved_port, 0)) < _METRICS_CACHE_TTL:
+        return _metrics_cache[resolved_port]
+
+    lock = _metrics_locks.setdefault(resolved_port, asyncio.Lock())
+    async with lock:
+        # Zwischen dem ungelockten Check oben und hier könnte ein anderer Task
+        # den Cache schon aufgefrischt haben - erneut prüfen.
+        now = time.time()
+        if resolved_port in _metrics_cache and (now - _metrics_cache_at.get(resolved_port, 0)) < _METRICS_CACHE_TTL:
+            return _metrics_cache[resolved_port]
+        url = f"http://{cfg.engine_host}:{resolved_port}/metrics"
+        try:
+            r = await _get_metrics_client().get(url)
             r.raise_for_status()
-            return _parse_prometheus(r.text)
-    except Exception:
-        return {}
+            result = _parse_prometheus(r.text)
+        except Exception:
+            result = {}
+        _metrics_cache[resolved_port] = result
+        _metrics_cache_at[resolved_port] = time.time()
+        return result
 
 
 def _parse_prometheus(text: str) -> dict:

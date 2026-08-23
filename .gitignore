@@ -24,6 +24,16 @@ config.json
 # enthalten dieselben sensiblen Daten wie config.json.
 config_backups/
 
+# Persistente Kostentracking-Historie (vllm_manager/cost_tracker.py) - reine
+# Nutzungsdaten dieser Maschine, nicht Teil des Projekts.
+costs.jsonl
+costs.jsonl.tmp
+
+# Zeiger aufs zuletzt genutzte Modell fürs automatische Nachladen beim
+# Dienststart (vllm_manager/process_manager.py, config.auto_reload_last_model).
+last_active_model.json
+last_active_model.json.tmp
+
 # Claude Code lokale Projekt-Settings (Permissions dieser Maschine)
 .claude/settings.local.json
 

@@ -50,6 +50,62 @@ Unterschied zwischen FP8 und gut gemachtem INT4/AWQ kaum spürbar. Bei Aufgaben 
 vielen Zahlen, komplexer Logik oder langen Tool-Call-Ketten kann INT4 eher mal
 danebenliegen.
 
+### Vor- und Nachteile der Quantisierung
+
+**Vorteile:**
+
+- **Kleinerer Speicherbedarf** – sowohl auf der Festplatte als auch im
+  (Unified-)Memory. Dadurch passen mehr Modelle gleichzeitig in den Hot Pool
+  dieses Projekts, oder ein Modell passt überhaupt erst auf die vorhandene
+  Hardware (ein 70B-Modell in voller BF16-Präzision bräuchte ~140GB nur für die
+  Gewichte – quantisiert auf 4-bit nur noch ~35GB).
+- **Schnellere Token-Erzeugung** – siehe Abschnitt 3: weniger Bytes pro Token
+  bedeuten weniger Speicherbandbreiten-Bedarf. Selbst live gemessen in diesem
+  Projekt: FP8 → eigenes AWQ-INT4 brachte 6.1 → 11.2 Tok/s, fast eine
+  Verdopplung (siehe [Benchmark](benchmark-ollama-vs-vllm-qwen3.8-27b.md)).
+- **Schnellerer Download** – kleinere Datei, weniger GB durchs Netz.
+- **Mehr gleichzeitige Anfragen möglich** – weniger Speicher pro Modell heißt
+  mehr Spielraum für den KV-Cache, also mehr parallele Requests, bevor der
+  Speicher voll ist.
+- **Geringere Kosten** bei gemieteter Cloud-Hardware (weniger/kleinere GPUs
+  nötig für denselben Durchsatz) bzw. weniger Stromverbrauch lokal.
+
+**Nachteile:**
+
+- **Qualitätsverlust** – wie stark, hängt vom Verfahren ab. Bei guten
+  Verfahren (FP8, gut kalibriertes AWQ) meist kaum spürbar im Alltag; bei
+  aggressiverer Quantisierung oder schlechter Kalibrierung eher bei Mathe,
+  komplexer Logik oder langen Tool-Call-Ketten spürbar.
+- **Nicht rückgängig zu machen** – einmal quantisierte Information ist
+  verloren. Aus einem 4-bit-Modell lässt sich nicht wieder ein vollwertiges
+  BF16-Modell zurückrechnen (siehe GGUF-vs-AWQ-Abschnitt unten) – für eine
+  andere/bessere Quantisierung braucht man wieder die Original-Gewichte.
+- **Nicht jedes Format läuft überall** – GGUF (Ollama/llama.cpp) lässt sich
+  z.B. in der hier verwendeten vLLM-Version gar nicht mehr laden (siehe
+  unten). Format und Ziel-Engine müssen zusammenpassen.
+- **Nicht jede Architektur ist gut unterstützt** – bei brandneuen/exotischen
+  Modell-Architekturen (wie den Mamba/Gated-Delta-Net-Layern in Qwen3.8-27B,
+  siehe [Benchmark-Dokument](benchmark-ollama-vs-vllm-qwen3.8-27b.md#was-sind-mamba-layer--gated-delta-net))
+  können Quantisierungs-Werkzeuge noch Lücken haben – in diesem Projekt hat
+  das mehrere Anläufe gebraucht (siehe
+  [Anleitung](anleitung-eigene-awq-quantisierung.md#stolpersteine-4-anläufe-waren-nötig)).
+- **Community-Quantisierungen sind ein Vertrauensthema** – fertige
+  Quantisierungen von Drittanbietern (nicht vom Modell-Hersteller selbst) sind
+  nicht offiziell geprüft; Qualität und Kalibrierungsdaten sind oft nicht
+  dokumentiert.
+- **Selbst quantisieren kostet Zeit und Know-how** – braucht die
+  Original-Gewichte (oft sehr groß), Kalibrierungsdaten, passende
+  Werkzeuge/Bibliotheken und je nach Modellgröße/Hardware einiges an
+  Rechenzeit (bei uns rund eine Stunde pro Durchlauf, siehe
+  [Anleitung](anleitung-eigene-awq-quantisierung.md)).
+
+**Kurz gesagt:** Quantisierung ist fast immer ein guter Kompromiss, wenn
+Geschwindigkeit/Speicherplatz wichtiger sind als letzte Präzisions-Prozentpunkte
+– was für die meisten Alltagsaufgaben zutrifft. Bei Aufgaben, wo Genauigkeit
+entscheidend ist (z.B. exakte strukturierte Datenextraktion aus Rechnungen),
+lohnt sich der Vergleich mit weniger aggressiver Quantisierung (FP8 statt INT4)
+oder gar keiner.
+
 ### Dateiformat vs. Quantisierungsverfahren: GGUF vs. AWQ
 
 `GGUF` und `AWQ` tauchen beide im Zusammenhang mit 4-bit-Modellen auf, sind aber
