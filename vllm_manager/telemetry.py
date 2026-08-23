@@ -120,6 +120,22 @@ def mark_tool_call(rid: str) -> None:
     _set_phase(rid, "tool_call")
 
 
+def update_partial_usage(rid: str, prompt_tokens: Optional[int], completion_tokens: Optional[int]) -> None:
+    """Aktualisiert prompt_tokens/completion_tokens auf einer noch LAUFENDEN
+    Anfrage, sobald vLLM ein usage-Feld mitten im Stream schickt (nur wenn der
+    Client stream_options.include_usage gesetzt hat - sonst kommt usage erst
+    im allerletzten Chunk, praktisch zeitgleich mit finish_request()). Macht
+    die exakten Zahlen fürs Dashboard live sichtbar, statt nur nach Abschluss
+    der Anfrage in Recent Requests."""
+    r = active_requests.get(rid)
+    if r is None:
+        return
+    if prompt_tokens is not None:
+        r["prompt_tokens"] = prompt_tokens
+    if completion_tokens is not None:
+        r["completion_tokens"] = completion_tokens
+
+
 def finish_request(
     rid: str,
     status: str,

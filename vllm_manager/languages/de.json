@@ -121,6 +121,11 @@
   "ago.hours": "{n}h her",
 
   "modal.hfLink": "🤗 Auf HuggingFace ansehen ↗",
+  "modal.contextLength": "Kontextlänge",
+  "modal.tokens": "Tokens",
+  "modal.gpuMemory": "GPU-Speicher",
+  "common.yes": "Ja",
+  "common.no": "Nein",
   "modal.jsonLabel": "VS Code Custom-Endpoint (chatLanguageModels.json)",
   "modal.copy": "Kopieren",
   "modal.copied": "Kopiert ✓",
@@ -286,5 +291,49 @@
   "cost.action.resetAll": "Alles zurücksetzen",
   "cost.confirm.deleteSelected": "{n} ausgewählte(n) Datensatz/Datensätze löschen?",
   "cost.confirm.resetAll": "ALLE Kostendatensätze löschen? Das kann nicht rückgängig gemacht werden.",
-  "cost.empty.noRecords": "Noch keine Anfragen erfasst"
+  "cost.empty.noRecords": "Noch keine Anfragen erfasst",
+
+  "help.clickForInfo": "Klicken für mehr Infos",
+
+  "help.poolBudget.title": "Pool-Speicherbudget",
+  "help.poolBudget.body": "Zeigt, wie viel vom konfigurierten GPU-Speicherbudget (gpu_memory_ceiling) durch alle aktuell geladenen Modelle zusammen belegt ist - die SUMME der gpu_memory_utilization-Werte aller Engines, keine Live-Messung des tatsächlichen Speicherverbrauchs. Würde ein neues Modell diese Grenze überschreiten, wird automatisch das am längsten ungenutzte Modell verdrängt (außer es hat gerade eine laufende Anfrage).",
+
+  "help.kvCache.title": "KV-Cache",
+  "help.kvCache.body": "Wie voll der KV-Cache (Key-Value-Cache) dieser Engine gerade ist - der Speicher, in dem sich das Modell während der Generierung an alle bisherigen Tokens im Kontext \"erinnert\". Kommt direkt aus vLLMs eigenen Metriken. Nähert sich der Wert 100%, kann vLLM neue Anfragen nicht mehr sofort annehmen und muss sie in die Warteschlange stellen.",
+
+  "help.avgTtft.title": "Ø TTFT (Engine)",
+  "help.avgTtft.body": "Durchschnittliche Time-to-First-Token dieser Engine über alle bisher bedienten Anfragen: die Zeit vom Eintreffen einer Anfrage bei der Engine bis zum ersten generierten Token (Prompt-Verarbeitung). Kommt direkt aus vLLMs eigenen Metriken, wird nicht von diesem Dashboard berechnet.",
+
+  "help.avgMsPerTok.title": "Ø ms/Tok (Engine)",
+  "help.avgMsPerTok.body": "Durchschnittliche Zeit pro erzeugtem Token (Time-per-Output-Token) über alle bisher bedienten Anfragen dieser Engine - der Kehrwert der Tokens/Sekunde-Generierungsgeschwindigkeit. Kommt direkt aus vLLMs eigenen Metriken.",
+
+  "help.tokensPromptGen.title": "Tokens (Prompt/Gen.)",
+  "help.tokensPromptGen.body": "Gesamtzahl der Prompt-Tokens bzw. generierten Tokens, die diese Engine seit ihrem Start verarbeitet hat - summiert über ALLE bisher bedienten Anfragen, nicht nur die letzte. Kommt direkt aus vLLMs eigenen Zählern und setzt sich beim Entladen der Engine zurück.",
+
+  "help.requestsEngine.title": "Requests (Running/Waiting)",
+  "help.requestsEngine.body": "Wie viele Anfragen diese Engine gerade tatsächlich verarbeitet (running) bzw. auf freie Kapazität warten (waiting) - vLLMs eigene Anfragen-Warteschlange, direkt aus dessen Metriken. Dank Continuous Batching können mehrere Anfragen gleichzeitig \"running\" sein.",
+
+  "help.phase.title": "Phase",
+  "help.phase.body": "Was das Modell für diese Anfrage gerade tut: 🥶 lädt noch (Kaltstart) → ⏳ verarbeitet den Prompt (noch keine Ausgabe) → 💭 denkt nach (bei Reasoning-Modellen) / 🔧 ruft ein Tool auf / ✍️ generiert die Antwort. \"seit Xs\" zeigt, wie lange die aktuelle Phase schon läuft. Beim Draufhalten mit der Maus auf das Badge gibt's eine Zeitleiste aller bisherigen Phasenwechsel.",
+
+  "help.loadTime.title": "Ladezeit",
+  "help.loadTime.body": "Wie lange diese Anfrage warten musste, bis das angefragte Modell bereitstand - z.B. wegen eines Kaltstarts, oder weil zuerst ein anderes Modell verdrängt werden musste, um Platz zu schaffen. Nahe 0, wenn das Modell schon warm war.",
+
+  "help.ttft.title": "TTFT",
+  "help.ttft.body": "Time-to-First-Token: die Zeit von \"Modell bereit\" bis zum ersten generierten Token dieser konkreten Anfrage - reine Prompt-Verarbeitungszeit, ohne eine eventuelle Ladezeit.",
+
+  "help.liveTokens.title": "Live-Tokens",
+  "help.liveTokens.body": "Prompt- / generierte Tokens dieser einen laufenden Anfrage. Die generierte Seite ist live, aber eine Näherung (1 gestreamter Chunk mit Inhalt ≈ 1 Token, keine exakte Tokenizer-Zählung) und wird zusätzlich getrennt für Denkprozess-Tokens (Reasoning, nur falls das Modell einen reasoning_parser konfiguriert hat - siehe Config-Editor) angezeigt. Die Prompt-Seite zeigt \"–\", bis vLLM sie meldet - das passiert mitten im Stream nur, wenn der Client stream_options.include_usage gesetzt hat, sonst erst wenn die Anfrage fertig ist.",
+
+  "help.throughput.title": "Durchsatz",
+  "help.throughput.body": "Aktuelle Generierungsgeschwindigkeit dieser laufenden Anfrage in Tokens pro Sekunde, live berechnet aus den bisher gestreamten Tokens seit Antwortbeginn (nach Ladezeit/Prompt-Verarbeitung).",
+
+  "help.cost.title": "Kosten",
+  "help.cost.body": "Rein fiktiver Vergleichswert: was diese Tokens über eine Cloud-API gekostet hätten (Default: Claude-Sonnet-5-Preise, pro Modell anpassbar im Config-Editor). Der lokale Betrieb ist und bleibt kostenlos - siehe die eigene Kostenseite (💰 Costs) für Details, Verlauf und Preis-Konfiguration.",
+
+  "help.requestTokens.title": "Prompt-/Completion-Tokens",
+  "help.requestTokens.body": "Exakte Prompt-/Completion-Token-Zahlen dieser einen abgeschlossenen Anfrage (nicht kumulativ wie \"Tokens (Prompt/Gen.)\" in der Geladene-Modelle-Tabelle). Nur verfügbar, wenn die Antwort ein usage-Feld enthielt - bei Streaming-Anfragen ohne stream_options.include_usage bleibt das Feld leer.",
+
+  "help.ramUnified.title": "RAM-Auslastung (Unified Memory)",
+  "help.ramUnified.body": "Auf dieser Hardware (Grace Blackwell / GB10) teilen sich CPU und GPU denselben physischen Speicher (Unified Memory) - die RAM-Auslastung deckt deshalb auch den Speicherbedarf der geladenen Modelle mit ab. Eine separate GPU-Speicheranzeige (VRAM) gibt es auf diesem System nicht."
 }

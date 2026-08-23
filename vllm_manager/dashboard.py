@@ -134,7 +134,9 @@ async def _models_catalog(cfg) -> list[dict]:
     cached = set(await list_cached_models(cfg.hf_home))
     default_mml = (cfg.default_serve_args or {}).get("max_model_len", 32768)
     out = []
+    default_gmu = (cfg.default_serve_args or {}).get("gpu_memory_utilization", 0.5)
     for name, mcfg in cfg.models.items():
+        gmu, mml = cfg.serve_args_for(name)
         out.append({
             "model": name,
             "cached": name in cached,
@@ -144,7 +146,8 @@ async def _models_catalog(cfg) -> list[dict]:
             "tool_calling": mcfg.enable_auto_tool_choice,
             "reasoning": bool(mcfg.reasoning_parser),
             "task": mcfg.task,
-            "max_model_len": cfg.serve_args_for(name)[1],
+            "max_model_len": mml,
+            "gpu_memory_utilization": gmu,
             "notes": mcfg.notes,
         })
     known = {m["model"] for m in out}
@@ -159,6 +162,7 @@ async def _models_catalog(cfg) -> list[dict]:
             "reasoning": False,
             "task": "generate",
             "max_model_len": default_mml,
+            "gpu_memory_utilization": default_gmu,
             "notes": "Lokal gecacht, nicht in config.json registriert.",
         })
     return sorted(out, key=lambda m: m["model"].lower())
@@ -302,6 +306,7 @@ DASHBOARD_HTML = r"""<!doctype html>
   section { margin-bottom: 26px; }
   section h2 { font-size: 14px; color: var(--text-dim); text-transform:uppercase; letter-spacing:.04em; margin: 0 0 10px; }
   table { width:100%; border-collapse: collapse; background:var(--panel); border:1px solid var(--border); border-radius:10px; overflow:hidden; }
+  .table-scroll { overflow-x:auto; }
   th, td { text-align:left; padding:9px 12px; font-size:13px; border-bottom:1px solid var(--border); }
   th { color:var(--text-dim); font-weight:600; font-size:11px; text-transform:uppercase; }
   tr:last-child td { border-bottom:none; }
@@ -335,6 +340,14 @@ DASHBOARD_HTML = r"""<!doctype html>
   }
   .modal h3 { margin:0 0 4px; font-family: var(--mono); font-size:16px; word-break: break-all; }
   .modal .badges { display:flex; gap:6px; flex-wrap:wrap; margin:10px 0 16px; }
+  .modal .info-grid {
+    display:grid; grid-template-columns: auto 1fr; gap:6px 14px;
+    margin: 0 0 16px; padding:12px 14px; background:var(--panel-2);
+    border-radius:8px; font-size:13px;
+  }
+  .modal .info-grid dt { color:var(--text-dim); margin:0; }
+  .modal .info-grid dd { margin:0; font-family:var(--mono); }
+  .modal .notes { font-size:12px; color:var(--text-dim); margin:0 0 16px; line-height:1.5; }
   .modal a.hf-link {
     display:inline-flex; align-items:center; gap:6px; color:var(--accent);
     text-decoration:none; font-size:13px; margin-bottom:16px;
@@ -356,6 +369,15 @@ DASHBOARD_HTML = r"""<!doctype html>
     color:var(--text-dim); font-size:20px; cursor:pointer; line-height:1;
   }
   .modal { position:relative; }
+  .help-icon {
+    display:inline-flex; align-items:center; justify-content:center;
+    width:14px; height:14px; border-radius:50%; background:var(--panel-2);
+    border:1px solid var(--border); color:var(--text-dim); font-size:10px;
+    font-weight:700; cursor:pointer; margin-left:5px; vertical-align:middle;
+    line-height:1; user-select:none; flex:0 0 auto;
+  }
+  .help-icon:hover { background:var(--accent-bg); color:var(--accent); border-color:var(--accent); }
+  #help-modal-body { white-space:pre-line; line-height:1.6; font-size:14px; margin:0; }
 </style>
 </head>
 <body>
@@ -390,7 +412,7 @@ DASHBOARD_HTML = r"""<!doctype html>
       <div class="hint" data-i18n="card.requests.hint">Sum across all loaded engines</div>
     </div>
     <div class="card">
-      <div class="label" data-i18n="card.poolBudget.label">Pool Memory Budget (GPU)</div>
+      <div class="label"><span data-i18n="card.poolBudget.label">Pool Memory Budget (GPU)</span><span class="help-icon" data-help="poolBudget">?</span></div>
       <div class="value" id="pool-budget">–</div>
       <div class="bar-bg"><div class="bar-fg" id="pool-budget-bar" style="width:0%"></div></div>
     </div>
@@ -406,7 +428,7 @@ DASHBOARD_HTML = r"""<!doctype html>
         <canvas id="gpu-chart" width="400" height="70"></canvas>
       </div>
       <div class="card chart-card">
-        <div class="label" data-i18n="section.ramUsage">RAM Usage (Unified Memory)</div>
+        <div class="label"><span data-i18n="section.ramUsage">RAM Usage (Unified Memory)</span><span class="help-icon" data-help="ramUnified">?</span></div>
         <div class="value" id="ram-percent">–</div>
         <div class="hint" id="ram-extra"></div>
         <canvas id="ram-chart" width="400" height="70"></canvas>
@@ -450,12 +472,22 @@ DASHBOARD_HTML = r"""<!doctype html>
       <h3 id="modal-title">–</h3>
       <div class="badges" id="modal-badges"></div>
       <div id="modal-actions"></div>
+      <dl class="info-grid" id="modal-info"></dl>
+      <p class="notes" id="modal-notes" style="display:none;"></p>
       <a class="hf-link" id="modal-hf-link" href="#" target="_blank" rel="noopener" data-i18n="modal.hfLink">🤗 View on HuggingFace ↗</a>
       <div class="json-label">
         <span data-i18n="modal.jsonLabel">VS Code Custom Endpoint (chatLanguageModels.json)</span>
         <button class="copy-btn" id="modal-copy-btn" data-i18n="modal.copy">Copy</button>
       </div>
       <pre id="modal-json"></pre>
+    </div>
+  </div>
+
+  <div class="modal-overlay" id="help-modal-overlay">
+    <div class="modal" style="max-width:480px;">
+      <button class="close-btn" id="help-modal-close">✕</button>
+      <h3 id="help-modal-title">–</h3>
+      <p id="help-modal-body"></p>
     </div>
   </div>
 
@@ -543,6 +575,30 @@ function appCell(userAgent) {
   const short = userAgent.length > 28 ? userAgent.slice(0, 27) + "…" : userAgent;
   return `<span title="${esc(userAgent)}">${esc(short)}</span>`;
 }
+
+// --- Hilfe-Icons (Fragezeichen neben Spaltenüberschriften/Labels) ----------
+// Klickbares "?" öffnet ein Modal mit Erklärung, siehe help.<key>.title/body
+// in den Übersetzungsdateien. Ein Icon kann von mehreren Stellen aus verlinkt
+// werden (z.B. "loadTime" sowohl bei Aktiven als auch bei Letzten Anfragen).
+function helpIcon(key) {
+  return `<span class="help-icon" data-help="${key}" title="${esc(t("help.clickForInfo"))}">?</span>`;
+}
+function openHelpModal(key) {
+  $("help-modal-title").textContent = t(`help.${key}.title`);
+  $("help-modal-body").textContent = t(`help.${key}.body`);
+  $("help-modal-overlay").classList.add("open");
+}
+// Event-Delegation statt Re-Binding bei jedem Render (die Tabellen werden
+// jede Sekunde per WS-Heartbeat neu aufgebaut) - ein Listener reicht.
+document.addEventListener("click", (e) => {
+  const icon = e.target.closest(".help-icon");
+  if (icon) { e.stopPropagation(); openHelpModal(icon.dataset.help); }
+});
+$("help-modal-close").addEventListener("click", () => $("help-modal-overlay").classList.remove("open"));
+$("help-modal-overlay").addEventListener("click", (e) => {
+  if (e.target.id === "help-modal-overlay") $("help-modal-overlay").classList.remove("open");
+});
+document.addEventListener("keydown", (e) => { if (e.key === "Escape") $("help-modal-overlay").classList.remove("open"); });
 function reasonLabel(r) {
   if (r === "ready") return t("reason.ready");
   if (r === "loading") return t("reason.loading");
@@ -634,8 +690,8 @@ function render(data) {
   if (engs.length === 0) {
     $("engines-box").innerHTML = `<div class="empty">${t("empty.noModelLoaded")}</div>`;
   } else {
-    $("engines-box").innerHTML = `<table><thead><tr>
-      <th>${t("th.model")}</th><th>${t("th.status")}</th><th>${t("th.port")}</th><th>${t("th.since")}</th><th>${t("th.requests")}</th><th>${t("th.kvCache")}</th><th>${t("th.avgTtft")}</th><th>${t("th.avgMsPerTok")}</th><th>${t("th.tokensPromptGen")}</th><th>${t("th.action")}</th>
+    $("engines-box").innerHTML = `<div class="table-scroll"><table><thead><tr>
+      <th>${t("th.model")}</th><th>${t("th.status")}</th><th>${t("th.port")}</th><th>${t("th.since")}</th><th>${t("th.requests")}${helpIcon("requestsEngine")}</th><th>${t("th.kvCache")}${helpIcon("kvCache")}</th><th>${t("th.avgTtft")}${helpIcon("avgTtft")}</th><th>${t("th.avgMsPerTok")}${helpIcon("avgMsPerTok")}</th><th>${t("th.tokensPromptGen")}${helpIcon("tokensPromptGen")}</th><th>${t("th.action")}</th>
       </tr></thead><tbody>` + engs.map(e => {
         const m = e.metrics || {};
         let badge;
@@ -657,7 +713,7 @@ function render(data) {
           <td class="mono">${(m.prompt_tokens_total ?? "–") + " / " + (m.generation_tokens_total ?? "–")}</td>
           <td><button class="unload-btn" data-model="${esc(e.loaded_model)}">${t("action.unload")}</button></td>
         </tr>`;
-      }).join("") + `</tbody></table>`;
+      }).join("") + `</tbody></table></div>`;
   }
 
   $("last-prompt").textContent = fmtAgo(data.seconds_since_last_request);
@@ -691,8 +747,8 @@ function render(data) {
   if (active.length === 0) {
     $("active-request-box").innerHTML = `<div class="empty">${t("empty.noActiveRequest")}</div>`;
   } else {
-    $("active-request-box").innerHTML = `<table><thead><tr>
-      <th>${t("th.model")}</th><th>${t("th.app")}</th><th>${t("th.endpoint")}</th><th>${t("th.port")}</th><th>${t("th.phase")}</th><th>${t("th.elapsed")}</th><th>${t("th.loadTime")}</th><th>${t("th.ttft")}</th><th>${t("th.tokens")}</th><th>${t("th.reasoningTokens")}</th><th>${t("th.throughput")}</th><th>${t("th.cost")}</th>
+    $("active-request-box").innerHTML = `<div class="table-scroll"><table><thead><tr>
+      <th>${t("th.model")}</th><th>${t("th.app")}</th><th>${t("th.endpoint")}</th><th>${t("th.port")}</th><th>${t("th.phase")}${helpIcon("phase")}</th><th>${t("th.elapsed")}</th><th>${t("th.loadTime")}${helpIcon("loadTime")}</th><th>${t("th.ttft")}${helpIcon("ttft")}</th><th>${t("th.tokensPromptGen")}${helpIcon("liveTokens")}</th><th>${t("th.reasoningTokens")}${helpIcon("liveTokens")}</th><th>${t("th.throughput")}${helpIcon("throughput")}</th><th>${t("th.cost")}${helpIcon("cost")}</th>
       </tr></thead><tbody>` + active.map(r => {
         const elapsed = Date.now()/1000 - r.started_at;
         const port = (engs.find(e => e.loaded_model === r.model) || {}).port;
@@ -726,19 +782,19 @@ function render(data) {
           <td class="mono">${fmtDuration(elapsed)}</td>
           <td class="mono">${r.queued_ms ? fmtMs(r.queued_ms) : "–"}</td>
           <td class="mono">${fmtMs(r.ttft_ms)}</td>
-          <td class="mono">${r.tokens_streamed ?? 0}</td>
+          <td class="mono">${r.prompt_tokens ?? "–"} / ${r.tokens_streamed ?? 0}</td>
           <td class="mono">${r.reasoning_tokens_streamed ?? 0}</td>
           <td class="mono">${throughput}</td>
           <td class="mono" title="${esc(t("cost.hint.soFarOutputOnly"))}">${fmtUsd(r.estimated_output_cost_usd) ?? "–"} <span class="hint">${t("cost.soFar")}</span></td>
         </tr>`;
-      }).join("") + `</tbody></table>`;
+      }).join("") + `</tbody></table></div>`;
   }
 
   const hist = data.model_history || [];
   if (hist.length === 0) {
     $("history-box").innerHTML = `<div class="empty">${t("empty.noHistory")}</div>`;
   } else {
-    $("history-box").innerHTML = `<table><thead><tr>
+    $("history-box").innerHTML = `<div class="table-scroll"><table><thead><tr>
       <th>${t("th.model")}</th><th>${t("th.status")}</th><th>${t("th.loadedAt")}</th><th>${t("th.unloadedAt")}</th><th>${t("th.duration")}</th>
       </tr></thead><tbody>` + hist.map(h => {
         const ongoing = h.unloaded_at === null || h.unloaded_at === undefined;
@@ -753,14 +809,14 @@ function render(data) {
         <td class="mono">${ongoing ? "–" : new Date(h.unloaded_at*1000).toLocaleTimeString(localeFor(currentLang))}</td>
         <td class="mono">${duration}</td>
       </tr>`;
-      }).join("") + `</tbody></table>`;
+      }).join("") + `</tbody></table></div>`;
   }
 
   const dls = data.downloads || [];
   if (dls.length === 0) {
     $("downloads-box").innerHTML = `<div class="empty">${t("empty.noDownloads")}</div>`;
   } else {
-    $("downloads-box").innerHTML = `<table><thead><tr>
+    $("downloads-box").innerHTML = `<div class="table-scroll"><table><thead><tr>
       <th>${t("th.model")}</th><th>${t("th.status")}</th><th>${t("th.progress")}</th><th>${t("th.speed")}</th><th>${t("th.eta")}</th>
       </tr></thead><tbody>` + dls.map(j => `<tr>
         <td>${esc(j.model)}</td>
@@ -768,15 +824,15 @@ function render(data) {
         <td class="mono">${Math.min(j.percent,100)}% (${(Math.min(j.bytes_done,j.bytes_total)/1e9).toFixed(1)}/${(j.bytes_total/1e9).toFixed(1)} GB)</td>
         <td class="mono">${j.speed_mbps} MB/s</td>
         <td class="mono">${fmtDuration(j.eta_seconds)}</td>
-      </tr>`).join("") + `</tbody></table>`;
+      </tr>`).join("") + `</tbody></table></div>`;
   }
 
   const recent = data.recent_requests || [];
   if (recent.length === 0) {
     $("recent-box").innerHTML = `<div class="empty">${t("empty.noRecentRequests")}</div>`;
   } else {
-    $("recent-box").innerHTML = `<table><thead><tr>
-      <th>${t("th.time")}</th><th>${t("th.model")}</th><th>${t("th.app")}</th><th>${t("th.status")}</th><th>${t("th.loadTime")}</th><th>${t("th.duration")}</th><th>${t("th.ttft")}</th><th>${t("th.promptTokens")}</th><th>${t("th.complTokens")}</th><th>${t("th.cost")}</th>
+    $("recent-box").innerHTML = `<div class="table-scroll"><table><thead><tr>
+      <th>${t("th.time")}</th><th>${t("th.model")}</th><th>${t("th.app")}</th><th>${t("th.status")}</th><th>${t("th.loadTime")}${helpIcon("loadTime")}</th><th>${t("th.duration")}</th><th>${t("th.ttft")}${helpIcon("ttft")}</th><th>${t("th.promptTokens")}${helpIcon("requestTokens")}</th><th>${t("th.complTokens")}${helpIcon("requestTokens")}</th><th>${t("th.cost")}${helpIcon("cost")}</th>
       </tr></thead><tbody>` + recent.map(r => `<tr>
         <td class="mono">${new Date(r.started_at*1000).toLocaleTimeString(localeFor(currentLang))}</td>
         <td>${esc(modelName(r.model))}</td>
@@ -788,7 +844,7 @@ function render(data) {
         <td class="mono">${r.prompt_tokens ?? "–"}</td>
         <td class="mono">${r.completion_tokens ?? "–"}</td>
         <td class="mono">${fmtUsd(r.cost_usd) ?? "–"}</td>
-      </tr>`).join("") + `</tbody></table>`;
+      </tr>`).join("") + `</tbody></table></div>`;
   }
 
   latestCatalog = data.models_catalog || [];
@@ -848,11 +904,25 @@ function openModal(m) {
     m.loaded ? `<span class="badge running">${t("badge.loaded")}</span>` : "",
     `<span class="badge ${m.cached ? 'ok' : 'idle'}">${m.cached ? t("badge.cached") : t("badge.notCached")}</span>`,
     !m.enabled ? `<span class="badge error">${t("badge.disabled")}</span>` : `<span class="badge ok">${t("badge.enabled")}</span>`,
-    m.task === "embed" ? `<span class="badge idle">${t("badge.embed")}</span>` : "",
-    m.vision ? `<span class="badge idle">${t("badge.vision")}</span>` : "",
-    m.tool_calling ? `<span class="badge idle">${t("badge.toolCalling")}</span>` : "",
-    m.reasoning ? `<span class="badge idle">${t("badge.reasoning")}</span>` : "",
   ].filter(Boolean).join("");
+
+  const yesNo = (v) => v ? t("common.yes") : t("common.no");
+  const infoRows = [
+    [t("modal.contextLength"), m.max_model_len != null ? m.max_model_len.toLocaleString(localeFor(currentLang)) + " " + t("modal.tokens") : "–"],
+    [t("cfg.field.task"), m.task === "embed" ? t("badge.embed") : m.task || "–"],
+    [t("badge.toolCalling"), yesNo(m.tool_calling)],
+    [t("badge.reasoning"), yesNo(m.reasoning)],
+    [t("badge.vision"), yesNo(m.vision)],
+    [t("modal.gpuMemory"), m.gpu_memory_utilization != null ? fmtPct(m.gpu_memory_utilization) : "–"],
+  ];
+  $("modal-info").innerHTML = infoRows.map(([label, value]) => `<dt>${esc(label)}</dt><dd>${esc(value)}</dd>`).join("");
+
+  if (m.notes) {
+    $("modal-notes").style.display = "block";
+    $("modal-notes").textContent = m.notes;
+  } else {
+    $("modal-notes").style.display = "none";
+  }
 
   $("modal-actions").innerHTML = m.loaded
     ? `<button class="unload-btn" id="modal-unload-btn" style="margin-bottom:16px;">${t("action.unload")}</button>`

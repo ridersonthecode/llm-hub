@@ -69,6 +69,7 @@ CONFIG_DASHBOARD_HTML = r"""<!doctype html>
   section h2 { font-size: 14px; color: var(--text-dim); text-transform:uppercase; letter-spacing:.04em; margin: 0 0 10px; }
   .card { background:var(--panel); border:1px solid var(--border); border-radius:10px; padding:16px; }
   table { width:100%; border-collapse: collapse; background:var(--panel); border:1px solid var(--border); border-radius:10px; overflow:hidden; }
+  .table-scroll { overflow-x:auto; }
   th, td { text-align:left; padding:9px 12px; font-size:13px; border-bottom:1px solid var(--border); vertical-align: top; }
   th { color:var(--text-dim); font-weight:600; font-size:11px; text-transform:uppercase; }
   tr:last-child td { border-bottom:none; }
@@ -894,14 +895,14 @@ function renderBackups() {
     box.innerHTML = `<div class="empty">${t("cfg.status.noBackups")}</div>`;
     return;
   }
-  box.innerHTML = `<table><thead><tr>
+  box.innerHTML = `<div class="table-scroll"><table><thead><tr>
     <th>${t("th.time")}</th><th>${t("cfg.th.filename")}</th><th>${t("cfg.th.size")}</th><th>${t("th.action")}</th>
     </tr></thead><tbody>` + backupsCache.map(b => `<tr>
       <td class="mono">${new Date(b.modified_at * 1000).toLocaleString(currentLang === "de" ? "de-DE" : "en-US")}</td>
       <td class="mono">${esc(b.filename)}</td>
       <td class="mono">${(b.size / 1024).toFixed(1)} KB</td>
       <td><button class="btn b-restore" data-filename="${esc(b.filename)}">${t("cfg.action.restore")}</button></td>
-    </tr>`).join("") + `</tbody></table>`;
+    </tr>`).join("") + `</tbody></table></div>`;
   document.querySelectorAll(".b-restore").forEach(el => {
     el.addEventListener("click", async () => {
       const filename = el.dataset.filename;

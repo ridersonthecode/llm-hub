@@ -124,6 +124,7 @@ COST_DASHBOARD_HTML = r"""<!doctype html>
   .card .value { font-size:22px; font-weight:600; }
   .card .hint { color:var(--text-dim); font-size:12px; margin-top:6px; }
   table { width:100%; border-collapse: collapse; background:var(--panel); border:1px solid var(--border); border-radius:10px; overflow:hidden; }
+  .table-scroll { overflow-x:auto; }
   th, td { text-align:left; padding:9px 12px; font-size:13px; border-bottom:1px solid var(--border); vertical-align: middle; }
   th { color:var(--text-dim); font-weight:600; font-size:11px; text-transform:uppercase; }
   tr:last-child td { border-bottom:none; }
@@ -306,14 +307,14 @@ function render(data) {
   if (byModel.length === 0) {
     $("by-model-box").innerHTML = `<div class="empty">${t("cost.empty.noRecords")}</div>`;
   } else {
-    $("by-model-box").innerHTML = `<table><thead><tr>
+    $("by-model-box").innerHTML = `<div class="table-scroll"><table><thead><tr>
       <th>${t("th.model")}</th><th class="num">${t("th.requests")}</th><th class="num">${t("cost.card.pricedRequests")}</th><th class="num">${t("th.cost")}</th>
       </tr></thead><tbody>` + byModel.map(m => `<tr>
         <td>${esc(m.model)}</td>
         <td class="mono num">${m.requests}</td>
         <td class="mono num">${m.priced_requests}</td>
         <td class="mono num">${fmtUsd(m.cost_usd) ?? "$0.00"}</td>
-      </tr>`).join("") + `</tbody></table>`;
+      </tr>`).join("") + `</tbody></table></div>`;
   }
 
   // Auswahl bereinigen: Datensätze, die nicht mehr existieren (gelöscht/reset), rausnehmen.
@@ -324,7 +325,7 @@ function render(data) {
     $("records-box").innerHTML = `<div class="empty">${t("cost.empty.noRecords")}</div>`;
   } else {
     const allSelected = records.length > 0 && records.every(r => selected.has(r.id));
-    $("records-box").innerHTML = `<table><thead><tr>
+    $("records-box").innerHTML = `<div class="table-scroll"><table><thead><tr>
       <th><input type="checkbox" id="select-all-cb" ${allSelected ? "checked" : ""}></th>
       <th>${t("th.time")}</th><th>${t("th.model")}</th><th>${t("th.app")}</th><th>${t("th.endpoint")}</th>
       <th class="num">${t("th.promptTokens")}</th><th class="num">${t("th.complTokens")}</th>
@@ -346,7 +347,7 @@ function render(data) {
           <td><span class="badge ${r.status === 'ok' ? 'ok' : 'error'}">${r.status === 'ok' ? t("status.ok") : t("status.error")}</span></td>
           <td><button class="row-del" data-id="${esc(r.id)}" title="${esc(t('action.delete'))}">🗑</button></td>
         </tr>`;
-      }).join("") + `</tbody></table>`;
+      }).join("") + `</tbody></table></div>`;
 
     $("select-all-cb").addEventListener("change", (e) => {
       if (e.target.checked) records.forEach(r => selected.add(r.id));

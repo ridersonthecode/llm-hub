@@ -453,6 +453,9 @@ async def proxy_v1(path: str, request: Request):
                             if usage:
                                 prompt_tokens = usage.get("prompt_tokens", prompt_tokens)
                                 completion_tokens = usage.get("completion_tokens", completion_tokens)
+                                # Live sichtbar machen, falls der Client stream_options.include_usage
+                                # gesetzt hat und usage schon vor dem letzten Chunk mitkommt.
+                                telemetry.update_partial_usage(rid, prompt_tokens, completion_tokens)
                 else:
                     full_body.extend(chunk)
                 yield chunk
