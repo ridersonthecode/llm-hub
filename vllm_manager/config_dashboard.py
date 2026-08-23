@@ -117,6 +117,30 @@ CONFIG_DASHBOARD_HTML = r"""<!doctype html>
   .badge { display:inline-block; padding:2px 8px; border-radius:20px; font-size:11px; font-weight:600; }
   .badge.ok { background: var(--good-bg); color: var(--good); }
   .badge.idle { background: var(--panel-2); color: var(--text-dim); }
+
+  .help-icon {
+    display:inline-flex; align-items:center; justify-content:center;
+    width:14px; height:14px; border-radius:50%; background:var(--panel-2);
+    border:1px solid var(--border); color:var(--text-dim); font-size:10px;
+    font-weight:700; cursor:pointer; margin-left:5px; vertical-align:middle;
+    line-height:1; user-select:none; flex:0 0 auto;
+  }
+  .help-icon:hover { background:var(--accent-bg); color:var(--accent); border-color:var(--accent); }
+  .modal-overlay {
+    display:none; position:fixed; inset:0; background:rgba(0,0,0,.5);
+    align-items:center; justify-content:center; z-index:100; padding:20px;
+  }
+  .modal-overlay.open { display:flex; }
+  .modal {
+    position:relative; background:var(--panel); border:1px solid var(--border); border-radius:12px;
+    max-width:480px; width:100%; max-height:85vh; overflow-y:auto; padding:22px;
+  }
+  .modal h3 { margin:0 0 4px; font-size:16px; }
+  .modal .close-btn {
+    position:absolute; top:16px; right:20px; background:none; border:none;
+    color:var(--text-dim); font-size:20px; cursor:pointer; line-height:1;
+  }
+  #help-modal-body { white-space:pre-line; line-height:1.6; font-size:14px; margin:0; }
 </style>
 </head>
 <body>
@@ -128,6 +152,14 @@ CONFIG_DASHBOARD_HTML = r"""<!doctype html>
     <div class="topbar-actions">
       <select id="lang-select" data-i18n-title="lang.selectTitle" title="Language"></select>
       <button id="theme-toggle" data-i18n-title="theme.toggleTitle" title="Toggle theme">🌙</button>
+    </div>
+  </div>
+
+  <div class="modal-overlay" id="help-modal-overlay">
+    <div class="modal">
+      <button class="close-btn" id="help-modal-close">✕</button>
+      <h3 id="help-modal-title">–</h3>
+      <p id="help-modal-body"></p>
     </div>
   </div>
 
@@ -150,31 +182,31 @@ CONFIG_DASHBOARD_HTML = r"""<!doctype html>
     <div class="card">
       <div class="row">
         <div>
-          <label data-i18n="cfg.field.host">Host<span class="restart-badge" data-i18n="cfg.restartBadge">🔁 restart</span></label>
+          <label><span data-i18n="cfg.field.host">Host</span><span class="restart-badge" data-i18n="cfg.restartBadge">🔁 restart</span><span class="help-icon" data-help="cfg_host" data-i18n-title="help.clickForInfo" title="Click for more info">?</span></label>
           <input type="text" id="f-host">
         </div>
         <div>
-          <label data-i18n="cfg.field.port">Port<span class="restart-badge" data-i18n="cfg.restartBadge">🔁 restart</span></label>
+          <label><span data-i18n="cfg.field.port">Port</span><span class="restart-badge" data-i18n="cfg.restartBadge">🔁 restart</span><span class="help-icon" data-help="cfg_port" data-i18n-title="help.clickForInfo" title="Click for more info">?</span></label>
           <input type="number" id="f-port" min="1" max="65535">
         </div>
       </div>
       <div class="row">
         <div>
-          <label data-i18n="cfg.field.engineHost">Engine Host</label>
+          <label><span data-i18n="cfg.field.engineHost">Engine Host</span><span class="help-icon" data-help="cfg_engineHost" data-i18n-title="help.clickForInfo" title="Click for more info">?</span></label>
           <input type="text" id="f-engine_host">
         </div>
         <div>
-          <label data-i18n="cfg.field.enginePort">Engine Base Port</label>
+          <label><span data-i18n="cfg.field.enginePort">Engine Base Port</span><span class="help-icon" data-help="cfg_enginePort" data-i18n-title="help.clickForInfo" title="Click for more info">?</span></label>
           <input type="number" id="f-engine_port" min="1" max="65535">
         </div>
       </div>
       <div class="row">
         <div>
-          <label data-i18n="cfg.field.hfHome">HF Home (model cache dir)</label>
+          <label><span data-i18n="cfg.field.hfHome">HF Home (model cache dir)</span><span class="help-icon" data-help="cfg_hfHome" data-i18n-title="help.clickForInfo" title="Click for more info">?</span></label>
           <input type="text" id="f-hf_home">
         </div>
         <div>
-          <label data-i18n="cfg.field.vllmBin">vLLM Binary (empty = auto)</label>
+          <label><span data-i18n="cfg.field.vllmBin">vLLM Binary (empty = auto)</span><span class="help-icon" data-help="cfg_vllmBin" data-i18n-title="help.clickForInfo" title="Click for more info">?</span></label>
           <input type="text" id="f-vllm_bin" placeholder="auto">
         </div>
       </div>
@@ -186,9 +218,9 @@ CONFIG_DASHBOARD_HTML = r"""<!doctype html>
     <div class="card">
       <div class="check-row">
         <input type="checkbox" id="f-api_key_enabled">
-        <label for="f-api_key_enabled" data-i18n="cfg.field.apiKeyEnabled">Require API key</label>
+        <label for="f-api_key_enabled" data-i18n="cfg.field.apiKeyEnabled">Require API key</label><span class="help-icon" data-help="cfg_apiKeyEnabled" data-i18n-title="help.clickForInfo" title="Click for more info">?</span>
       </div>
-      <label data-i18n="cfg.field.apiKeyKey">Key</label>
+      <label><span data-i18n="cfg.field.apiKeyKey">Key</span><span class="help-icon" data-help="cfg_apiKeyKey" data-i18n-title="help.clickForInfo" title="Click for more info">?</span></label>
       <input type="text" id="f-api_key_key" autocomplete="off">
     </div>
   </section>
@@ -198,46 +230,44 @@ CONFIG_DASHBOARD_HTML = r"""<!doctype html>
     <div class="card">
       <div class="row">
         <div>
-          <label data-i18n="cfg.field.maxConcurrentModels">Max concurrent models (hot pool size)</label>
+          <label><span data-i18n="cfg.field.maxConcurrentModels">Max concurrent models (hot pool size)</span><span class="help-icon" data-help="cfg_maxConcurrentModels" data-i18n-title="help.clickForInfo" title="Click for more info">?</span></label>
           <input type="number" id="f-max_concurrent_models" min="1" max="16">
         </div>
         <div>
-          <label data-i18n="cfg.field.gpuMemoryCeiling">GPU memory ceiling (sum of all engines)</label>
+          <label><span data-i18n="cfg.field.gpuMemoryCeiling">GPU memory ceiling (sum of all engines)</span><span class="help-icon" data-help="cfg_gpuMemoryCeiling" data-i18n-title="help.clickForInfo" title="Click for more info">?</span></label>
           <input type="number" id="f-gpu_memory_ceiling" min="0" max="1" step="0.01">
         </div>
       </div>
       <div class="row">
         <div>
-          <label data-i18n="cfg.field.idleTimeout">Idle timeout (seconds)</label>
+          <label><span data-i18n="cfg.field.idleTimeout">Idle timeout (seconds)</span><span class="help-icon" data-help="cfg_idleTimeout" data-i18n-title="help.clickForInfo" title="Click for more info">?</span></label>
           <input type="number" id="f-idle_timeout_seconds" min="0">
-          <div class="hint" data-i18n="cfg.hint.idleTimeout">Empty = never unload automatically</div>
         </div>
         <div>
-          <label data-i18n="cfg.field.startupTimeout">Startup timeout (seconds)</label>
+          <label><span data-i18n="cfg.field.startupTimeout">Startup timeout (seconds)</span><span class="help-icon" data-help="cfg_startupTimeout" data-i18n-title="help.clickForInfo" title="Click for more info">?</span></label>
           <input type="number" id="f-startup_timeout_seconds" min="1">
         </div>
       </div>
-      <label data-i18n="cfg.field.defaultModel">Default model (used when a request has no "model")</label>
+      <label><span data-i18n="cfg.field.defaultModel">Default model (used when a request has no "model")</span><span class="help-icon" data-help="cfg_defaultModel" data-i18n-title="help.clickForInfo" title="Click for more info">?</span></label>
       <select id="f-default_model"></select>
 
       <div class="check-row">
         <input type="checkbox" id="f-auto_reload_last_model">
-        <label for="f-auto_reload_last_model" data-i18n="cfg.field.autoReloadLastModel">Auto-reload last used model on service restart</label>
+        <label for="f-auto_reload_last_model" data-i18n="cfg.field.autoReloadLastModel">Auto-reload last used model on service restart</label><span class="help-icon" data-help="cfg_autoReloadLastModel" data-i18n-title="help.clickForInfo" title="Click for more info">?</span>
       </div>
     </div>
   </section>
 
   <section>
-    <h2 data-i18n="cfg.section.defaultServeArgs">Default Serve Args</h2>
+    <h2><span data-i18n="cfg.section.defaultServeArgs">Default Serve Args</span><span class="help-icon" data-help="cfg_defaultServeArgs" data-i18n-title="help.clickForInfo" title="Click for more info">?</span></h2>
     <div class="card">
-      <div class="hint" data-i18n="cfg.hint.defaultServeArgs">Fallback values for models without their own override below.</div>
       <div class="row">
         <div>
-          <label data-i18n="cfg.field.defaultGpuMemUtil">GPU memory utilization</label>
+          <label><span data-i18n="cfg.field.defaultGpuMemUtil">GPU memory utilization</span><span class="help-icon" data-help="cfg_defaultGpuMemUtil" data-i18n-title="help.clickForInfo" title="Click for more info">?</span></label>
           <input type="number" id="f-dsa_gpu_memory_utilization" min="0" max="1" step="0.01">
         </div>
         <div>
-          <label data-i18n="cfg.field.defaultMaxModelLen">Max model length</label>
+          <label><span data-i18n="cfg.field.defaultMaxModelLen">Max model length</span><span class="help-icon" data-help="cfg_defaultMaxModelLen" data-i18n-title="help.clickForInfo" title="Click for more info">?</span></label>
           <input type="number" id="f-dsa_max_model_len" min="1">
         </div>
       </div>
@@ -245,16 +275,15 @@ CONFIG_DASHBOARD_HTML = r"""<!doctype html>
   </section>
 
   <section>
-    <h2 data-i18n="cfg.section.pricing">Cost Tracking</h2>
+    <h2><span data-i18n="cfg.section.pricing">Cost Tracking</span><span class="help-icon" data-help="cfg_pricing" data-i18n-title="help.clickForInfo" title="Click for more info">?</span></h2>
     <div class="card">
-      <div class="hint" data-i18n="cfg.hint.pricing">Fictional prices for cost comparison (see the Costs page) - default is standard Claude Sonnet 5 pricing. Purely informational, no effect on actual (free) local operation. Per-model overrides are set on each model below.</div>
       <div class="row">
         <div>
-          <label data-i18n="cfg.field.pricingInput">Input $ / MTok</label>
+          <label><span data-i18n="cfg.field.pricingInput">Input $ / MTok</span><span class="help-icon" data-help="cfg_pricingInput" data-i18n-title="help.clickForInfo" title="Click for more info">?</span></label>
           <input type="number" id="f-pricing_input_per_mtok" min="0" step="0.01">
         </div>
         <div>
-          <label data-i18n="cfg.field.pricingOutput">Output $ / MTok</label>
+          <label><span data-i18n="cfg.field.pricingOutput">Output $ / MTok</span><span class="help-icon" data-help="cfg_pricingOutput" data-i18n-title="help.clickForInfo" title="Click for more info">?</span></label>
           <input type="number" id="f-pricing_output_per_mtok" min="0" step="0.01">
         </div>
       </div>
@@ -266,44 +295,43 @@ CONFIG_DASHBOARD_HTML = r"""<!doctype html>
     <div class="card">
       <div class="check-row">
         <input type="checkbox" id="f-rag_enabled">
-        <label for="f-rag_enabled" data-i18n="cfg.field.ragEnabled">Enable RAG</label>
+        <label for="f-rag_enabled" data-i18n="cfg.field.ragEnabled">Enable RAG</label><span class="help-icon" data-help="cfg_ragEnabled" data-i18n-title="help.clickForInfo" title="Click for more info">?</span>
       </div>
       <div class="row">
         <div>
-          <label data-i18n="cfg.field.qdrantHost">Qdrant Host</label>
+          <label><span data-i18n="cfg.field.qdrantHost">Qdrant Host</span><span class="help-icon" data-help="cfg_qdrantHost" data-i18n-title="help.clickForInfo" title="Click for more info">?</span></label>
           <input type="text" id="f-rag_qdrant_host">
         </div>
         <div>
-          <label data-i18n="cfg.field.qdrantPort">Qdrant Port</label>
+          <label><span data-i18n="cfg.field.qdrantPort">Qdrant Port</span><span class="help-icon" data-help="cfg_qdrantPort" data-i18n-title="help.clickForInfo" title="Click for more info">?</span></label>
           <input type="number" id="f-rag_qdrant_port" min="1" max="65535">
         </div>
       </div>
-      <label data-i18n="cfg.field.embeddingModel">Embedding model</label>
+      <label><span data-i18n="cfg.field.embeddingModel">Embedding model</span><span class="help-icon" data-help="cfg_embeddingModel" data-i18n-title="help.clickForInfo" title="Click for more info">?</span></label>
       <select id="f-rag_embedding_model"></select>
       <div class="row">
         <div>
-          <label data-i18n="cfg.field.defaultCollection">Default collection</label>
+          <label><span data-i18n="cfg.field.defaultCollection">Default collection</span><span class="help-icon" data-help="cfg_defaultCollection" data-i18n-title="help.clickForInfo" title="Click for more info">?</span></label>
           <input type="text" id="f-rag_default_collection">
         </div>
       </div>
       <div class="row">
         <div>
-          <label data-i18n="cfg.field.chunkSize">Chunk size (chars)</label>
+          <label><span data-i18n="cfg.field.chunkSize">Chunk size (chars)</span><span class="help-icon" data-help="cfg_chunkSize" data-i18n-title="help.clickForInfo" title="Click for more info">?</span></label>
           <input type="number" id="f-rag_chunk_size_chars" min="1">
         </div>
         <div>
-          <label data-i18n="cfg.field.chunkOverlap">Chunk overlap (chars)</label>
+          <label><span data-i18n="cfg.field.chunkOverlap">Chunk overlap (chars)</span><span class="help-icon" data-help="cfg_chunkOverlap" data-i18n-title="help.clickForInfo" title="Click for more info">?</span></label>
           <input type="number" id="f-rag_chunk_overlap_chars" min="0">
         </div>
       </div>
-      <div class="hint" data-i18n="cfg.hint.autoRag">Settings below apply to automatic server-side RAG (see "Auto-RAG collection" on each model further down) - not to manual searches via the RAG page/API, which take their own top_k per request.</div>
       <div class="row">
         <div>
-          <label data-i18n="cfg.field.autoRagTopK">Auto-RAG: matches per request</label>
+          <label><span data-i18n="cfg.field.autoRagTopK">Auto-RAG: matches per request</span><span class="help-icon" data-help="cfg_autoRagTopK" data-i18n-title="help.clickForInfo" title="Click for more info">?</span></label>
           <input type="number" id="f-rag_auto_rag_top_k" min="1" max="20">
         </div>
         <div>
-          <label data-i18n="cfg.field.autoRagMinScore">Auto-RAG: minimum relevance score</label>
+          <label><span data-i18n="cfg.field.autoRagMinScore">Auto-RAG: minimum relevance score</span><span class="help-icon" data-help="cfg_autoRagMinScore" data-i18n-title="help.clickForInfo" title="Click for more info">?</span></label>
           <input type="number" id="f-rag_auto_rag_min_score" min="0" max="1" step="0.05">
         </div>
       </div>
@@ -341,6 +369,27 @@ function t(key, vars) {
   return s;
 }
 function esc(s) { return (s ?? "").toString().replace(/[&<>]/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;"}[c])); }
+
+// --- Hilfe-Icons (Fragezeichen neben Feld-Labels) --------------------------
+// Identisches Muster wie im Haupt-Dashboard (siehe dashboard.py): klickbares
+// "?" öffnet ein Modal mit Erklärung aus help.<key>.title/body.
+function helpIcon(key) {
+  return `<span class="help-icon" data-help="${key}" title="${esc(t("help.clickForInfo"))}">?</span>`;
+}
+function openHelpModal(key) {
+  $("help-modal-title").textContent = t(`help.${key}.title`);
+  $("help-modal-body").textContent = t(`help.${key}.body`);
+  $("help-modal-overlay").classList.add("open");
+}
+document.addEventListener("click", (e) => {
+  const icon = e.target.closest(".help-icon");
+  if (icon) { e.stopPropagation(); openHelpModal(icon.dataset.help); }
+});
+$("help-modal-close").addEventListener("click", () => $("help-modal-overlay").classList.remove("open"));
+$("help-modal-overlay").addEventListener("click", (e) => {
+  if (e.target.id === "help-modal-overlay") $("help-modal-overlay").classList.remove("open");
+});
+document.addEventListener("keydown", (e) => { if (e.key === "Escape") $("help-modal-overlay").classList.remove("open"); });
 
 function populateLangSelect() {
   const sel = $("lang-select");
@@ -542,12 +591,12 @@ function renderModels() {
         ${m.task === "embed" ? `<span class="badge idle">embed</span>` : ""}
       </div>
       <div class="accordion-body">
-        <label data-i18n="cfg.field.modelName">Model name / path</label>
+        <label><span data-i18n="cfg.field.modelName">Model name / path</span>${helpIcon("cfg_modelName")}</label>
         <input type="text" class="m-field" data-idx="${i}" data-field="name" value="${esc(m.name)}">
 
         <div class="check-row">
           <input type="checkbox" class="m-field" data-idx="${i}" data-field="enabled" id="m-enabled-${i}" ${m.enabled !== false ? "checked" : ""}>
-          <label for="m-enabled-${i}" data-i18n="cfg.field.modelEnabled">Enabled</label>
+          <label for="m-enabled-${i}" data-i18n="cfg.field.modelEnabled">Enabled</label>${helpIcon("cfg_modelEnabled")}
         </div>
 
         <div style="margin: 12px 0;">
@@ -555,7 +604,7 @@ function renderModels() {
           <div class="detect-results" id="detect-results-${i}" style="display:none;"></div>
         </div>
 
-        <label data-i18n="cfg.field.task">Task</label>
+        <label><span data-i18n="cfg.field.task">Task</span>${helpIcon("cfg_task")}</label>
         <select class="m-field" data-idx="${i}" data-field="task">
           <option value="generate" ${m.task !== "embed" ? "selected" : ""}>generate</option>
           <option value="embed" ${m.task === "embed" ? "selected" : ""}>embed</option>
@@ -563,72 +612,67 @@ function renderModels() {
 
         <div class="row">
           <div>
-            <label data-i18n="cfg.field.maxModelLen">Max model length</label>
+            <label><span data-i18n="cfg.field.maxModelLen">Max model length</span>${helpIcon("cfg_maxModelLen")}</label>
             <input type="number" class="m-field" data-idx="${i}" data-field="max_model_len" min="1" value="${m.max_model_len ?? ""}">
           </div>
           <div>
-            <label data-i18n="cfg.field.gpuMemUtil">GPU memory utilization</label>
+            <label><span data-i18n="cfg.field.gpuMemUtil">GPU memory utilization</span>${helpIcon("cfg_gpuMemUtil")}</label>
             <input type="number" class="m-field" data-idx="${i}" data-field="gpu_memory_utilization" min="0" max="1" step="0.01" value="${m.gpu_memory_utilization ?? ""}">
           </div>
         </div>
 
-        <label data-i18n="cfg.field.maxTokens">Max output tokens (safety net, empty = unbounded)</label>
+        <label><span data-i18n="cfg.field.maxTokens">Max output tokens (safety net, empty = unbounded)</span>${helpIcon("cfg_maxTokens")}</label>
         <input type="number" class="m-field" data-idx="${i}" data-field="max_tokens" min="1" value="${m.max_tokens ?? ""}">
-        <div class="hint" data-i18n="cfg.hint.maxTokens">Caps generation length only when the client itself doesn't request a max_tokens value - protects against runaway/repeating generations without limiting normal replies.</div>
 
-        <label data-i18n="cfg.field.ragCollection">Auto-RAG collection (empty = off)</label>
+        <label><span data-i18n="cfg.field.ragCollection">Auto-RAG collection (empty = off)</span>${helpIcon("cfg_ragCollection")}</label>
         <input type="text" class="m-field" data-idx="${i}" data-field="rag_collection" list="rag-collection-options" value="${esc(m.rag_collection ?? "")}">
-        <div class="hint" data-i18n="cfg.hint.ragCollection">If set, every chat request to this model automatically searches this collection and prepends relevant context - the client doesn't need to support anything special. Requires RAG to be enabled with an embedding model configured (see the RAG section below).</div>
 
-        <label data-i18n="cfg.field.repetitionPenalty">Repetition penalty (empty = off)</label>
+        <label><span data-i18n="cfg.field.repetitionPenalty">Repetition penalty (empty = off)</span>${helpIcon("cfg_repetitionPenalty")}</label>
         <input type="number" class="m-field" data-idx="${i}" data-field="repetition_penalty" min="1" step="0.05" value="${m.repetition_penalty ?? ""}">
-        <div class="hint" data-i18n="cfg.hint.repetitionPenalty">Only applied when the client itself doesn't set repetition_penalty. Reduces the chance of runaway repetition loops (common with smaller reasoning models). Try 1.1-1.3 if a model tends to get stuck.</div>
 
         <div class="check-row">
           <input type="checkbox" class="m-field" data-idx="${i}" data-field="repetition_detection" id="m-repdet-${i}" ${m.repetition_detection !== false ? "checked" : ""}>
-          <label for="m-repdet-${i}" data-i18n="cfg.field.repetitionDetection">Detect and abort repetition loops (streamed requests)</label>
+          <label for="m-repdet-${i}" data-i18n="cfg.field.repetitionDetection">Detect and abort repetition loops (streamed requests)</label>${helpIcon("cfg_repetitionDetection")}
         </div>
-        <div class="hint" data-i18n="cfg.hint.repetitionDetection">Watches the live stream and aborts the request if the same text keeps repeating verbatim - shows up in Active/Recent Requests as "Aborted (loop)". Disable only if a model is expected to legitimately repeat text.</div>
 
         <div class="row">
           <div>
-            <label data-i18n="cfg.field.toolCallParser">Tool call parser</label>
+            <label><span data-i18n="cfg.field.toolCallParser">Tool call parser</span>${helpIcon("cfg_toolCallParser")}</label>
             <input type="text" class="m-field" data-idx="${i}" data-field="tool_call_parser" list="tool-parser-options" value="${esc(m.tool_call_parser ?? "")}">
           </div>
           <div>
-            <label data-i18n="cfg.field.reasoningParser">Reasoning parser</label>
+            <label><span data-i18n="cfg.field.reasoningParser">Reasoning parser</span>${helpIcon("cfg_reasoningParser")}</label>
             <input type="text" class="m-field" data-idx="${i}" data-field="reasoning_parser" list="reasoning-parser-options" value="${esc(m.reasoning_parser ?? "")}">
           </div>
         </div>
 
         <div class="check-row">
           <input type="checkbox" class="m-field" data-idx="${i}" data-field="enable_auto_tool_choice" id="m-tool-${i}" ${m.enable_auto_tool_choice ? "checked" : ""}>
-          <label for="m-tool-${i}" data-i18n="cfg.field.autoToolChoice">Enable auto tool choice</label>
+          <label for="m-tool-${i}" data-i18n="cfg.field.autoToolChoice">Enable auto tool choice</label>${helpIcon("cfg_autoToolChoice")}
         </div>
         <div class="check-row">
           <input type="checkbox" class="m-field" data-idx="${i}" data-field="vision" id="m-vision-${i}" ${m.vision ? "checked" : ""}>
-          <label for="m-vision-${i}" data-i18n="badge.vision">Vision</label>
+          <label for="m-vision-${i}" data-i18n="badge.vision">Vision</label>${helpIcon("cfg_vision")}
         </div>
 
         <div class="row">
           <div>
-            <label data-i18n="cfg.field.pricingInputOverride">Cost tracking: input $/MTok (empty = default)</label>
+            <label><span data-i18n="cfg.field.pricingInputOverride">Cost tracking: input $/MTok (empty = default)</span>${helpIcon("cfg_pricingInputOverride")}</label>
             <input type="number" class="m-field" data-idx="${i}" data-field="pricing_input_per_mtok" min="0" step="0.01" value="${(m.pricing && m.pricing.input_per_mtok != null) ? m.pricing.input_per_mtok : ""}">
           </div>
           <div>
-            <label data-i18n="cfg.field.pricingOutputOverride">Cost tracking: output $/MTok (empty = default)</label>
+            <label><span data-i18n="cfg.field.pricingOutputOverride">Cost tracking: output $/MTok (empty = default)</span>${helpIcon("cfg_pricingOutputOverride")}</label>
             <input type="number" class="m-field" data-idx="${i}" data-field="pricing_output_per_mtok" min="0" step="0.01" value="${(m.pricing && m.pricing.output_per_mtok != null) ? m.pricing.output_per_mtok : ""}">
           </div>
         </div>
 
-        <label data-i18n="cfg.field.hfToken">HF token (optional, for gated models)</label>
+        <label><span data-i18n="cfg.field.hfToken">HF token (optional, for gated models)</span>${helpIcon("cfg_hfToken")}</label>
         <input type="text" class="m-field" data-idx="${i}" data-field="hf_token" value="${esc(m.hf_token ?? "")}">
 
-        <label data-i18n="cfg.field.extraArgs">Extra args (one per line)</label>
+        <label><span data-i18n="cfg.field.extraArgs">Extra args (one per line)</span>${helpIcon("cfg_extraArgs")}</label>
         <textarea class="m-field" data-idx="${i}" data-field="extra_args">${esc((m.extra_args || []).join("\n"))}</textarea>
-        <div class="hint" data-i18n="cfg.hint.extraArgs">One flag/value per line, e.g. --foo then bar on the next line.</div>
 
-        <label data-i18n="cfg.field.notes">Notes</label>
+        <label><span data-i18n="cfg.field.notes">Notes</span>${helpIcon("cfg_notes")}</label>
         <textarea class="m-field" data-idx="${i}" data-field="notes">${esc(m.notes ?? "")}</textarea>
 
         <div style="margin-top:12px; display:flex; gap:8px; flex-wrap:wrap;">
@@ -706,6 +750,10 @@ function renderModels() {
   document.querySelectorAll(".detect-btn").forEach(el => {
     el.addEventListener("click", () => detectCapabilities(parseInt(el.dataset.idx, 10)));
   });
+  // Die gerade eingefügten data-i18n-Elemente (Feld-Labels, Hilfe-Icon-Titel)
+  // wurden oben mit dem Englisch-Fallback-Text erzeugt - erst hierdurch werden
+  // sie tatsächlich in der aktuell gewählten Sprache angezeigt.
+  applyStaticI18n();
 }
 
 // --- Lokale Modell-Dateien unwiderruflich von der Platte löschen ---------
