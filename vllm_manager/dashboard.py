@@ -142,6 +142,8 @@ async def _models_catalog(cfg) -> list[dict]:
             "enabled": mcfg.enabled,
             "vision": mcfg.vision,
             "tool_calling": mcfg.enable_auto_tool_choice,
+            "reasoning": bool(mcfg.reasoning_parser),
+            "task": mcfg.task,
             "max_model_len": cfg.serve_args_for(name)[1],
             "notes": mcfg.notes,
         })
@@ -154,6 +156,8 @@ async def _models_catalog(cfg) -> list[dict]:
             "enabled": True,
             "vision": False,
             "tool_calling": False,
+            "reasoning": False,
+            "task": "generate",
             "max_model_len": default_mml,
             "notes": "Lokal gecacht, nicht in config.json registriert.",
         })
@@ -799,6 +803,9 @@ function render(data) {
           ${m.loaded ? `<span class="badge running">${t("badge.loaded")}</span>` : ""}
           <span class="badge ${m.cached ? 'ok' : 'idle'}">${m.cached ? t("badge.cached") : t("badge.notCached")}</span>
           ${!m.enabled ? `<span class="badge error">${t("badge.disabled")}</span>` : ""}
+          ${m.task === "embed" ? `<span class="badge idle">${t("badge.embed")}</span>` : ""}
+          ${m.tool_calling ? `<span class="badge idle">${t("badge.toolCalling")}</span>` : ""}
+          ${m.reasoning ? `<span class="badge idle">${t("badge.reasoning")}</span>` : ""}
           ${m.vision ? `<span class="badge idle">${t("badge.vision")}</span>` : ""}
         </div>
       </div>`).join("");
@@ -841,8 +848,10 @@ function openModal(m) {
     m.loaded ? `<span class="badge running">${t("badge.loaded")}</span>` : "",
     `<span class="badge ${m.cached ? 'ok' : 'idle'}">${m.cached ? t("badge.cached") : t("badge.notCached")}</span>`,
     !m.enabled ? `<span class="badge error">${t("badge.disabled")}</span>` : `<span class="badge ok">${t("badge.enabled")}</span>`,
+    m.task === "embed" ? `<span class="badge idle">${t("badge.embed")}</span>` : "",
     m.vision ? `<span class="badge idle">${t("badge.vision")}</span>` : "",
     m.tool_calling ? `<span class="badge idle">${t("badge.toolCalling")}</span>` : "",
+    m.reasoning ? `<span class="badge idle">${t("badge.reasoning")}</span>` : "",
   ].filter(Boolean).join("");
 
   $("modal-actions").innerHTML = m.loaded

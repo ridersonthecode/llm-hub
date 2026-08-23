@@ -96,6 +96,8 @@ CONFIG_DASHBOARD_HTML = r"""<!doctype html>
     display:flex; gap:8px; align-items:center; flex-wrap:wrap;
   }
   .action-bar .spacer { flex:1; }
+  .actions-row { display:flex; align-items:center; gap:8px; flex-wrap:wrap; }
+  .actions-row .spacer { flex:1; }
   .status-msg { font-size:12px; color:var(--text-dim); }
   .status-msg.error { color: var(--bad); white-space:pre-wrap; }
   .status-msg.ok { color: var(--good); }
@@ -505,6 +507,11 @@ function renderModels() {
           <label for="m-enabled-${i}" data-i18n="cfg.field.modelEnabled">Enabled</label>
         </div>
 
+        <div style="margin: 12px 0;">
+          <button class="btn detect-btn" data-idx="${i}" data-i18n="cfg.action.detectCapabilities">🔍 Auto-detect capabilities</button>
+          <div class="detect-results" id="detect-results-${i}" style="display:none;"></div>
+        </div>
+
         <label data-i18n="cfg.field.task">Task</label>
         <select class="m-field" data-idx="${i}" data-field="task">
           <option value="generate" ${m.task !== "embed" ? "selected" : ""}>generate</option>
@@ -630,6 +637,82 @@ function renderModels() {
       populateModelSelects();
     });
   });
+  document.querySelectorAll(".detect-btn").forEach(el => {
+    el.addEventListener("click", () => detectCapabilities(parseInt(el.dataset.idx, 10)));
+  });
+}
+
+// --- Fähigkeiten automatisch erkennen (chat_template.jinja/config.json aus
+// dem lokalen HF-Cache, siehe capability_detector.py) - reiner Vorschlag,
+// wird erst nach Klick auf "Übernehmen" in die Formularfelder geschrieben. ---
+async function detectCapabilities(idx) {
+  const name = (modelsList[idx].name || "").trim();
+  const box = $(`detect-results-${idx}`);
+  if (!box) return;
+  if (!name) {
+    box.style.display = "block";
+    box.innerHTML = `<div class="hint">${esc(t("cfg.status.detectNoName"))}</div>`;
+    return;
+  }
+  box.style.display = "block";
+  box.innerHTML = `<div class="hint">${esc(t("cfg.status.detecting"))}</div>`;
+  try {
+    const res = await fetch(`/models/${encodeURIComponent(name)}/detect_capabilities`, { headers: authHeaders() });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.detail || res.statusText);
+    if (!data.found) {
+      box.innerHTML = `<div class="hint">${esc(t("cfg.status.detectNotCached"))}</div>`;
+      return;
+    }
+    renderDetectResults(idx, data);
+  } catch (e) {
+    box.innerHTML = `<div class="hint" style="color:var(--bad)">${esc(t("cfg.status.detectFailed", { msg: e.message }))}</div>`;
+  }
+}
+
+function renderDetectResults(idx, data) {
+  const box = $(`detect-results-${idx}`);
+  const confBadge = (c) => {
+    if (c === "high") return `<span class="badge ok">${t("cfg.detect.confHigh")}</span>`;
+    if (c === "low") return `<span class="badge idle">${t("cfg.detect.confLow")}</span>`;
+    return "";
+  };
+  const valueCell = (v) => v === true ? "✅" : v === false ? "–" : esc(v ?? "–");
+  const rows = [
+    [t("badge.vision"), valueCell(data.vision.detected), data.vision.confidence, data.vision.evidence],
+    [t("badge.toolCalling"), valueCell(data.tool_calling.detected ? (data.tool_calling.suggested_parser || true) : false), data.tool_calling.confidence, data.tool_calling.evidence],
+    [t("badge.reasoning"), valueCell(data.reasoning.detected ? (data.reasoning.suggested_parser || true) : false), data.reasoning.confidence, data.reasoning.evidence],
+    [t("cfg.field.task"), valueCell(data.task.suggested), data.task.confidence, data.task.evidence],
+  ];
+  box.innerHTML = `
+    <div class="card" style="margin-top:8px;">
+      <table><tbody>
+        ${rows.map(([label, val, conf, evidence]) => `<tr>
+          <td>${esc(label)}</td>
+          <td class="mono">${val}</td>
+          <td>${confBadge(conf)}</td>
+          <td class="hint">${esc(evidence || "")}</td>
+        </tr>`).join("")}
+      </tbody></table>
+      <div class="actions-row" style="margin-top:10px;">
+        <span class="hint">${t("cfg.hint.detectDisclaimer")}</span>
+        <div class="spacer"></div>
+        <button class="btn primary apply-detect-btn" data-idx="${idx}">${t("cfg.action.applyDetected")}</button>
+      </div>
+    </div>`;
+  box.querySelector(".apply-detect-btn").addEventListener("click", () => applyDetected(idx, data));
+}
+
+function applyDetected(idx, data) {
+  const m = modelsList[idx];
+  m.vision = !!data.vision.detected;
+  m.enable_auto_tool_choice = !!data.tool_calling.detected;
+  m.tool_call_parser = data.tool_calling.detected ? (data.tool_calling.suggested_parser || m.tool_call_parser) : null;
+  m.reasoning_parser = data.reasoning.detected ? (data.reasoning.suggested_parser || m.reasoning_parser) : null;
+  m.task = data.task.suggested;
+  markDirty();
+  openAccordions.add(idx);
+  renderModels();
 }
 
 $("add-model-btn").addEventListener("click", () => {

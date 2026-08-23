@@ -14,7 +14,7 @@ from fastapi.responses import StreamingResponse
 
 from pydantic import ValidationError
 
-from . import config_editor, cost_tracker, downloader, process_manager, rag, telemetry
+from . import capability_detector, config_editor, cost_tracker, downloader, process_manager, rag, telemetry
 from .auth import ApiKeyMiddleware
 from .catalog import list_cached_models
 from .config import get_config
@@ -154,6 +154,16 @@ async def load_model_endpoint(model: str):
         return await process_manager.ensure_loaded(model)
     except (RuntimeError, TimeoutError) as e:
         raise HTTPException(500, str(e))
+
+
+@app.get("/models/{model:path}/detect_capabilities")
+async def detect_model_capabilities_endpoint(model: str):
+    """Best-effort Erkennung von Vision/Tool-Calling/Reasoning/Task aus dem
+    lokal gecachten chat_template.jinja + config.json des Modells - genutzt
+    vom Config-Editor ("Fähigkeiten automatisch erkennen"-Button), siehe
+    capability_detector.py. Rein lesend, kein Ladevorgang nötig."""
+    cfg = get_config()
+    return capability_detector.detect_capabilities(model, cfg.hf_home)
 
 
 @app.post("/models/{model:path}/unload")

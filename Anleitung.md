@@ -279,7 +279,10 @@ Cache sofort invalidiert statt bis zu 3s zu warten.
 ### Verfügbare Modelle (2-spaltige Liste + Klick-Modal)
 
 Alle registrierten (`config.json`) und zusätzlich lokal gecachten Modelle, mit Badges
-(gecacht/geladen/deaktiviert/Vision). Klick auf ein Modell öffnet ein Modal mit:
+für gecacht/geladen/deaktiviert sowie die Fähigkeiten des Modells - Vision,
+Tool Calling (`enable_auto_tool_choice`), Reasoning (`reasoning_parser` gesetzt)
+und Embedding (`task: "embed"`) - auf einen Blick sichtbar, ohne erst ins Modal
+klicken zu müssen. Klick auf ein Modell öffnet zusätzlich ein Modal mit:
 - Link zur HuggingFace-Seite (`https://huggingface.co/<model>`)
 - fertigem JSON-Schnipsel im `chatLanguageModels.json`-Format (siehe VS-Code-Setup
   weiter oben) zum direkten Einfügen ins `"models"`-Array eines
@@ -294,6 +297,20 @@ rohem JSON - inkl. aller Server-/Hot-Pool-/RAG-Einstellungen und einer
 aufklappbaren Liste je registriertem Modell (Tool-Call-/Reasoning-Parser,
 `max_model_len`, `gpu_memory_utilization`, `extra_args`, HF-Token, Notizen, ...)
 mit "+ Modell hinzufügen" und Entfernen-Button pro Eintrag.
+
+**"🔍 Fähigkeiten automatisch erkennen"** (Button je Modell-Eintrag): liest das
+lokal gecachte `chat_template.jinja` und `config.json` des Modells aus dem
+HF-Cache (funktioniert auch für noch nicht registrierte, aber schon
+heruntergeladene Modelle - einfach den Namen eintragen und klicken) und
+schlägt Vision/Tool-Calling/Reasoning/Task samt Begründung und
+Konfidenz ("wahrscheinlich"/"unsicher") vor - siehe
+[`vllm_manager/capability_detector.py`](vllm_manager/capability_detector.py)
+für die genaue Heuristik (u.a. `<think>`+`enable_thinking` → Qwen3-Reasoning,
+`<tool_call><function=...>` → Qwen3-XML-Tool-Calling, Harmony-Channels →
+gpt-oss, `1_Pooling/`-Ordner → Embedding-Task). **Reine Vermutung, nichts wird
+automatisch gespeichert** - erst nach Klick auf "Vorschläge übernehmen"
+landen die Werte in den Formularfeldern, gespeichert wird weiterhin nur über
+den normalen Speichern-Button oben.
 
 **Aktivierungswege** (Button oben, während des Scrollens sichtbar):
 - **"Speichern (live übernehmen)"**: validiert die Eingaben serverseitig
