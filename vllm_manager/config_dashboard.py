@@ -474,11 +474,23 @@ function renderForm() {
 }
 
 function populateModelSelects() {
+  // Wird bei JEDER Namens-/Task-Änderung oder jedem Entfernen eines
+  // BELIEBIGEN Modells neu aufgerufen (siehe Aufrufer unten), nicht nur wenn
+  // das ausgewählte Modell selbst betroffen ist. Ohne die aktuelle Auswahl
+  // hier zu merken und wiederherzustellen, wurde <select> komplett neu
+  // aufgebaut und damit die Auswahl STILLSCHWEIGEND auf "kein Modell"
+  // zurückgesetzt - z.B. reichte das Umbenennen eines völlig anderen Modells,
+  // um default_model bzw. rag.embedding_model beim nächsten Speichern
+  // versehentlich auf null zu setzen (RAG damit faktisch deaktiviert).
+  const prevDefault = $("f-default_model").value;
+  const prevEmbed = $("f-rag_embedding_model").value;
   const names = modelsList.map(m => m.name).filter(Boolean);
   const embedNames = modelsList.filter(m => m.task === "embed").map(m => m.name);
   const opt = (v) => `<option value="${esc(v)}">${esc(v)}</option>`;
   $("f-default_model").innerHTML = `<option value="">${esc(t("cfg.hint.noModel"))}</option>` + names.map(opt).join("");
   $("f-rag_embedding_model").innerHTML = `<option value="">${esc(t("cfg.hint.noModel"))}</option>` + embedNames.map(opt).join("");
+  if (names.includes(prevDefault)) $("f-default_model").value = prevDefault;
+  if (embedNames.includes(prevEmbed)) $("f-rag_embedding_model").value = prevEmbed;
 }
 
 // --- Models: Accordion-Liste ----------------------------------------------

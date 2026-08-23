@@ -278,6 +278,22 @@ def is_model_enabled(cfg: Config, model: str) -> tuple[bool, Optional[str]]:
 
 
 async def ensure_loaded(model: str, wait: bool = True) -> dict:
+    """Lädt `model`, falls nötig, und wartet (falls `wait`) bis es bereit ist.
+
+    WICHTIG (war lange ein Bug): der Pool-Lock (`_pool_lock`) darf NUR die
+    kurzen, zustandsverändernden Schritte schützen (Prüfen/Verdrängen/
+    Prozess-Start) - NICHT die eigentliche Warteschleife auf "gesund", die bei
+    großen Modellen mehrere Minuten bis zu `startup_timeout_seconds` (aktuell
+    1800s) dauern kann. Vorher lag die komplette Warteschleife INNERHALB von
+    `async with _pool_lock`, wodurch JEDER andere ensure_loaded()-Aufruf -
+    selbst für ein bereits fertig geladenes, anderes Modell (z.B. das
+    RAG-Embedding-Modell beim Text hinzufügen, siehe rag.py) - für die gesamte
+    Dauer eines FREMDEN Kaltstarts blockiert hat. Das hat den Hot Pool
+    (mehrere Modelle gleichzeitig nutzbar) faktisch ausgehebelt, sobald
+    irgendein Modell gerade kalt startet. Fix: Lock wird direkt nach dem
+    Prozess-Start wieder freigegeben, die Warteschleife läuft außerhalb davon -
+    mehrere gleichzeitige Aufrufer für DASSELBE noch ladende Modell warten
+    einfach auf denselben EngineState statt es doppelt zu starten."""
     cfg = get_config()
     ok, reason = is_model_enabled(cfg, model)
     if not ok:
@@ -289,61 +305,69 @@ async def ensure_loaded(model: str, wait: bool = True) -> dict:
             existing.last_used = time.time()
             _persist_last_active(model)
             return existing.status()
-        if existing is not None:
-            # Hängender/abgestürzter Eintrag - erst aufräumen, dann sauber neu starten.
-            await stop_engine(model, reason="restart")
+        if existing is not None and existing.state == "loading":
+            # Ein anderer Aufruf lädt dieses Modell bereits (z.B. zwei fast
+            # gleichzeitige Chat-Requests) - nicht doppelt starten, sondern
+            # weiter unten (außerhalb des Locks) auf denselben Kaltstart warten.
+            eng = existing
+        else:
+            if existing is not None:
+                # Hängender/abgestürzter Eintrag - erst aufräumen, dann sauber neu starten.
+                await stop_engine(model, reason="restart")
 
-        gmu, mml = cfg.serve_args_for(model)
-        await _make_room(cfg, model, gmu)
-        port = _allocate_port(cfg)
+            gmu, mml = cfg.serve_args_for(model)
+            await _make_room(cfg, model, gmu)
+            port = _allocate_port(cfg)
 
-        eng = EngineState(model, port)
-        engines[model] = eng
-        log_path = LOG_DIR / f"{_safe_name(model)}.log"
-        eng.log_path = log_path
-        cmd = _build_command(cfg, model, port)
-        env = os.environ.copy()
-        env["HF_HOME"] = cfg.hf_home
-        # systemd setzt kein venv-PATH: Tools wie 'ninja' (von flashinfer beim
-        # JIT-Kompilieren von Sampling-Kerneln benötigt) liegen in .venv/bin und
-        # würden sonst nicht über PATH gefunden (-> Engine-Crash exit=1).
-        venv_bin = str(Path(cfg.resolved_vllm_bin()).parent)
-        env["PATH"] = venv_bin + os.pathsep + env.get("PATH", "")
-        mcfg = cfg.models.get(model)
-        if mcfg and mcfg.hf_token:
-            env["HF_TOKEN"] = mcfg.hf_token
-        logger.info("Starte Engine: %s", " ".join(cmd))
-        log_f = open(log_path, "ab")
-        proc = await asyncio.create_subprocess_exec(
-            *cmd,
-            stdout=log_f,
-            stderr=asyncio.subprocess.STDOUT,
-            env=env,
-            cwd=str(Path(cfg.hf_home).parent),
-        )
-        eng.process = proc
-        eng.started_at = time.time()
+            eng = EngineState(model, port)
+            engines[model] = eng
+            log_path = LOG_DIR / f"{_safe_name(model)}.log"
+            eng.log_path = log_path
+            cmd = _build_command(cfg, model, port)
+            env = os.environ.copy()
+            env["HF_HOME"] = cfg.hf_home
+            # systemd setzt kein venv-PATH: Tools wie 'ninja' (von flashinfer beim
+            # JIT-Kompilieren von Sampling-Kerneln benötigt) liegen in .venv/bin und
+            # würden sonst nicht über PATH gefunden (-> Engine-Crash exit=1).
+            venv_bin = str(Path(cfg.resolved_vllm_bin()).parent)
+            env["PATH"] = venv_bin + os.pathsep + env.get("PATH", "")
+            mcfg = cfg.models.get(model)
+            if mcfg and mcfg.hf_token:
+                env["HF_TOKEN"] = mcfg.hf_token
+            logger.info("Starte Engine: %s", " ".join(cmd))
+            log_f = open(log_path, "ab")
+            proc = await asyncio.create_subprocess_exec(
+                *cmd,
+                stdout=log_f,
+                stderr=asyncio.subprocess.STDOUT,
+                env=env,
+                cwd=str(Path(cfg.hf_home).parent),
+            )
+            eng.process = proc
+            eng.started_at = time.time()
+    # Lock ab hier freigegeben - andere ensure_loaded()-Aufrufe (auch für
+    # bereits fertige Modelle) blockieren nicht mehr auf diesem Kaltstart.
 
-        if not wait:
+    if not wait:
+        return eng.status()
+
+    deadline = time.time() + cfg.startup_timeout_seconds
+    while time.time() < deadline:
+        if eng.process.returncode is not None:
+            tail = _tail(eng.log_path)
+            msg = f"vLLM-Engine für '{model}' ist unerwartet beendet (exit={eng.process.returncode})."
+            eng.last_error = msg
+            await stop_engine(model, reason="crashed")
+            raise RuntimeError(f"{msg}\nLetzte Log-Zeilen ({eng.log_path}):\n{tail}")
+        if await _health_ok(cfg, eng.port):
+            eng.state = "ready"
+            eng.last_used = time.time()
+            _persist_last_active(model)
             return eng.status()
+        await asyncio.sleep(2)
 
-        deadline = time.time() + cfg.startup_timeout_seconds
-        while time.time() < deadline:
-            if eng.process.returncode is not None:
-                tail = _tail(eng.log_path)
-                msg = f"vLLM-Engine für '{model}' ist unerwartet beendet (exit={proc.returncode})."
-                eng.last_error = msg
-                await stop_engine(model, reason="crashed")
-                raise RuntimeError(f"{msg}\nLetzte Log-Zeilen ({log_path}):\n{tail}")
-            if await _health_ok(cfg, port):
-                eng.state = "ready"
-                eng.last_used = time.time()
-                _persist_last_active(model)
-                return eng.status()
-            await asyncio.sleep(2)
-
-        tail = _tail(eng.log_path)
-        msg = f"Timeout beim Start von '{model}' nach {cfg.startup_timeout_seconds}s."
-        eng.last_error = msg
-        await stop_engine(model, reason="timeout")
-        raise TimeoutError(f"{msg}\nLetzte Log-Zeilen ({log_path}):\n{tail}")
+    tail = _tail(eng.log_path)
+    msg = f"Timeout beim Start von '{model}' nach {cfg.startup_timeout_seconds}s."
+    eng.last_error = msg
+    await stop_engine(model, reason="timeout")
+    raise TimeoutError(f"{msg}\nLetzte Log-Zeilen ({eng.log_path}):\n{tail}")

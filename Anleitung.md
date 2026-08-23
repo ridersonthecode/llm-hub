@@ -60,6 +60,20 @@ Es gibt **kein** automatisches Idle-Entladen (`idle_timeout_seconds: null` in
 der config.json) – ein Modell bleibt geladen, bis es verdrängt, ein anderes
 Modell dasselbe Slot anfragt oder es manuell entladen wird.
 
+**Wichtiger Bugfix:** bis vor Kurzem hat ein einziger Kaltstart (egal welches
+Modell) den kompletten Hot Pool faktisch blockiert - der interne Pool-Lock
+(`process_manager._pool_lock`) hielt versehentlich auch die gesamte
+Warte-auf-"gesund"-Schleife eines Kaltstarts (bis zu `startup_timeout_seconds`
+lang), nicht nur die kurzen Setup-Schritte davor. Dadurch blockierte JEDER
+andere `ensure_loaded()`-Aufruf - selbst für ein bereits fertig geladenes,
+völlig anderes Modell (z.B. das RAG-Embedding-Modell beim Hinzufügen eines
+Texts) - bis zu mehrere Minuten lang, nur weil irgendwo im Hintergrund ein
+anderes Modell gerade kalt startete. Behoben: der Lock schützt jetzt nur noch
+die kurze Prüfen/Verdrängen/Prozess-Start-Phase, die eigentliche Warteschleife
+läuft danach außerhalb davon - mehrere gleichzeitige Anfragen für dasselbe,
+noch ladende Modell warten dabei weiterhin korrekt auf denselben Kaltstart,
+statt ihn versehentlich doppelt zu starten.
+
 ## Dienst steuern
 
 ```bash
@@ -518,21 +532,44 @@ vLLM-Manager (vllm_manager/rag.py)
       └─ /dashboard/rag (eigene Verwaltungsseite, EN/DE)
 ```
 
-**Setup:** Qdrant läuft als Docker-Container:
+**Setup:** Qdrant läuft als Docker-Container. Erst prüfen, ob er schon existiert
+(einmalig angelegte Container mit `--restart unless-stopped` überleben normale
+Server-Neustarts von selbst):
 
 ```bash
+docker ps -a --filter name=qdrant     # existiert er schon?
+
+# Falls "Exited" / gestoppt:
+docker start qdrant
+
+# Nur falls er noch NIE angelegt wurde (einmalig):
 docker volume create qdrant_storage
 docker run -d --name qdrant --restart unless-stopped \
   -p 6333:6333 -p 6334:6334 \
   -v qdrant_storage:/qdrant/storage \
   qdrant/qdrant
+
+# Gesundheit prüfen:
+curl http://127.0.0.1:6333/healthz     # -> "healthz check passed"
 ```
 
 In `config.json` unter `"rag"`: `enabled: true`, `embedding_model` auf ein
 registriertes Modell mit `"task": "embed"` gesetzt (Beispiel bereits in
-`config.example.json`). `chunk_size_chars`/`chunk_overlap_chars` steuern, wie
-Texte beim Ablegen zerlegt werden (Default 1500/200 Zeichen, versucht an Absatz-/
+`config.example.json`, im Dashboard über den Config-Editor/Abschnitt RAG
+einstellbar). `chunk_size_chars`/`chunk_overlap_chars` steuern, wie Texte beim
+Ablegen zerlegt werden (Default 1500/200 Zeichen, versucht an Absatz-/
 Satzgrenzen zu brechen).
+
+**Stolperstein (behoben):** Der Config-Editor hat die Dropdown-Auswahl für
+`default_model` und `rag.embedding_model` bisher stillschweigend auf "kein
+Modell" zurückgesetzt, sobald IRGENDEIN anderes Modell im selben Formular
+bearbeitet, umbenannt oder entfernt wurde (z.B. über "🔍 Fähigkeiten
+automatisch erkennen") - unabhängig davon, ob das ausgewählte Modell selbst
+betroffen war. Ein anschließendes Speichern hat `rag.embedding_model` dadurch
+unbemerkt auf `null` gesetzt und RAG damit faktisch deaktiviert, obwohl
+`rag.enabled` weiterhin `true` blieb. Behoben: die Auswahl bleibt jetzt über
+Formular-Neuaufbauten hinweg erhalten (`populateModelSelects()` in
+config_dashboard.py), außer das ausgewählte Modell wird selbst entfernt.
 
 **Nutzung:**
 
