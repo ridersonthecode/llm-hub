@@ -100,7 +100,7 @@ class Config(BaseModel):
     # einem Neustart bewusst mit leerem Hot Pool zu starten.
     auto_reload_last_model: bool = True
     default_model: Optional[str] = None
-    startup_timeout_seconds: int = 900
+    startup_timeout_seconds: int = 1800
     default_serve_args: dict = Field(default_factory=dict)
     models: dict[str, ModelConfig] = Field(default_factory=dict)
     rag: RagConfig = Field(default_factory=RagConfig)

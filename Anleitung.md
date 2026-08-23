@@ -188,8 +188,27 @@ statt neu zu beginnen).
 
 ```bash
 curl -X POST http://<LAN-IP>:11434/models/Qwen%2FQwen3-8B/load     # blockiert bis bereit
+curl -X POST "http://<LAN-IP>:11434/models/Qwen%2FQwen3-8B/load?background=true"  # kehrt sofort zurück
 curl -X POST http://<LAN-IP>:11434/models/Qwen%2FQwen3-8B/unload
 ```
+
+Im Dashboard: **"Laden"-Button** im Klick-Modal jedes nicht geladenen, aktivierten
+Modells (Gegenstück zum "Entladen"-Button) - ruft intern `?background=true` auf,
+damit der Browser-Request bei großen Modellen nicht minutenlang hängt. Der
+Kaltstart läuft serverseitig als überwachter Hintergrund-Task (exakt wie das
+automatische Nachladen nach einem Neustart, siehe unten) - Fortschritt ("lädt
+gerade (Kaltstart)") zeigt wie gewohnt die Tabelle "Geladene Modelle" bzw. der
+Modell-Verlauf über den nächsten WebSocket-Heartbeat.
+
+**Kaltstart-Timeout bei großen Modellen:** `startup_timeout_seconds` in
+`config.json` (Default 1800s, Config-Editor unter "Hot Pool & Limits") begrenzt,
+wie lange ein Kaltstart maximal dauern darf, bevor er als "Start-Timeout"
+abgebrochen wird - reiner Schutz gegen einen hängenden/abgestürzten
+Ladevorgang, kein künstliches Limit gegen große Modelle. Bei sehr großen
+Modellen (kalter Seiten-Cache nach einem Neustart, viel gleichzeitige
+Festplatten-Last durch andere Vorgänge) kann ein einzelner Kaltstart trotzdem
+mal deutlich länger dauern als gewohnt - in dem Fall den Wert im Config-Editor
+weiter erhöhen.
 
 ## Automatisches Nachladen nach Neustart
 

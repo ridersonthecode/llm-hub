@@ -82,6 +82,9 @@
   "engine.runningSince": "läuft seit {duration}",
   "engine.error": "Fehler: {msg}",
 
+  "action.load": "Laden",
+  "action.loading": "Wird gestartet…",
+  "error.loadFailed": "Laden fehlgeschlagen: {msg}",
   "action.unload": "Entladen",
   "action.unloading": "Entlade…",
   "confirm.unload": "Modell \"{model}\" wirklich entladen?",

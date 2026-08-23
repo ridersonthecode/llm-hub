@@ -900,6 +900,30 @@ function render(data) {
   }
 }
 
+// --- Modell manuell laden (Dashboard-Button, Gegenstück zu unloadModel) --
+// Ruft .../load?background=true auf - der Kaltstart läuft serverseitig als
+// überwachter Hintergrund-Task (siehe main.py _background_load), der Fetch
+// hier kehrt also sofort zurück statt bei großen Modellen minutenlang auf
+// die HTTP-Antwort zu warten. Fortschritt zeigt wie gewohnt der nächste
+// WebSocket-Heartbeat (Geladene Modelle/Modell-Verlauf: "lädt gerade").
+async function loadModel(model, btn) {
+  const original = btn.textContent;
+  btn.disabled = true;
+  btn.textContent = t("action.loading");
+  try {
+    const headers = {};
+    if (apiKey) headers["Authorization"] = "Bearer " + apiKey;
+    const res = await fetch(`/models/${encodeURIComponent(model)}/load?background=true`, { method: "POST", headers });
+    if (!res.ok) throw new Error(await res.text());
+    closeModal();
+    // Nächster Heartbeat (≤1s) zeigt den Kaltstart in der Tabelle an.
+  } catch (e) {
+    alert(t("error.loadFailed", { msg: e.message }));
+    btn.disabled = false;
+    btn.textContent = original;
+  }
+}
+
 // --- Modell manuell entladen (Dashboard-Button) --------------------------
 async function unloadModel(model, btn) {
   if (!confirm(t("confirm.unload", { model: modelName(model) }))) return;
@@ -1018,10 +1042,14 @@ function openModal(m) {
     $("modal-notes").style.display = "none";
   }
 
-  $("modal-actions").innerHTML = (m.loaded || m.cached) ? `<div style="margin-bottom:16px; display:flex; gap:8px; flex-wrap:wrap;">
+  $("modal-actions").innerHTML = (m.loaded || m.cached || m.enabled) ? `<div style="margin-bottom:16px; display:flex; gap:8px; flex-wrap:wrap;">
+    ${(!m.loaded && m.enabled) ? `<button class="btn" id="modal-load-btn">${t("action.load")}</button>` : ""}
     ${m.loaded ? `<button class="unload-btn" id="modal-unload-btn">${t("action.unload")}</button>` : ""}
     ${m.cached ? `<button class="btn danger" id="modal-delete-cache-btn" ${m.loaded ? "disabled title=\"" + esc(t("hint.unloadBeforeDelete")) + "\"" : ""}>${t("action.deleteFromDisk")}</button>` : ""}
   </div>` : "";
+  if (!m.loaded && m.enabled) {
+    $("modal-load-btn").addEventListener("click", () => loadModel(m.model, $("modal-load-btn")));
+  }
   if (m.loaded) {
     $("modal-unload-btn").addEventListener("click", () => unloadModel(m.model, $("modal-unload-btn")));
   }

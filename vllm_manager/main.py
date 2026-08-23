@@ -162,11 +162,31 @@ async def cancel_pull_endpoint(job_id: str):
 
 
 @app.post("/models/{model:path}/load")
-async def load_model_endpoint(model: str):
+async def load_model_endpoint(model: str, background: bool = False):
+    """Lädt ein Modell manuell (Dashboard-"Laden"-Button, Gegenstück zu
+    .../unload). Standardmäßig (background=false, bisheriges Verhalten)
+    blockiert der Aufruf bis das Modell bereit ist oder cfg.startup_timeout_
+    seconds abläuft - bei großen Modellen (mehrere Minuten Kaltstart) ist ein
+    so lange offen gehaltener HTTP-Request/Browser-Fetch unpraktisch.
+    background=true startet den Kaltstart stattdessen als überwachten
+    Hintergrund-Task (exakt wie main._auto_reload_last_model) und gibt sofort
+    zurück - Fortschritt/Fertig/Timeout zeigt wie gewohnt der nächste
+    WebSocket-Heartbeat (Loaded Models/Modell-Verlauf)."""
+    if background:
+        asyncio.create_task(_background_load(model))
+        return {"status": "loading_started"}
     try:
         return await process_manager.ensure_loaded(model)
     except (RuntimeError, TimeoutError) as e:
         raise HTTPException(500, str(e))
+
+
+async def _background_load(model: str) -> None:
+    try:
+        await process_manager.ensure_loaded(model)
+        logger.info("Manuelles Laden von '%s' abgeschlossen.", model)
+    except Exception as e:
+        logger.warning("Manuelles Laden von '%s' fehlgeschlagen: %s", model, e)
 
 
 @app.get("/models/{model:path}/detect_capabilities")
