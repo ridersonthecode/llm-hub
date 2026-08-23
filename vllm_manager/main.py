@@ -125,6 +125,7 @@ async def list_models_endpoint():
             "enabled": True,
             "notes": "Lokal gecacht, aber nicht in config.json registriert.",
         })
+    out.sort(key=lambda m: m["model"].lower())
     return {"models": out, "default_model": cfg.default_model, "active": process_manager.loaded_models()}
 
 

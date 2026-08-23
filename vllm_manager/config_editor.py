@@ -151,6 +151,7 @@ def save_config(new_data: dict) -> tuple[Config, Optional[str]]:
     laufende Programm. Wirft pydantic.ValidationError bei ungültigen Daten -
     dabei wird NICHTS geschrieben. Gibt (neue Config, Backup-Dateiname) zurück."""
     new_cfg = Config(**new_data)  # wirft ValidationError, wenn ungültig
+    config_module.sort_models(new_cfg)  # Modelle alphabetisch, bevor geschrieben/übernommen wird
 
     _ensure_backups_dir()
     backup_name = None

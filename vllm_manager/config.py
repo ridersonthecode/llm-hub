@@ -164,11 +164,22 @@ class Config(BaseModel):
 _config: Optional[Config] = None
 
 
+def sort_models(cfg: Config) -> Config:
+    """Sortiert cfg.models alphabetisch (case-insensitive) nach Modellname, in
+    place. Dict-Reihenfolge in Python bestimmt die Reihenfolge überall dort,
+    wo einfach über cfg.models.items() iteriert wird (Dashboard, main.py,
+    mcp_tools.py, ...) sowie die Reihenfolge beim Serialisieren nach
+    config.json - ein zentraler Sortierpunkt reicht daher aus, statt an jeder
+    Anzeigestelle einzeln zu sortieren."""
+    cfg.models = dict(sorted(cfg.models.items(), key=lambda kv: kv[0].casefold()))
+    return cfg
+
+
 def load_config(path: Path = CONFIG_PATH) -> Config:
     global _config
     with open(path, encoding="utf-8") as f:
         data = json.load(f)
-    _config = Config(**data)
+    _config = sort_models(Config(**data))
     return _config
 
 
@@ -178,7 +189,7 @@ def set_config(cfg: Config) -> Config:
     Schreiben, siehe config_editor.py - vermeidet ein unnötiges zweites
     Parsen/Validieren derselben Daten)."""
     global _config
-    _config = cfg
+    _config = sort_models(cfg)
     return _config
 
 

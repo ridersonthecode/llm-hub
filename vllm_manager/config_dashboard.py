@@ -421,6 +421,10 @@ async function loadConfig() {
   const data = await res.json();
   state = data.config;
   modelsList = Object.entries(state.models || {}).map(([name, m]) => Object.assign({ name }, m));
+  // Alphabetisch (case-insensitive) - Backend liefert cfg.models bereits sortiert
+  // (siehe config.py: sort_models()), hier zusätzlich sortiert für den Fall, dass
+  // sich das mal ändert bzw. für Robustheit unabhängig vom Backend.
+  modelsList.sort((a, b) => (a.name || "").localeCompare(b.name || "", undefined, { sensitivity: "base" }));
   if (data.startup_warning) {
     $("startup-warning-banner").style.display = "block";
     $("startup-warning-banner").textContent = "⚠️ " + data.startup_warning;
