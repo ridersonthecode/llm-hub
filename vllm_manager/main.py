@@ -16,6 +16,7 @@ from pydantic import ValidationError
 
 from . import capability_detector, config_editor, cost_tracker, downloader, process_manager, rag, telemetry
 from .auth import ApiKeyMiddleware
+from . import catalog
 from .catalog import list_cached_models
 from .config import get_config
 from .config_dashboard import router as config_dashboard_router
@@ -148,6 +149,18 @@ async def pull_status_endpoint(job_id: str):
     return job
 
 
+@app.post("/models/pull/{job_id}/cancel")
+async def cancel_pull_endpoint(job_id: str):
+    """Bricht einen laufenden/wartenden Download ab (Dashboard-Button) - siehe
+    downloader.cancel_job(). Die bereits heruntergeladenen Teil-Dateien bleiben
+    liegen (huggingface_hub kann fortsetzen); wer den Platz sofort zurückwill,
+    nutzt danach DELETE /models/{model}/cache."""
+    ok = await downloader.cancel_job(job_id)
+    if not ok:
+        raise HTTPException(404, f"Download-Job '{job_id}' existiert nicht (mehr) oder läuft nicht mehr.")
+    return {"ok": True}
+
+
 @app.post("/models/{model:path}/load")
 async def load_model_endpoint(model: str):
     try:
@@ -172,6 +185,47 @@ async def unload_model_endpoint(model: str):
         await process_manager.stop_engine(model)
         return {"status": "unloaded"}
     return {"status": "not_loaded", "currently_loaded": process_manager.loaded_models()}
+
+
+@app.get("/models/{model:path}/cache_info")
+async def model_cache_info_endpoint(model: str):
+    """Größe der lokal heruntergeladenen Dateien eines Modells (falls
+    vorhanden) - für den "Von Platte löschen"-Bestätigungsdialog im
+    Dashboard, damit man vorher sieht, wie viel GB das eigentlich sind.
+    Rein lesend, absichtlich getrennt vom Live-Snapshot (dashboard.py) - eine
+    rekursive Verzeichnisgröße über evtl. hunderte GB soll nicht bei jedem
+    WebSocket-Heartbeat für jedes Modell neu berechnet werden."""
+    cfg = get_config()
+    path = catalog.cache_dir_for(model, cfg.hf_home)
+    if not path.exists():
+        return {"cached": False, "size_bytes": 0, "path": str(path)}
+    size = await asyncio.to_thread(catalog.dir_size_bytes, path)
+    return {"cached": True, "size_bytes": size, "path": str(path)}
+
+
+@app.delete("/models/{model:path}/cache")
+async def delete_model_cache_endpoint(model: str):
+    """Löscht die lokal heruntergeladenen Dateien eines Modells UNWIDERRUFLICH
+    von der Platte (nicht nur die config.json-Registrierung - siehe
+    Config-Editor "Remove", das nur den Eintrag entfernt). Greift für
+    registrierte UND nur lokal gecachte, nicht (mehr) registrierte Modelle
+    gleichermaßen. Verweigert, solange das Modell noch geladen ist oder gerade
+    lädt - sonst würde der laufenden Engine buchstäblich der Boden unter den
+    Füßen weggezogen."""
+    if model in process_manager.engines:
+        raise HTTPException(
+            409,
+            f"Modell '{model}' ist aktuell geladen (oder lädt gerade) - erst "
+            f"entladen (Dashboard-Button oder POST .../unload), bevor die "
+            f"Dateien von der Platte gelöscht werden können.",
+        )
+    cfg = get_config()
+    path = catalog.cache_dir_for(model, cfg.hf_home)
+    if not path.exists():
+        raise HTTPException(404, f"Für Modell '{model}' sind lokal keine Dateien vorhanden.")
+    freed = await asyncio.to_thread(catalog.delete_model_cache, model, cfg.hf_home)
+    catalog.invalidate_cache(cfg.hf_home)
+    return {"ok": True, "freed_bytes": freed}
 
 
 # --- RAG (Retrieval-Augmented Generation) ---------------------------------
@@ -340,6 +394,27 @@ async def reset_cost_records_endpoint():
 HOP_BY_HOP = {"host", "authorization", "content-length", "connection"}
 
 
+_MAX_TOKENS_PATHS = {"chat/completions", "completions"}
+
+
+def _apply_default_max_tokens(cfg, model: str, path: str, parsed_body, body: bytes) -> bytes:
+    """Injiziert models.<model>.max_tokens (siehe config.py) in den
+    Request-Body, falls konfiguriert UND der Client selbst weder max_tokens
+    noch max_completion_tokens mitschickt - ein expliziter Client-Wunsch wird
+    nie überschrieben. Reines Sicherheitsnetz gegen durchgehende
+    Generierungen (siehe ModelConfig.max_tokens-Docstring), nicht gedacht als
+    genereller Parameter-Zwang."""
+    if parsed_body is None or path not in _MAX_TOKENS_PATHS:
+        return body
+    mcfg = cfg.models.get(model)
+    if mcfg is None or mcfg.max_tokens is None:
+        return body
+    if "max_tokens" in parsed_body or "max_completion_tokens" in parsed_body:
+        return body
+    parsed_body["max_tokens"] = mcfg.max_tokens
+    return json.dumps(parsed_body).encode("utf-8")
+
+
 def _finish_and_record(rid: str, status: str, prompt_tokens=None, completion_tokens=None) -> None:
     """telemetry.finish_request() + Persistieren fürs fiktive Kostentracking
     (cost_tracker.py) in einem Rutsch - auch für früh abgebrochene Anfragen
@@ -374,6 +449,7 @@ async def proxy_v1(path: str, request: Request):
 
     model = None
     is_stream = False
+    parsed_body: Optional[dict] = None
     if body:
         try:
             parsed_body = json.loads(body)
@@ -404,6 +480,8 @@ async def proxy_v1(path: str, request: Request):
         _finish_and_record(rid, "error")
         raise HTTPException(503, str(e))
     telemetry.mark_ready(rid)
+
+    body = _apply_default_max_tokens(cfg, model, path, parsed_body, body)
 
     target = f"http://{cfg.engine_host}:{engine_status['port']}/v1/{path}"
     client = httpx.AsyncClient(timeout=None)

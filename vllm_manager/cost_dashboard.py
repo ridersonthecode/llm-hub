@@ -201,6 +201,21 @@ COST_DASHBOARD_HTML = r"""<!doctype html>
 <script>
 const $ = (id) => document.getElementById(id);
 
+// Siehe dashboard.py (gleiches Problem/gleiche Lösung): ersetzt das DOM nur
+// bei tatsächlicher Änderung und schiebt ein Update auf, solange der Nutzer
+// gerade Text innerhalb der Box markiert hat - der nächste Tick holt es nach.
+function safeSetHTML(el, html) {
+  if (!el) return false;
+  if (el._lastHtml === html) return false;
+  const sel = window.getSelection();
+  if (sel && sel.rangeCount > 0 && !sel.isCollapsed && el.contains(sel.anchorNode)) {
+    return false;
+  }
+  el.innerHTML = html;
+  el._lastHtml = html;
+  return true;
+}
+
 // --- i18n (identisch zum Haupt-Dashboard) ---------------------------------
 const TRANSLATIONS = __TRANSLATIONS_JSON__;
 const DEFAULT_LANG = "en";
@@ -305,16 +320,16 @@ function render(data) {
 
   const byModel = summary.by_model || [];
   if (byModel.length === 0) {
-    $("by-model-box").innerHTML = `<div class="empty">${t("cost.empty.noRecords")}</div>`;
+    safeSetHTML($("by-model-box"), `<div class="empty">${t("cost.empty.noRecords")}</div>`);
   } else {
-    $("by-model-box").innerHTML = `<div class="table-scroll"><table><thead><tr>
+    safeSetHTML($("by-model-box"), `<div class="table-scroll"><table><thead><tr>
       <th>${t("th.model")}</th><th class="num">${t("th.requests")}</th><th class="num">${t("cost.card.pricedRequests")}</th><th class="num">${t("th.cost")}</th>
       </tr></thead><tbody>` + byModel.map(m => `<tr>
         <td>${esc(m.model)}</td>
         <td class="mono num">${m.requests}</td>
         <td class="mono num">${m.priced_requests}</td>
         <td class="mono num">${fmtUsd(m.cost_usd) ?? "$0.00"}</td>
-      </tr>`).join("") + `</tbody></table></div>`;
+      </tr>`).join("") + `</tbody></table></div>`);
   }
 
   // Auswahl bereinigen: Datensätze, die nicht mehr existieren (gelöscht/reset), rausnehmen.
@@ -322,10 +337,10 @@ function render(data) {
   selected = new Set([...selected].filter(id => stillThere.has(id)));
 
   if (records.length === 0) {
-    $("records-box").innerHTML = `<div class="empty">${t("cost.empty.noRecords")}</div>`;
+    safeSetHTML($("records-box"), `<div class="empty">${t("cost.empty.noRecords")}</div>`);
   } else {
     const allSelected = records.length > 0 && records.every(r => selected.has(r.id));
-    $("records-box").innerHTML = `<div class="table-scroll"><table><thead><tr>
+    const recordsHtml = `<div class="table-scroll"><table><thead><tr>
       <th><input type="checkbox" id="select-all-cb" ${allSelected ? "checked" : ""}></th>
       <th>${t("th.time")}</th><th>${t("th.model")}</th><th>${t("th.app")}</th><th>${t("th.endpoint")}</th>
       <th class="num">${t("th.promptTokens")}</th><th class="num">${t("th.complTokens")}</th>
@@ -349,21 +364,26 @@ function render(data) {
         </tr>`;
       }).join("") + `</tbody></table></div>`;
 
-    $("select-all-cb").addEventListener("change", (e) => {
-      if (e.target.checked) records.forEach(r => selected.add(r.id));
-      else selected.clear();
-      render(latestSnapshot);
-    });
-    document.querySelectorAll(".row-cb").forEach(cb => {
-      cb.addEventListener("change", (e) => {
-        const id = e.target.dataset.id;
-        if (e.target.checked) selected.add(id); else selected.delete(id);
-        updateDeleteBtn();
+    // Event-Listener nur neu binden, wenn safeSetHTML das DOM auch wirklich
+    // ersetzt hat - sonst würden bei jedem Tick doppelte Listener anfallen
+    // bzw. (im übersprungenen Fall) gar keine Elemente zum Binden existieren.
+    if (safeSetHTML($("records-box"), recordsHtml)) {
+      $("select-all-cb").addEventListener("change", (e) => {
+        if (e.target.checked) records.forEach(r => selected.add(r.id));
+        else selected.clear();
+        render(latestSnapshot);
       });
-    });
-    document.querySelectorAll(".row-del").forEach(btn => {
-      btn.addEventListener("click", () => deleteOne(btn.dataset.id));
-    });
+      document.querySelectorAll(".row-cb").forEach(cb => {
+        cb.addEventListener("change", (e) => {
+          const id = e.target.dataset.id;
+          if (e.target.checked) selected.add(id); else selected.delete(id);
+          updateDeleteBtn();
+        });
+      });
+      document.querySelectorAll(".row-del").forEach(btn => {
+        btn.addEventListener("click", () => deleteOne(btn.dataset.id));
+      });
+    }
   }
 
   updateDeleteBtn();

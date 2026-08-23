@@ -164,10 +164,25 @@ curl http://<LAN-IP>:11434/models/pull
 Für gated Modelle (z.B. Meta Llama): `"hf_token": "hf_xxx"` im Request-Body mitgeben,
 oder dauerhaft in `config.json` unter dem Modell-Eintrag (`hf_token`) hinterlegen.
 
-**Hinweis:** Download-Jobs laufen im Manager-Prozess und überleben keinen
-`systemctl restart vllm` – bei einem Neustart während eines laufenden Downloads muss
-er neu gestartet werden (bereits heruntergeladene Dateien bleiben im Cache erhalten,
-`snapshot_download` setzt fort statt neu zu beginnen).
+**Download abbrechen:** per "Abbrechen"-Button in der Downloads-Tabelle im Dashboard,
+oder `POST /models/pull/<job_id>/cancel`. Der eigentliche Transfer läuft in einem
+eigenen Kindprozess (`download_worker.py`), der beim Abbrechen per SIGTERM beendet
+wird (nach 5s Frist SIGKILL) - bereits heruntergeladene Teil-Dateien bleiben liegen
+(fortsetzbar bei einem erneuten Download desselben Modells), werden aber NICHT
+automatisch gelöscht. Wer den Platz sofort zurückwill: zusätzlich den
+"Von Platte löschen"-Button nutzen (siehe unten, "Verfügbare Modelle").
+
+Bewusst ein eigener Prozess statt eines Threads: `huggingface_hub`s
+`snapshot_download()` bietet selbst keinen Abbruch-Mechanismus, und ein bereits
+laufender Thread-Pool-Task lässt sich aus Python heraus nicht mitten in der
+Ausführung stoppen (nur vor dem Start) - nur ein Kindprozess lässt sich jederzeit
+sauber per Signal beenden.
+
+**Hinweis:** Download-Jobs laufen im Manager-Prozess (der Kindprozess wird von ihm
+verwaltet) und überleben keinen `systemctl restart vllm` – bei einem Neustart
+während eines laufenden Downloads muss er neu gestartet werden (bereits
+heruntergeladene Dateien bleiben im Cache erhalten, `snapshot_download` setzt fort
+statt neu zu beginnen).
 
 ## Manuell laden/entladen
 
@@ -196,6 +211,34 @@ Start des Managers selbst oder andere Requests zu blockieren.
 - Zum Deaktivieren: `"auto_reload_last_model": false` in `config.json`, oder
   die Checkbox im Config-Editor - dann startet der Hot Pool nach einem
   Neustart bewusst leer.
+
+## Sicherheitsnetz gegen durchgehende Generierungen (`max_tokens` pro Modell)
+
+Anlass: ein Modell ist in eine Wiederholungsschleife geraten und hat am Stück
+über 80.000 Tokens produziert (43 Minuten lang), weil weder der Client noch
+der Server eine Obergrenze gesetzt hatten - der einzige Client-seitige
+Timeout hat nur "Sorry, no response was returned." angezeigt, während die
+Engine im Hintergrund weiter generiert hat.
+
+Pro Modell lässt sich in `config.json` (Feld `max_tokens` unter `models.<model>`)
+bzw. im Config-Editor ("Max output tokens (safety net, empty = unbounded)")
+eine Obergrenze für die Antwortlänge hinterlegen:
+
+- Greift **nur**, wenn der Request selbst weder `max_tokens` noch
+  `max_completion_tokens` mitschickt (OpenAI-API) bzw. kein `num_predict`
+  (Ollama-Kompatibilität, `/api/chat`) - ein expliziter Client-Wunsch wird nie
+  heruntergedrückt oder überschrieben.
+- Gilt nur für `/v1/chat/completions`, `/v1/completions` und `/api/chat`.
+  `/v1/embeddings` ist davon nie betroffen (dort gibt es kein `max_tokens`).
+- `null`/leer = kein Limit (bisheriges Verhalten, nur durch `max_model_len`
+  begrenzt) - so war jedes Modell vor dieser Änderung konfiguriert.
+
+Die aktuell hinterlegten Werte sind bewusst großzügig gewählt (pro Modell
+ca. ein Viertel des jeweiligen `max_model_len`, gedeckelt bei 65.536 Tokens
+als Obergrenze, Boden bei 4.096) - sie sollen normale, auch sehr lange
+Antworten nicht beschneiden, aber eine durchgehende Generierung auf ein
+absehbares Maximum begrenzen. Feinjustierung pro Modell jederzeit über den
+Config-Editor möglich.
 
 ## Live-Dashboard
 
@@ -247,6 +290,15 @@ Heartbeat (damit auch reine Engine-/System-Metriken aktuell bleiben, auch ohne n
 Anfragen). `GET /dashboard/status` liefert denselben Snapshot einmalig als JSON, z.B.
 zum Debuggen mit `curl`.
 
+Jede Tabelle wird bei jedem Tick nur dann im DOM ersetzt, wenn sich ihr Inhalt
+tatsächlich geändert hat (`safeSetHTML()` in `dashboard.py`/`cost_dashboard.py`
+vergleicht das neu gerenderte HTML gegen das zuletzt geschriebene) - vorher wurde
+jede Tabelle jede Sekunde komplett neu aufgebaut, auch ohne Änderung, was aussah
+wie ein ständiges Neuladen und dabei jede laufende Textmarkierung sofort wieder
+aufgehoben hat. Zusätzlich wird ein Update verschoben, solange gerade Text
+innerhalb der betroffenen Tabelle markiert ist - der nächste Tick (≤1s später)
+holt es nach, sobald die Markierung beendet ist.
+
 **Performance:** der Dienst läuft single-threaded auf einem asyncio-Event-Loop -
 WebSocket-Heartbeat und Chat-Proxy teilen sich denselben Thread. Der Scan des
 lokalen HF-Caches (`catalog.list_cached_models()`, u.a. für die
@@ -288,6 +340,16 @@ klicken zu müssen. Klick auf ein Modell öffnet zusätzlich ein Modal mit:
   weiter oben) zum direkten Einfügen ins `"models"`-Array eines
   `customendpoint`-Eintrags - mit Kopieren-Button. Die `url` wird dynamisch aus der
   Adresse gebaut, über die das Dashboard gerade aufgerufen wurde.
+- **"Von Platte löschen"-Button** (nur sichtbar, wenn das Modell lokal gecacht ist):
+  löscht die heruntergeladenen Dateien unwiderruflich von der Platte - unabhängig
+  davon, ob das Modell noch in `config.json` registriert ist oder nur lokal
+  gecacht herumliegt (z.B. nach einem Entfernen im Config-Editor, siehe unten).
+  Fragt vorher die tatsächliche Verzeichnisgröße ab und zeigt sie im
+  Bestätigungsdialog an. Verweigert, solange das Modell noch geladen ist/lädt
+  (erst entladen). Betrifft NUR die lokalen Dateien, nie die `config.json`-
+  Registrierung - ein registriertes Modell bleibt danach in der Liste stehen
+  (jetzt als "nicht gecacht"), bis es erneut heruntergeladen oder aus
+  `config.json` entfernt wird.
 
 ### Config-Editor (`/dashboard/config`)
 
@@ -297,6 +359,24 @@ rohem JSON - inkl. aller Server-/Hot-Pool-/RAG-Einstellungen und einer
 aufklappbaren Liste je registriertem Modell (Tool-Call-/Reasoning-Parser,
 `max_model_len`, `gpu_memory_utilization`, `extra_args`, HF-Token, Notizen, ...)
 mit "+ Modell hinzufügen" und Entfernen-Button pro Eintrag.
+
+**"Remove" vs. "Von Platte löschen"** - zwei bewusst getrennte, unterschiedlich
+folgenreiche Aktionen pro Modell-Eintrag:
+- **Remove** entfernt nur den Eintrag aus der (noch ungespeicherten)
+  Formularliste - reversibel über "Verwerfen", solange nicht gespeichert wurde.
+  Die heruntergeladenen Dateien bleiben dabei unangetastet auf der Platte
+  liegen (das Modell taucht danach in "Verfügbare Modelle" weiterhin als
+  "lokal gecacht, nicht registriert" auf).
+- **Von Platte löschen** löscht die tatsächlichen Modell-Dateien sofort und
+  unwiderruflich - unabhängig von Speichern/Verwerfen hier im Formular, und
+  unabhängig davon, ob der Eintrag gerade noch registriert ist oder schon
+  entfernt wurde (arbeitet über den Modellnamen, nicht den Formular-Eintrag).
+  Fragt vorher die Größe ab und zeigt sie im Bestätigungsdialog. Verweigert,
+  solange das Modell noch geladen ist.
+
+Für ein Modell komplett loszuwerden (Konfiguration UND Speicherplatz): erst
+"Von Platte löschen" klicken, dann "Remove" + Speichern - oder umgekehrt, die
+Reihenfolge spielt keine Rolle, beide Aktionen sind unabhängig voneinander.
 
 **"🔍 Fähigkeiten automatisch erkennen"** (Button je Modell-Eintrag): liest das
 lokal gecachte `chat_template.jinja` und `config.json` des Modells aus dem

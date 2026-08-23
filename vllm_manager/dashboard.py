@@ -494,6 +494,27 @@ DASHBOARD_HTML = r"""<!doctype html>
 <script>
 const $ = (id) => document.getElementById(id);
 
+// Live-Tabellen bekommen jede Sekunde per WebSocket frische Daten und
+// wurden bisher IMMER komplett neu aufgebaut (innerHTML =), selbst wenn sich
+// nichts geändert hat - das sah aus wie ein Sekunden-Reload und riss dabei
+// jede laufende Textmarkierung in der Tabelle sofort wieder ab. safeSetHTML
+// ersetzt das DOM nur, wenn sich der Inhalt tatsächlich geändert hat, und
+// verschiebt ein Update sogar dann, wenn der Nutzer gerade Text innerhalb
+// dieser Box markiert hat - der nächste Tick (≤1s später) holt es nach,
+// sobald die Markierung beendet ist. Gibt zurück, ob das DOM ersetzt wurde
+// (relevant für Aufrufer, die danach Event-Listener neu binden müssen).
+function safeSetHTML(el, html) {
+  if (!el) return false;
+  if (el._lastHtml === html) return false;
+  const sel = window.getSelection();
+  if (sel && sel.rangeCount > 0 && !sel.isCollapsed && el.contains(sel.anchorNode)) {
+    return false; // Nutzer markiert gerade Text hier drin - nicht unterbrechen.
+  }
+  el.innerHTML = html;
+  el._lastHtml = html;
+  return true;
+}
+
 // --- i18n ----------------------------------------------------------------
 // Übersetzungen kommen vom Server (vllm_manager/languages/*.json), server-
 // seitig hier als JS-Objekt eingebettet - kein Extra-Request nötig.
@@ -688,9 +709,9 @@ function render(data) {
     : t("card.loadedModels.none");
 
   if (engs.length === 0) {
-    $("engines-box").innerHTML = `<div class="empty">${t("empty.noModelLoaded")}</div>`;
+    safeSetHTML($("engines-box"), `<div class="empty">${t("empty.noModelLoaded")}</div>`);
   } else {
-    $("engines-box").innerHTML = `<div class="table-scroll"><table><thead><tr>
+    safeSetHTML($("engines-box"), `<div class="table-scroll"><table><thead><tr>
       <th>${t("th.model")}</th><th>${t("th.status")}</th><th>${t("th.port")}</th><th>${t("th.since")}</th><th>${t("th.requests")}${helpIcon("requestsEngine")}</th><th>${t("th.kvCache")}${helpIcon("kvCache")}</th><th>${t("th.avgTtft")}${helpIcon("avgTtft")}</th><th>${t("th.avgMsPerTok")}${helpIcon("avgMsPerTok")}</th><th>${t("th.tokensPromptGen")}${helpIcon("tokensPromptGen")}</th><th>${t("th.action")}</th>
       </tr></thead><tbody>` + engs.map(e => {
         const m = e.metrics || {};
@@ -713,7 +734,7 @@ function render(data) {
           <td class="mono">${(m.prompt_tokens_total ?? "–") + " / " + (m.generation_tokens_total ?? "–")}</td>
           <td><button class="unload-btn" data-model="${esc(e.loaded_model)}">${t("action.unload")}</button></td>
         </tr>`;
-      }).join("") + `</tbody></table></div>`;
+      }).join("") + `</tbody></table></div>`);
   }
 
   $("last-prompt").textContent = fmtAgo(data.seconds_since_last_request);
@@ -745,9 +766,9 @@ function render(data) {
 
   const active = data.active_requests || [];
   if (active.length === 0) {
-    $("active-request-box").innerHTML = `<div class="empty">${t("empty.noActiveRequest")}</div>`;
+    safeSetHTML($("active-request-box"), `<div class="empty">${t("empty.noActiveRequest")}</div>`);
   } else {
-    $("active-request-box").innerHTML = `<div class="table-scroll"><table><thead><tr>
+    safeSetHTML($("active-request-box"), `<div class="table-scroll"><table><thead><tr>
       <th>${t("th.model")}</th><th>${t("th.app")}</th><th>${t("th.endpoint")}</th><th>${t("th.port")}</th><th>${t("th.phase")}${helpIcon("phase")}</th><th>${t("th.elapsed")}</th><th>${t("th.loadTime")}${helpIcon("loadTime")}</th><th>${t("th.ttft")}${helpIcon("ttft")}</th><th>${t("th.tokensPromptGen")}${helpIcon("liveTokens")}</th><th>${t("th.reasoningTokens")}${helpIcon("liveTokens")}</th><th>${t("th.throughput")}${helpIcon("throughput")}</th><th>${t("th.cost")}${helpIcon("cost")}</th>
       </tr></thead><tbody>` + active.map(r => {
         const elapsed = Date.now()/1000 - r.started_at;
@@ -787,14 +808,14 @@ function render(data) {
           <td class="mono">${throughput}</td>
           <td class="mono" title="${esc(t("cost.hint.soFarOutputOnly"))}">${fmtUsd(r.estimated_output_cost_usd) ?? "–"} <span class="hint">${t("cost.soFar")}</span></td>
         </tr>`;
-      }).join("") + `</tbody></table></div>`;
+      }).join("") + `</tbody></table></div>`);
   }
 
   const hist = data.model_history || [];
   if (hist.length === 0) {
-    $("history-box").innerHTML = `<div class="empty">${t("empty.noHistory")}</div>`;
+    safeSetHTML($("history-box"), `<div class="empty">${t("empty.noHistory")}</div>`);
   } else {
-    $("history-box").innerHTML = `<div class="table-scroll"><table><thead><tr>
+    safeSetHTML($("history-box"), `<div class="table-scroll"><table><thead><tr>
       <th>${t("th.model")}</th><th>${t("th.status")}</th><th>${t("th.loadedAt")}</th><th>${t("th.unloadedAt")}</th><th>${t("th.duration")}</th>
       </tr></thead><tbody>` + hist.map(h => {
         const ongoing = h.unloaded_at === null || h.unloaded_at === undefined;
@@ -809,29 +830,33 @@ function render(data) {
         <td class="mono">${ongoing ? "–" : new Date(h.unloaded_at*1000).toLocaleTimeString(localeFor(currentLang))}</td>
         <td class="mono">${duration}</td>
       </tr>`;
-      }).join("") + `</tbody></table></div>`;
+      }).join("") + `</tbody></table></div>`);
   }
 
   const dls = data.downloads || [];
   if (dls.length === 0) {
-    $("downloads-box").innerHTML = `<div class="empty">${t("empty.noDownloads")}</div>`;
+    safeSetHTML($("downloads-box"), `<div class="empty">${t("empty.noDownloads")}</div>`);
   } else {
-    $("downloads-box").innerHTML = `<div class="table-scroll"><table><thead><tr>
-      <th>${t("th.model")}</th><th>${t("th.status")}</th><th>${t("th.progress")}</th><th>${t("th.speed")}</th><th>${t("th.eta")}</th>
-      </tr></thead><tbody>` + dls.map(j => `<tr>
+    safeSetHTML($("downloads-box"), `<div class="table-scroll"><table><thead><tr>
+      <th>${t("th.model")}</th><th>${t("th.status")}</th><th>${t("th.progress")}</th><th>${t("th.speed")}</th><th>${t("th.eta")}</th><th>${t("th.action")}</th>
+      </tr></thead><tbody>` + dls.map(j => {
+        const cancellable = j.state === "queued" || j.state === "resolving" || j.state === "downloading";
+        return `<tr>
         <td>${esc(j.model)}</td>
         <td>${jobStateLabel(j.state)}</td>
         <td class="mono">${Math.min(j.percent,100)}% (${(Math.min(j.bytes_done,j.bytes_total)/1e9).toFixed(1)}/${(j.bytes_total/1e9).toFixed(1)} GB)</td>
         <td class="mono">${j.speed_mbps} MB/s</td>
         <td class="mono">${fmtDuration(j.eta_seconds)}</td>
-      </tr>`).join("") + `</tbody></table></div>`;
+        <td>${cancellable ? `<button class="btn danger cancel-download-btn" data-job-id="${esc(j.job_id)}" data-model="${esc(j.model)}">${t("action.cancelDownload")}</button>` : "–"}</td>
+      </tr>`;
+      }).join("") + `</tbody></table></div>`);
   }
 
   const recent = data.recent_requests || [];
   if (recent.length === 0) {
-    $("recent-box").innerHTML = `<div class="empty">${t("empty.noRecentRequests")}</div>`;
+    safeSetHTML($("recent-box"), `<div class="empty">${t("empty.noRecentRequests")}</div>`);
   } else {
-    $("recent-box").innerHTML = `<div class="table-scroll"><table><thead><tr>
+    safeSetHTML($("recent-box"), `<div class="table-scroll"><table><thead><tr>
       <th>${t("th.time")}</th><th>${t("th.model")}</th><th>${t("th.app")}</th><th>${t("th.status")}</th><th>${t("th.loadTime")}${helpIcon("loadTime")}</th><th>${t("th.duration")}</th><th>${t("th.ttft")}${helpIcon("ttft")}</th><th>${t("th.promptTokens")}${helpIcon("requestTokens")}</th><th>${t("th.complTokens")}${helpIcon("requestTokens")}</th><th>${t("th.cost")}${helpIcon("cost")}</th>
       </tr></thead><tbody>` + recent.map(r => `<tr>
         <td class="mono">${new Date(r.started_at*1000).toLocaleTimeString(localeFor(currentLang))}</td>
@@ -844,15 +869,15 @@ function render(data) {
         <td class="mono">${r.prompt_tokens ?? "–"}</td>
         <td class="mono">${r.completion_tokens ?? "–"}</td>
         <td class="mono">${fmtUsd(r.cost_usd) ?? "–"}</td>
-      </tr>`).join("") + `</tbody></table></div>`;
+      </tr>`).join("") + `</tbody></table></div>`);
   }
 
   latestCatalog = data.models_catalog || [];
   const catalog = latestCatalog;
   if (catalog.length === 0) {
-    $("models-catalog-box").innerHTML = `<div class="empty">${t("empty.noModelsKnown")}</div>`;
+    safeSetHTML($("models-catalog-box"), `<div class="empty">${t("empty.noModelsKnown")}</div>`);
   } else {
-    $("models-catalog-box").innerHTML = catalog.map((m, i) => `
+    const catalogHtml = catalog.map((m, i) => `
       <div class="model-item" data-idx="${i}">
         <div class="name">${esc(modelName(m.model))}</div>
         <div class="badges">
@@ -865,9 +890,13 @@ function render(data) {
           ${m.vision ? `<span class="badge idle">${t("badge.vision")}</span>` : ""}
         </div>
       </div>`).join("");
-    document.querySelectorAll("#models-catalog-box .model-item").forEach(el => {
-      el.addEventListener("click", () => openModal(latestCatalog[parseInt(el.dataset.idx, 10)]));
-    });
+    // Event-Listener nur neu binden, wenn safeSetHTML das DOM auch wirklich
+    // ersetzt hat (sonst hängen die alten Listener noch am unveränderten DOM).
+    if (safeSetHTML($("models-catalog-box"), catalogHtml)) {
+      document.querySelectorAll("#models-catalog-box .model-item").forEach(el => {
+        el.addEventListener("click", () => openModal(latestCatalog[parseInt(el.dataset.idx, 10)]));
+      });
+    }
   }
 }
 
@@ -889,9 +918,74 @@ async function unloadModel(model, btn) {
     btn.textContent = original;
   }
 }
+// --- Lokale Modell-Dateien unwiderruflich von der Platte löschen ---------
+// Trifft sowohl registrierte (config.json) als auch nur lokal gecachte, gar
+// nicht (mehr) registrierte Modelle - siehe main.py DELETE /models/{model}/cache.
+// Bewusst zwei Schritte: erst Größe abfragen (damit man weiß, was man da
+// löscht), dann erst der eigentliche, unwiderrufliche Löschvorgang.
+async function deleteModelCache(model, btn) {
+  const original = btn.textContent;
+  btn.disabled = true;
+  btn.textContent = t("action.checkingSize");
+  const headers = {};
+  if (apiKey) headers["Authorization"] = "Bearer " + apiKey;
+  try {
+    const infoRes = await fetch(`/models/${encodeURIComponent(model)}/cache_info`, { headers });
+    if (!infoRes.ok) throw new Error(await infoRes.text());
+    const info = await infoRes.json();
+    if (!info.cached) {
+      alert(t("info.nothingCachedToDelete", { model: modelName(model) }));
+      btn.disabled = false;
+      btn.textContent = original;
+      return;
+    }
+    const gb = (info.size_bytes / 1e9).toFixed(1);
+    if (!confirm(t("confirm.deleteModelCache", { model: modelName(model), size: gb }))) {
+      btn.disabled = false;
+      btn.textContent = original;
+      return;
+    }
+    btn.textContent = t("action.deleting");
+    const delRes = await fetch(`/models/${encodeURIComponent(model)}/cache`, { method: "DELETE", headers });
+    if (!delRes.ok) throw new Error(await delRes.text());
+    closeModal();
+    // Nächster Heartbeat (≤1s) entfernt das Modell aus dem Katalog automatisch.
+  } catch (e) {
+    alert(t("error.deleteCacheFailed", { msg: e.message }));
+    btn.disabled = false;
+    btn.textContent = original;
+  }
+}
+
 $("engines-box").addEventListener("click", (e) => {
   const btn = e.target.closest(".unload-btn");
   if (btn) unloadModel(btn.dataset.model, btn);
+});
+
+// --- Laufenden Download abbrechen ----------------------------------------
+// Event-Delegation auf dem stabilen Container statt direkter Listener pro
+// Button - downloads-box wird bei jedem Tick per safeSetHTML() ggf. neu
+// aufgebaut, der Container selbst aber nie ersetzt.
+async function cancelDownload(jobId, model, btn) {
+  if (!confirm(t("confirm.cancelDownload", { model: modelName(model) }))) return;
+  const original = btn.textContent;
+  btn.disabled = true;
+  btn.textContent = t("action.cancelling");
+  try {
+    const headers = {};
+    if (apiKey) headers["Authorization"] = "Bearer " + apiKey;
+    const res = await fetch(`/models/pull/${encodeURIComponent(jobId)}/cancel`, { method: "POST", headers });
+    if (!res.ok) throw new Error(await res.text());
+    // Nächster Heartbeat (≤1s) aktualisiert die Tabelle automatisch.
+  } catch (e) {
+    alert(t("error.cancelDownloadFailed", { msg: e.message }));
+    btn.disabled = false;
+    btn.textContent = original;
+  }
+}
+$("downloads-box").addEventListener("click", (e) => {
+  const btn = e.target.closest(".cancel-download-btn");
+  if (btn) cancelDownload(btn.dataset.jobId, btn.dataset.model, btn);
 });
 
 // --- Modell-Katalog / Klick-Modal ---------------------------------------
@@ -924,11 +1018,15 @@ function openModal(m) {
     $("modal-notes").style.display = "none";
   }
 
-  $("modal-actions").innerHTML = m.loaded
-    ? `<button class="unload-btn" id="modal-unload-btn" style="margin-bottom:16px;">${t("action.unload")}</button>`
-    : "";
+  $("modal-actions").innerHTML = (m.loaded || m.cached) ? `<div style="margin-bottom:16px; display:flex; gap:8px; flex-wrap:wrap;">
+    ${m.loaded ? `<button class="unload-btn" id="modal-unload-btn">${t("action.unload")}</button>` : ""}
+    ${m.cached ? `<button class="btn danger" id="modal-delete-cache-btn" ${m.loaded ? "disabled title=\"" + esc(t("hint.unloadBeforeDelete")) + "\"" : ""}>${t("action.deleteFromDisk")}</button>` : ""}
+  </div>` : "";
   if (m.loaded) {
     $("modal-unload-btn").addEventListener("click", () => unloadModel(m.model, $("modal-unload-btn")));
+  }
+  if (m.cached && !m.loaded) {
+    $("modal-delete-cache-btn").addEventListener("click", () => deleteModelCache(m.model, $("modal-delete-cache-btn")));
   }
 
   const url = `${location.protocol}//${location.host}/v1`;

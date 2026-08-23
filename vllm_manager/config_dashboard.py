@@ -530,6 +530,10 @@ function renderModels() {
           </div>
         </div>
 
+        <label data-i18n="cfg.field.maxTokens">Max output tokens (safety net, empty = unbounded)</label>
+        <input type="number" class="m-field" data-idx="${i}" data-field="max_tokens" min="1" value="${m.max_tokens ?? ""}">
+        <div class="hint" data-i18n="cfg.hint.maxTokens">Caps generation length only when the client itself doesn't request a max_tokens value - protects against runaway/repeating generations without limiting normal replies.</div>
+
         <div class="row">
           <div>
             <label data-i18n="cfg.field.toolCallParser">Tool call parser</label>
@@ -571,8 +575,9 @@ function renderModels() {
         <label data-i18n="cfg.field.notes">Notes</label>
         <textarea class="m-field" data-idx="${i}" data-field="notes">${esc(m.notes ?? "")}</textarea>
 
-        <div style="margin-top:12px;">
+        <div style="margin-top:12px; display:flex; gap:8px; flex-wrap:wrap;">
           <button class="btn danger m-remove" data-idx="${i}" data-i18n="action.delete">Remove</button>
+          <button class="btn danger m-delete-cache" data-name="${esc(m.name || "")}" data-i18n="action.deleteFromDisk">Delete from disk</button>
         </div>
       </div>
     </div>`;
@@ -602,7 +607,7 @@ function renderModels() {
       let val;
       if (el.type === "checkbox") val = el.checked;
       else if (field === "extra_args") val = el.value.split("\n").map(s => s.trim()).filter(Boolean);
-      else if (field === "max_model_len") val = el.value === "" ? null : parseInt(el.value, 10);
+      else if (field === "max_model_len" || field === "max_tokens") val = el.value === "" ? null : parseInt(el.value, 10);
       else if (field === "gpu_memory_utilization") val = el.value === "" ? null : parseFloat(el.value);
       else val = el.value;
       if (field === "pricing_input_per_mtok" || field === "pricing_output_per_mtok") {
@@ -638,9 +643,56 @@ function renderModels() {
       populateModelSelects();
     });
   });
+  document.querySelectorAll(".m-delete-cache").forEach(el => {
+    el.addEventListener("click", () => deleteModelCacheFromEditor(el.dataset.name, el));
+  });
   document.querySelectorAll(".detect-btn").forEach(el => {
     el.addEventListener("click", () => detectCapabilities(parseInt(el.dataset.idx, 10)));
   });
+}
+
+// --- Lokale Modell-Dateien unwiderruflich von der Platte löschen ---------
+// Bewusst UNABHÄNGIG von "Remove"/Save/Discard hier oben: löscht sofort und
+// endgültig, egal ob der Modell-Eintrag anschließend gespeichert oder
+// verworfen wird - siehe main.py DELETE /models/{model}/cache. Arbeitet über
+// den Modellnamen, nicht den Array-Index, funktioniert also auch für ein
+// bereits per "Remove" aus modelsList entferntes (aber lokal noch gecachtes)
+// Modell, solange man dessen Namen kennt.
+async function deleteModelCacheFromEditor(name, btn) {
+  name = (name || "").trim();
+  if (!name) {
+    alert(t("cfg.status.detectNoName"));
+    return;
+  }
+  const original = btn.textContent;
+  btn.disabled = true;
+  btn.textContent = t("action.checkingSize");
+  try {
+    const infoRes = await fetch(`/models/${encodeURIComponent(name)}/cache_info`, { headers: authHeaders() });
+    if (!infoRes.ok) throw new Error(await infoRes.text());
+    const info = await infoRes.json();
+    if (!info.cached) {
+      alert(t("info.nothingCachedToDelete", { model: name }));
+      btn.disabled = false;
+      btn.textContent = original;
+      return;
+    }
+    const gb = (info.size_bytes / 1e9).toFixed(1);
+    if (!confirm(t("confirm.deleteModelCache", { model: name, size: gb }))) {
+      btn.disabled = false;
+      btn.textContent = original;
+      return;
+    }
+    btn.textContent = t("action.deleting");
+    const delRes = await fetch(`/models/${encodeURIComponent(name)}/cache`, { method: "DELETE", headers: authHeaders() });
+    if (!delRes.ok) throw new Error(await delRes.text());
+    btn.textContent = original;
+    btn.disabled = false;
+  } catch (e) {
+    alert(t("error.deleteCacheFailed", { msg: e.message }));
+    btn.disabled = false;
+    btn.textContent = original;
+  }
 }
 
 // --- Fähigkeiten automatisch erkennen (chat_template.jinja/config.json aus
@@ -721,6 +773,7 @@ $("add-model-btn").addEventListener("click", () => {
     name: "", enabled: true, task: "generate", max_model_len: null,
     gpu_memory_utilization: null, tool_call_parser: null, reasoning_parser: null,
     enable_auto_tool_choice: false, vision: false, extra_args: [], hf_token: null, notes: "",
+    max_tokens: null,
   });
   openAccordions.add(modelsList.length - 1);
   markDirty();

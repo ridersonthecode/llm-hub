@@ -87,6 +87,19 @@
   "confirm.unload": "Really unload model \"{model}\"?",
   "error.unloadFailed": "Unload failed: {msg}",
 
+  "action.deleteFromDisk": "Delete from disk",
+  "action.checkingSize": "Checking size…",
+  "action.deleting": "Deleting…",
+  "confirm.deleteModelCache": "Permanently delete the downloaded files for \"{model}\" ({size} GB) from disk? This cannot be undone - you'd need to download it again to use it.",
+  "info.nothingCachedToDelete": "\"{model}\" has no local files to delete.",
+  "error.deleteCacheFailed": "Delete failed: {msg}",
+  "hint.unloadBeforeDelete": "Unload the model first before deleting its files.",
+
+  "action.cancelDownload": "Cancel",
+  "action.cancelling": "Cancelling…",
+  "confirm.cancelDownload": "Cancel the download of \"{model}\"? Already-downloaded partial files stay on disk (resumable later) unless you delete them separately.",
+  "error.cancelDownloadFailed": "Cancel failed: {msg}",
+
   "empty.noModelLoaded": "No model loaded",
   "empty.noActiveRequest": "No active request",
   "empty.noHistory": "No model loaded since service start",
@@ -110,6 +123,7 @@
   "job.downloading": "downloading",
   "job.done": "done",
   "job.error": "error",
+  "job.cancelled": "cancelled",
 
   "status.ok": "OK",
   "status.error": "Error",
@@ -232,6 +246,8 @@
   "cfg.field.task": "Task",
   "cfg.field.maxModelLen": "Max model length",
   "cfg.field.gpuMemUtil": "GPU memory utilization",
+  "cfg.field.maxTokens": "Max output tokens (safety net, empty = unbounded)",
+  "cfg.hint.maxTokens": "Caps generation length only when the client itself doesn't request a max_tokens value - protects against runaway/repeating generations without limiting normal replies.",
   "cfg.field.toolCallParser": "Tool call parser",
   "cfg.field.reasoningParser": "Reasoning parser",
   "cfg.field.autoToolChoice": "Enable auto tool choice",

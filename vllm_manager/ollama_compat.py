@@ -124,6 +124,13 @@ async def api_chat(request: Request):
         if src in options:
             openai_body[dst] = options[src]
 
+    # Sicherheitsnetz gegen durchgehende Generierungen (siehe main.py
+    # _apply_default_max_tokens / config.py ModelConfig.max_tokens) - nur wenn
+    # der Alt-Client (über num_predict) selbst nichts vorgegeben hat.
+    mcfg = cfg.models.get(model)
+    if mcfg is not None and mcfg.max_tokens is not None and "max_tokens" not in openai_body:
+        openai_body["max_tokens"] = mcfg.max_tokens
+
     rid = telemetry.start_request(model, "api/chat", user_agent=request.headers.get("user-agent"))
     try:
         engine_status = await process_manager.ensure_loaded(model)

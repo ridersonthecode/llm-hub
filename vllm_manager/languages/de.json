@@ -87,6 +87,19 @@
   "confirm.unload": "Modell \"{model}\" wirklich entladen?",
   "error.unloadFailed": "Entladen fehlgeschlagen: {msg}",
 
+  "action.deleteFromDisk": "Von Platte löschen",
+  "action.checkingSize": "Größe wird ermittelt…",
+  "action.deleting": "Wird gelöscht…",
+  "confirm.deleteModelCache": "Heruntergeladene Dateien von \"{model}\" ({size} GB) unwiderruflich von der Platte löschen? Das kann nicht rückgängig gemacht werden - zur erneuten Nutzung müsste das Modell wieder heruntergeladen werden.",
+  "info.nothingCachedToDelete": "Für \"{model}\" gibt es lokal keine Dateien zu löschen.",
+  "error.deleteCacheFailed": "Löschen fehlgeschlagen: {msg}",
+  "hint.unloadBeforeDelete": "Modell erst entladen, bevor die Dateien gelöscht werden können.",
+
+  "action.cancelDownload": "Abbrechen",
+  "action.cancelling": "Wird abgebrochen…",
+  "confirm.cancelDownload": "Download von \"{model}\" abbrechen? Bereits heruntergeladene Teil-Dateien bleiben auf der Platte liegen (später fortsetzbar), außer du löschst sie separat.",
+  "error.cancelDownloadFailed": "Abbrechen fehlgeschlagen: {msg}",
+
   "empty.noModelLoaded": "Kein Modell geladen",
   "empty.noActiveRequest": "Keine aktive Anfrage",
   "empty.noHistory": "Noch kein Modell geladen seit Dienststart",
@@ -110,6 +123,7 @@
   "job.downloading": "lädt herunter",
   "job.done": "fertig",
   "job.error": "Fehler",
+  "job.cancelled": "abgebrochen",
 
   "status.ok": "OK",
   "status.error": "Fehler",
@@ -232,6 +246,8 @@
   "cfg.field.task": "Task",
   "cfg.field.maxModelLen": "Max. Kontextlänge",
   "cfg.field.gpuMemUtil": "GPU-Speicherauslastung",
+  "cfg.field.maxTokens": "Max. Ausgabe-Tokens (Sicherheitsnetz, leer = unbegrenzt)",
+  "cfg.hint.maxTokens": "Begrenzt die Generierungslänge nur, wenn der Client selbst keinen max_tokens-Wert anfragt - schützt vor durchgehenden/sich wiederholenden Generierungen, ohne normale Antworten einzuschränken.",
   "cfg.field.toolCallParser": "Tool-Call-Parser",
   "cfg.field.reasoningParser": "Reasoning-Parser",
   "cfg.field.autoToolChoice": "Auto Tool Choice aktivieren",

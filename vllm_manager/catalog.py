@@ -20,6 +20,8 @@ also selbst dann nicht, wenn der Scan mal langsamer ist."""
 from __future__ import annotations
 
 import asyncio
+import os
+import shutil
 import time
 from pathlib import Path
 from typing import Optional
@@ -83,3 +85,52 @@ def invalidate_cache(hf_home: Optional[str] = None) -> None:
     else:
         _cache.pop(hf_home, None)
         _cache_at.pop(hf_home, None)
+
+
+# --- Lokale Dateien eines Modells löschen (Dashboard "Von Platte löschen") ---
+# Ergänzt den reinen Read-Only-Scan oben um die Kehrseite: ein aus config.json
+# entferntes oder nie registriertes, aber lokal gecachtes Modell nimmt sonst
+# unbegrenzt Platz weg. Bewusst NICHT automatisch an "Remove" im Config-Editor
+# gekoppelt (siehe Anleitung.md) - das ist ein eigener, expliziter Klick.
+
+def cache_dir_for(model: str, hf_home: str) -> Path:
+    """Pfad zum lokalen Download-Verzeichnis eines Modells.
+
+    Zwei Fälle, analog zu downloader._cache_dir_for: normale HuggingFace-
+    Modelle liegen unter hf_home/hub im "models--<org>--<name>"-Konventions-
+    Verzeichnis; eigene lokale Modelle (z.B. selbst quantisierte AWQ-Varianten
+    unter models-quantized/) sind in config.json bereits als absoluter Pfad
+    hinterlegt - dort IST der Modellname der Pfad."""
+    if model.startswith("/"):
+        return Path(model)
+    return Path(hf_home) / "hub" / ("models--" + model.replace("/", "--"))
+
+
+def dir_size_bytes(path: Path) -> int:
+    """Rekursive Verzeichnisgröße in Bytes. Blockierend (os.walk über
+    potenziell hunderttausende Blob-/Snapshot-Dateien bei großen Modellen) -
+    nur über asyncio.to_thread aufrufen, nie direkt im Event-Loop."""
+    if not path.exists():
+        return 0
+    total = 0
+    for root, _dirs, files in os.walk(path):
+        for name in files:
+            try:
+                total += (Path(root) / name).stat().st_size
+            except OSError:
+                continue
+    return total
+
+
+def delete_model_cache(model: str, hf_home: str) -> int:
+    """Löscht das lokale Download-Verzeichnis eines Modells UNWIDERRUFLICH von
+    der Platte. Blockierend (shutil.rmtree) - nur über asyncio.to_thread
+    aufrufen. Gibt die Anzahl freigegebener Bytes zurück, 0 wenn es dort
+    ohnehin nichts zu löschen gab. Prüft NICHT, ob das Modell gerade geladen
+    ist - das muss der Aufrufer vorher sicherstellen (siehe main.py)."""
+    path = cache_dir_for(model, hf_home)
+    if not path.exists():
+        return 0
+    size = dir_size_bytes(path)
+    shutil.rmtree(path, ignore_errors=False)
+    return size

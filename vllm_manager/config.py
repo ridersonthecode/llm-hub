@@ -48,6 +48,14 @@ class ModelConfig(BaseModel):
     hf_token: Optional[str] = None
     notes: Optional[str] = None
     enabled: bool = True
+    # Sicherheitsnetz gegen durchgehende Generierungen (siehe main.py:
+    # _apply_default_max_tokens - ein Modell in einer Wiederholungsschleife
+    # hat einmal 80.000+ Tokens am Stück produziert, 43 Minuten lang, weil
+    # weder Client noch Server eine Obergrenze gesetzt hatten). Greift NUR,
+    # wenn der Request selbst kein max_tokens/max_completion_tokens mitschickt
+    # - ein expliziter Client-Wunsch wird nie heruntergedrückt. None = kein
+    # Limit (wie bisher, nur durch max_model_len begrenzt).
+    max_tokens: Optional[int] = None
     # Override für dieses Modell - None = default_pricing (siehe Config unten) gilt.
     pricing: Optional[Pricing] = None
 

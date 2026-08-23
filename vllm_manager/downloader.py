@@ -1,16 +1,24 @@
 """HuggingFace-Modell-Downloads im Hintergrund, mit Fortschritts-Telemetrie
-(Bytes, Prozent, Geschwindigkeit, ETA) zum Abfragen über HTTP/MCP."""
+(Bytes, Prozent, Geschwindigkeit, ETA) zum Abfragen über HTTP/MCP.
+
+Der eigentliche Transfer läuft in einem eigenen Kindprozess (siehe
+download_worker.py), nicht in einem Thread - nur so lässt sich ein laufender
+Download sauber abbrechen (POST .../cancel): huggingface_hubs
+snapshot_download() hat keinen Abbruch-Mechanismus, und ein bereits laufender
+Thread-Pool-Task kann aus Python heraus nicht mitten in der Ausführung
+gestoppt werden (nur vor dem Start)."""
 from __future__ import annotations
 
 import asyncio
 import logging
 import os
+import sys
 import time
 import uuid
 from pathlib import Path
 from typing import Optional
 
-from huggingface_hub import HfApi, snapshot_download
+from huggingface_hub import HfApi
 
 from . import catalog
 from .config import get_config
@@ -18,6 +26,10 @@ from .config import get_config
 logger = logging.getLogger("vllm_manager.downloader")
 
 JOBS: dict[str, dict] = {}
+# Prozess-Handles bewusst NICHT im JOBS-Dict selbst (das wird 1:1 als JSON für
+# /dashboard/status, /models/pull, WS-Push ausgeliefert - ein
+# asyncio.subprocess.Process-Objekt ist nicht serialisierbar).
+_PROCESSES: dict[str, asyncio.subprocess.Process] = {}
 POLL_INTERVAL = 2.0
 
 
@@ -65,7 +77,7 @@ async def start_job(model: str, revision: Optional[str] = None, hf_token: Option
         "job_id": job_id,
         "model": model,
         "revision": revision,
-        "state": "queued",  # queued -> resolving -> downloading -> done/error
+        "state": "queued",  # queued -> resolving -> downloading -> done/error/cancelled
         "bytes_total": 0,
         "bytes_done": 0,
         "percent": 0.0,
@@ -83,6 +95,7 @@ async def start_job(model: str, revision: Optional[str] = None, hf_token: Option
 async def _run_job(job: dict, hf_token: Optional[str]) -> None:
     cfg = get_config()
     model = job["model"]
+    job_id = job["job_id"]
     loop = asyncio.get_running_loop()
     job["state"] = "resolving"
     try:
@@ -99,41 +112,76 @@ async def _run_job(job: dict, hf_token: Optional[str]) -> None:
         job["finished_at"] = time.time()
         return
 
+    if job["state"] == "cancelled":  # zwischen Start und hier schon abgebrochen
+        return
+
     job["state"] = "downloading"
     blobs_dir = _cache_dir_for(model, cfg.hf_home) / "blobs"
 
-    download_future = loop.run_in_executor(
-        None,
-        lambda: snapshot_download(
-            repo_id=model,
-            revision=job["revision"],
-            token=hf_token,
-            cache_dir=str(Path(cfg.hf_home) / "hub"),
-        ),
-    )
-
-    last_bytes, last_t = 0, time.time()
-    while not download_future.done():
-        await asyncio.sleep(POLL_INTERVAL)
-        # _dir_size() ist blockierende Disk-I/O (os.walk + stat je Datei) - im
-        # Thread ausführen, sonst friert das der Event-Loop für alle anderen
-        # Requests/den Dashboard-Heartbeat kurz ein, siehe catalog.py-Docstring.
-        now_bytes = await asyncio.to_thread(_dir_size, blobs_dir)
-        now_t = time.time()
-        dt = now_t - last_t
-        if dt > 0:
-            speed = max(now_bytes - last_bytes, 0) / dt
-            job["speed_mbps"] = round(speed / 1_000_000, 2)
-            if job["bytes_total"]:
-                remaining = max(job["bytes_total"] - now_bytes, 0)
-                job["eta_seconds"] = int(remaining / speed) if speed > 1e-6 else None
-        job["bytes_done"] = now_bytes
-        if job["bytes_total"]:
-            job["percent"] = round(min(now_bytes / job["bytes_total"] * 100, 100), 1)
-        last_bytes, last_t = now_bytes, now_t
+    worker_args = [sys.executable, "-m", "vllm_manager.download_worker", model, "--cache-dir", str(Path(cfg.hf_home) / "hub")]
+    if job["revision"]:
+        worker_args += ["--revision", job["revision"]]
+    env = dict(os.environ)
+    if hf_token:
+        env["HF_TOKEN"] = hf_token
 
     try:
-        await download_future
+        proc = await asyncio.create_subprocess_exec(
+            *worker_args, env=env, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT,
+        )
+    except Exception as e:
+        logger.exception("Konnte Download-Prozess für %s nicht starten", model)
+        job["state"] = "error"
+        job["error"] = f"Download-Prozess konnte nicht gestartet werden: {e}"
+        job["finished_at"] = time.time()
+        return
+    _PROCESSES[job_id] = proc
+
+    last_bytes, last_t = 0, time.time()
+    try:
+        while proc.returncode is None:
+            try:
+                await asyncio.wait_for(proc.wait(), timeout=POLL_INTERVAL)
+            except asyncio.TimeoutError:
+                pass
+            if job["state"] == "cancelled":
+                break
+            # _dir_size() ist blockierende Disk-I/O (os.walk + stat je Datei) - im
+            # Thread ausführen, sonst friert das der Event-Loop für alle anderen
+            # Requests/den Dashboard-Heartbeat kurz ein, siehe catalog.py-Docstring.
+            now_bytes = await asyncio.to_thread(_dir_size, blobs_dir)
+            now_t = time.time()
+            dt = now_t - last_t
+            if dt > 0:
+                speed = max(now_bytes - last_bytes, 0) / dt
+                job["speed_mbps"] = round(speed / 1_000_000, 2)
+                if job["bytes_total"]:
+                    remaining = max(job["bytes_total"] - now_bytes, 0)
+                    job["eta_seconds"] = int(remaining / speed) if speed > 1e-6 else None
+            job["bytes_done"] = now_bytes
+            if job["bytes_total"]:
+                job["percent"] = round(min(now_bytes / job["bytes_total"] * 100, 100), 1)
+            last_bytes, last_t = now_bytes, now_t
+    finally:
+        _PROCESSES.pop(job_id, None)
+        # Verteidigung gegen eine schmale Race Condition: cancel_job() greift
+        # auf _PROCESSES zu, um den Prozess zu beenden - wurde der Job aber
+        # abgebrochen, BEVOR der Prozess hier oben registriert war (zwischen
+        # create_subprocess_exec() und der Zeile darunter), hätte cancel_job()
+        # nichts zum Beenden gefunden. Hier deshalb sicherheitshalber nochmal
+        # terminieren, falls der Prozess trotz "cancelled"-Status noch läuft.
+        if job["state"] == "cancelled" and proc.returncode is None:
+            try:
+                proc.terminate()
+            except ProcessLookupError:
+                pass
+
+    if job["state"] == "cancelled":
+        # cancel_job() hat state/error/finished_at bereits gesetzt - hier nur
+        # noch aufräumen, nicht mit "done"/"error" überschreiben.
+        return
+
+    if proc.returncode == 0:
         job["bytes_done"] = job["bytes_total"] or await asyncio.to_thread(_dir_size, blobs_dir)
         job["percent"] = 100.0
         job["state"] = "done"
@@ -142,11 +190,35 @@ async def _run_job(job: dict, hf_token: Optional[str]) -> None:
         # das neu heruntergeladene Modell soll im Dashboard/den APIs direkt
         # als "gecacht" auftauchen.
         catalog.invalidate_cache(cfg.hf_home)
-    except Exception as e:
-        logger.exception("Download fehlgeschlagen: %s", model)
+    else:
+        logger.error("Download fehlgeschlagen: %s (exit code %s)", model, proc.returncode)
         job["state"] = "error"
-        job["error"] = str(e)
+        job["error"] = f"Download-Prozess beendet mit Exit-Code {proc.returncode}."
     job["finished_at"] = time.time()
+
+
+async def cancel_job(job_id: str) -> bool:
+    """Bricht einen laufenden Download-Job ab (Button im Dashboard). Beendet
+    den Kindprozess per SIGTERM (nach 5s Frist SIGKILL) - die bereits
+    heruntergeladenen Teil-Dateien bleiben liegen (huggingface_hub kann einen
+    Download bei erneutem Start fortsetzen; wer den Platz sofort zurückwill,
+    nutzt den separaten "Von Platte löschen"-Button, siehe catalog.py). Gibt
+    False zurück, wenn der Job unbekannt ist oder schon beendet war."""
+    job = JOBS.get(job_id)
+    if job is None or job["state"] not in ("queued", "resolving", "downloading"):
+        return False
+    job["state"] = "cancelled"
+    job["error"] = "Vom Benutzer abgebrochen."
+    job["finished_at"] = time.time()
+    proc = _PROCESSES.get(job_id)
+    if proc is not None and proc.returncode is None:
+        proc.terminate()
+        try:
+            await asyncio.wait_for(proc.wait(), timeout=5)
+        except asyncio.TimeoutError:
+            proc.kill()
+            await proc.wait()
+    return True
 
 
 def list_jobs() -> list[dict]:
