@@ -1000,8 +1000,18 @@ function render(data) {
     safeSetHTML($("recent-box"), `<div class="empty">${t("empty.noRecentRequests")}</div>`);
   } else {
     safeSetHTML($("recent-box"), `<div class="table-scroll"><table><thead><tr>
-      <th>${t("th.time")}</th><th>${t("th.model")}</th><th>${t("th.app")}</th><th>${t("th.rag")}${helpIcon("rag")}</th><th>${t("th.status")}</th><th>${t("th.loadTime")}${helpIcon("loadTime")}</th><th>${t("th.duration")}</th><th>${t("th.ttft")}${helpIcon("ttft")}</th><th>${t("th.promptTokens")}${helpIcon("requestTokens")}</th><th>${t("th.complTokens")}${helpIcon("requestTokens")}</th><th>${t("th.cost")}${helpIcon("cost")}</th>
-      </tr></thead><tbody>` + recent.map(r => `<tr>
+      <th>${t("th.time")}</th><th>${t("th.model")}</th><th>${t("th.app")}</th><th>${t("th.rag")}${helpIcon("rag")}</th><th>${t("th.status")}</th><th>${t("th.loadTime")}${helpIcon("loadTime")}</th><th>${t("th.duration")}</th><th>${t("th.ttft")}${helpIcon("ttft")}</th><th>${t("th.promptTokens")}${helpIcon("requestTokens")}</th><th>${t("th.complTokens")}${helpIcon("requestTokens")}</th><th>${t("th.throughput")}${helpIcon("avgThroughput")}</th><th>${t("th.cost")}${helpIcon("cost")}</th>
+      </tr></thead><tbody>` + recent.map(r => {
+        // Gleiche Formel wie bei Active Requests (siehe "throughput" oben):
+        // Tokens pro Sekunde SEIT Modell bereit war (duration_ms abzüglich
+        // queued_ms = Warten auf Kaltstart/Modellwechsel) - nicht ab
+        // Request-Beginn, sonst würde ein langsam ladendes Modell die
+        // Generierungsgeschwindigkeit künstlich schlecht aussehen lassen.
+        const genElapsedSec = r.duration_ms != null ? Math.max(0, (r.duration_ms - (r.queued_ms || 0)) / 1000) : null;
+        const avgThroughput = (r.completion_tokens > 0 && genElapsedSec > 0.05)
+          ? (r.completion_tokens / genElapsedSec).toFixed(1) + " tok/s"
+          : "–";
+        return `<tr>
         <td class="mono">${new Date(r.started_at*1000).toLocaleTimeString(localeFor(currentLang))}</td>
         <td>${esc(modelName(r.model))}</td>
         <td class="mono">${appCell(r.user_agent)}</td>
@@ -1012,8 +1022,10 @@ function render(data) {
         <td class="mono">${fmtMs(r.ttft_ms)}</td>
         <td class="mono">${r.prompt_tokens ?? "–"}</td>
         <td class="mono">${r.completion_tokens ?? "–"}</td>
+        <td class="mono">${avgThroughput}</td>
         <td class="mono">${fmtUsd(r.cost_usd) ?? "–"}</td>
-      </tr>`).join("") + `</tbody></table></div>`);
+      </tr>`;
+      }).join("") + `</tbody></table></div>`);
   }
 
   latestCatalog = data.models_catalog || [];
