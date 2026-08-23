@@ -120,6 +120,7 @@
   "reason.restart": "neu gestartet",
   "reason.replacedBy": "ersetzt durch {model}",
   "reason.evictedFor": "verdrängt (Pool voll) für {model}",
+  "reason.failedToStart": "Start fehlgeschlagen",
 
   "job.queued": "wartend",
   "job.resolving": "wird aufgelöst",
@@ -141,6 +142,7 @@
   "modal.contextLength": "Kontextlänge",
   "modal.tokens": "Tokens",
   "modal.gpuMemory": "GPU-Speicher",
+  "modal.diskSize": "Speicherplatz",
   "common.yes": "Ja",
   "common.no": "Nein",
   "modal.jsonLabel": "VS Code Custom-Endpoint (chatLanguageModels.json)",

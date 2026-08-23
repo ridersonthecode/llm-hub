@@ -17,7 +17,7 @@ from pathlib import Path
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 from fastapi.responses import HTMLResponse
 
-from . import cost_tracker, downloader, process_manager, system_metrics, telemetry
+from . import catalog, cost_tracker, downloader, process_manager, system_metrics, telemetry
 from .catalog import list_cached_models
 from .config import get_config
 
@@ -165,6 +165,19 @@ async def _models_catalog(cfg) -> list[dict]:
             "gpu_memory_utilization": default_gmu,
             "notes": "Lokal gecacht, nicht in config.json registriert.",
         })
+    # Speicherplatz je Modell (nur für tatsächlich gecachte - sonst wäre es
+    # immer 0 statt "unbekannt"), parallel statt nacheinander abgefragt
+    # (TTL-gecacht, siehe catalog.get_cached_size_bytes - sonst würde ein
+    # os.walk() über hunderte GB bei jedem WebSocket-Heartbeat den
+    # Event-Loop blockieren).
+    cached_entries = [m for m in out if m["cached"]]
+    sizes = await asyncio.gather(
+        *(catalog.get_cached_size_bytes(m["model"], cfg.hf_home) for m in cached_entries)
+    )
+    for m, size in zip(cached_entries, sizes):
+        m["size_bytes"] = size
+    for m in out:
+        m.setdefault("size_bytes", None)
     return sorted(out, key=lambda m: m["model"].lower())
 
 
@@ -565,6 +578,8 @@ function fmtAgo(seconds) {
 }
 function fmtMs(ms) { return (ms === null || ms === undefined) ? "–" : (ms < 1000 ? Math.round(ms) + " ms" : (ms/1000).toFixed(2) + " s"); }
 function fmtPct(x) { return (x === null || x === undefined) ? "–" : Math.round(x*100) + "%"; }
+// Belegter Speicherplatz eines Modells auf der Platte (catalog.get_cached_size_bytes).
+function fmtGb(bytes) { return (bytes === null || bytes === undefined) ? "–" : (bytes/1e9).toFixed(1) + " GB"; }
 // Fiktive Kosten (siehe cost_tracker.py) - kleine Beträge brauchen mehr
 // Nachkommastellen, sonst rundet alles unter einem Cent auf $0.00.
 function fmtUsd(x) {
@@ -629,6 +644,7 @@ function reasonLabel(r) {
   if (r === "timeout") return t("reason.timeout");
   if (r === "shutdown") return t("reason.shutdown");
   if (r === "restart") return t("reason.restart");
+  if (r === "failed_to_start") return t("reason.failedToStart");
   if (r && r.startsWith("replaced_by:")) return t("reason.replacedBy", { model: esc(modelName(r.slice(13))) });
   if (r && r.startsWith("evicted_for:")) return t("reason.evictedFor", { model: esc(modelName(r.slice(12))) });
   return esc(r || "–");
@@ -636,7 +652,7 @@ function reasonLabel(r) {
 function reasonBadgeClass(r) {
   if (r === "ready") return "ok";
   if (r === "loading") return "loading";
-  if (r === "crashed" || r === "timeout") return "error";
+  if (r === "crashed" || r === "timeout" || r === "failed_to_start") return "error";
   if (r && r.startsWith("evicted_for:")) return "running";
   return "idle";
 }
@@ -889,6 +905,7 @@ function render(data) {
           ${m.reasoning ? `<span class="badge idle">${t("badge.reasoning")}</span>` : ""}
           ${m.vision ? `<span class="badge idle">${t("badge.vision")}</span>` : ""}
         </div>
+        ${m.size_bytes != null ? `<div class="hint">💾 ${fmtGb(m.size_bytes)}</div>` : ""}
       </div>`).join("");
     // Event-Listener nur neu binden, wenn safeSetHTML das DOM auch wirklich
     // ersetzt hat (sonst hängen die alten Listener noch am unveränderten DOM).
@@ -1032,6 +1049,7 @@ function openModal(m) {
     [t("badge.reasoning"), yesNo(m.reasoning)],
     [t("badge.vision"), yesNo(m.vision)],
     [t("modal.gpuMemory"), m.gpu_memory_utilization != null ? fmtPct(m.gpu_memory_utilization) : "–"],
+    [t("modal.diskSize"), fmtGb(m.size_bytes)],
   ];
   $("modal-info").innerHTML = infoRows.map(([label, value]) => `<dt>${esc(label)}</dt><dd>${esc(value)}</dd>`).join("");
 

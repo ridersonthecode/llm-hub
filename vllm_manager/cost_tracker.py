@@ -14,7 +14,6 @@ from __future__ import annotations
 
 import asyncio
 import json
-from pathlib import Path
 from typing import Optional
 
 from .config import CONFIG_PATH, get_config
@@ -172,7 +171,6 @@ def summary() -> dict:
 
 def delete_records(ids: list[str]) -> int:
     _ensure_loaded()
-    global records
     id_set = set(ids)
     before = len(records)
     records[:] = [r for r in records if r["id"] not in id_set]
@@ -185,7 +183,6 @@ def delete_records(ids: list[str]) -> int:
 
 def reset_all() -> int:
     _ensure_loaded()
-    global records
     removed = len(records)
     records[:] = []
     _rewrite_file()

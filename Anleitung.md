@@ -353,7 +353,15 @@ Alle registrierten (`config.json`) und zusätzlich lokal gecachten Modelle, mit 
 für gecacht/geladen/deaktiviert sowie die Fähigkeiten des Modells - Vision,
 Tool Calling (`enable_auto_tool_choice`), Reasoning (`reasoning_parser` gesetzt)
 und Embedding (`task: "embed"`) - auf einen Blick sichtbar, ohne erst ins Modal
-klicken zu müssen. Klick auf ein Modell öffnet zusätzlich ein Modal mit:
+klicken zu müssen. Bei lokal gecachten Modellen zusätzlich der belegte
+Speicherplatz in GB (💾-Zeile unter den Badges, auch im Klick-Modal als
+eigene Zeile) - rekursive Verzeichnisgröße, 5 Minuten gecacht (`catalog.
+get_cached_size_bytes()`) und bei allen gleichzeitig bekannten Modellen
+parallel statt nacheinander abgefragt, damit ein `os.walk()` über hunderte GB
+nicht bei jedem WebSocket-Heartbeat den Event-Loop blockiert. Cache wird nach
+jedem abgeschlossenen Download bzw. jedem "Von Platte löschen" sofort für das
+betroffene Modell geleert statt bis zu 5 Minuten auf den nächsten Refresh zu
+warten. Klick auf ein Modell öffnet zusätzlich ein Modal mit:
 - Link zur HuggingFace-Seite (`https://huggingface.co/<model>`)
 - fertigem JSON-Schnipsel im `chatLanguageModels.json`-Format (siehe VS-Code-Setup
   weiter oben) zum direkten Einfügen ins `"models"`-Array eines

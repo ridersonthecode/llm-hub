@@ -188,8 +188,9 @@ async def _run_job(job: dict, hf_token: Optional[str]) -> None:
         logger.info("Download abgeschlossen: %s", model)
         # Sofort sichtbar machen statt bis zu _CACHE_TTL Sekunden zu warten -
         # das neu heruntergeladene Modell soll im Dashboard/den APIs direkt
-        # als "gecacht" auftauchen.
+        # als "gecacht" auftauchen, mit korrekter (nicht 300s alter) Größe.
         catalog.invalidate_cache(cfg.hf_home)
+        catalog.invalidate_size_cache(model)
     else:
         logger.error("Download fehlgeschlagen: %s (exit code %s)", model, proc.returncode)
         job["state"] = "error"

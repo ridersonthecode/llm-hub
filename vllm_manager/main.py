@@ -6,6 +6,7 @@ import json
 import logging
 import time
 from contextlib import asynccontextmanager
+from typing import Optional
 
 import asyncio
 import httpx
@@ -187,6 +188,20 @@ async def _background_load(model: str) -> None:
         logger.info("Manuelles Laden von '%s' abgeschlossen.", model)
     except Exception as e:
         logger.warning("Manuelles Laden von '%s' fehlgeschlagen: %s", model, e)
+        # Ohne diesen Eintrag würde ein Fehlschlag hier (z.B. "kein Platz im Hot
+        # Pool" - schlägt fehl, BEVOR überhaupt ein EngineState existiert, also
+        # ohne den normalen Verlaufseintrag aus process_manager.stop_engine())
+        # dem Nutzer komplett unsichtbar bleiben - der "Laden"-Button meldet nur
+        # "loading_started" und danach passiert scheinbar nichts. Modell-Verlauf
+        # zeigt den Grund stattdessen sichtbar an, wie bei jedem anderen Fehler.
+        process_manager.model_history.appendleft({
+            "model": model,
+            "loaded_at": None,
+            "unloaded_at": time.time(),
+            "duration_seconds": None,
+            "reason": "failed_to_start",
+            "error": str(e),
+        })
 
 
 @app.get("/models/{model:path}/detect_capabilities")
@@ -245,6 +260,7 @@ async def delete_model_cache_endpoint(model: str):
         raise HTTPException(404, f"Für Modell '{model}' sind lokal keine Dateien vorhanden.")
     freed = await asyncio.to_thread(catalog.delete_model_cache, model, cfg.hf_home)
     catalog.invalidate_cache(cfg.hf_home)
+    catalog.invalidate_size_cache(model)
     return {"ok": True, "freed_bytes": freed}
 
 

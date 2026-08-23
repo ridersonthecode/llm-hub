@@ -134,3 +134,48 @@ def delete_model_cache(model: str, hf_home: str) -> int:
     size = dir_size_bytes(path)
     shutil.rmtree(path, ignore_errors=False)
     return size
+
+
+# --- Belegter Speicherplatz pro Modell (Dashboard-Anzeige "X GB") -----------
+# dir_size_bytes() oben macht ein rekursives os.walk() - bei großen Modellen
+# (hunderttausende Blob-/Snapshot-Dateien, teils >100GB) spürbar langsam.
+# _models_catalog() (dashboard.py) ruft das aber für JEDES bekannte Modell bei
+# JEDEM WebSocket-Heartbeat (1x/Sekunde und offenem Tab) ab - ungecacht würde
+# das denselben Event-Loop-Stau riskieren wie der Scan oben (siehe
+# Modul-Docstring). Verzeichnisgrößen ändern sich ohnehin nur nach einem
+# abgeschlossenen Download oder Löschen, ein länger lebender Cache ist also
+# unkritisch und wird an genau diesen Stellen aktiv invalidiert
+# (downloader.py, main.py DELETE .../cache).
+_SIZE_CACHE_TTL = 300.0
+_size_cache: dict[str, int] = {}
+_size_cache_at: dict[str, float] = {}
+_size_locks: dict[str, asyncio.Lock] = {}
+
+
+async def get_cached_size_bytes(model: str, hf_home: str) -> int:
+    now = time.time()
+    cached = _size_cache.get(model)
+    if cached is not None and (now - _size_cache_at.get(model, 0)) < _SIZE_CACHE_TTL:
+        return cached
+    lock = _size_locks.setdefault(model, asyncio.Lock())
+    async with lock:
+        now = time.time()
+        cached = _size_cache.get(model)
+        if cached is not None and (now - _size_cache_at.get(model, 0)) < _SIZE_CACHE_TTL:
+            return cached
+        size = await asyncio.to_thread(dir_size_bytes, cache_dir_for(model, hf_home))
+        _size_cache[model] = size
+        _size_cache_at[model] = time.time()
+        return size
+
+
+def invalidate_size_cache(model: Optional[str] = None) -> None:
+    """Nach einem abgeschlossenen Download oder Löschen aufrufen, damit die
+    nächste Dashboard-Abfrage die echte (neue) Größe zurückgibt statt bis zu
+    _SIZE_CACHE_TTL Sekunden lang die alte."""
+    if model is None:
+        _size_cache.clear()
+        _size_cache_at.clear()
+    else:
+        _size_cache.pop(model, None)
+        _size_cache_at.pop(model, None)
