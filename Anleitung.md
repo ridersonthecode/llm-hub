@@ -597,6 +597,52 @@ einzelnen Suche** neu aufgerufen (Suchanfrage muss in denselben Vektorraum
 eingebettet werden) - läuft dafür ganz normal im Hot Pool mit und bleibt bei
 `max_concurrent_models >= 2` neben Chat-Modellen warm.
 
+### Automatisches server-seitiges RAG (pro Modell)
+
+Alles oben Beschriebene ist eine reine Werkzeugkiste - der Manager sucht nie von
+selbst in deinen Dokumenten, sofern nicht **explizit** `/rag/.../search` aufgerufen
+wird (manuell, per Skript, oder von einem MCP-Agenten). Für automatische
+Anreicherung **jeder** Chat-Anfrage an ein bestimmtes Modell - ganz ohne dass der
+Client (VS Code, curl, Ollama-Alt-Tools, ...) irgendetwas Besonderes unterstützen
+muss - gibt es zusätzlich `models.<model>.rag_collection` in `config.json` (bzw.
+"Auto-RAG collection" im Config-Editor, pro Modell, **live änderbar ohne
+Neustart**):
+
+```json
+"models": {
+  "Qwen/Qwen3-8B": {
+    "rag_collection": "meine-docs"
+  }
+}
+```
+
+**Ablauf pro Anfrage** an ein so konfiguriertes Modell (`vllm_manager/rag.py`,
+`apply_auto_rag()` - aufgerufen von `main.py` für `/v1/chat/completions` UND von
+`ollama_compat.py` für `/api/chat`, beide Client-Arten profitieren also
+gleichermaßen):
+1. Letzte User-Nachricht wird als Suchtext genommen (auch bei multimodalen/
+   Vision-Requests - nur die Textteile werden verwendet).
+2. Suche in der konfigurierten Collection, `rag.auto_rag_top_k` Treffer (Default
+   3, global im Config-Editor unter "RAG" einstellbar).
+3. Treffer unter `rag.auto_rag_min_score` (Default 0.5) werden verworfen - eine
+   inhaltlich unpassende Frage bekommt so keinen sinnlosen Kontext angehängt
+   (kostet Tokens, kann sogar ablenken).
+4. Verbleibende Treffer werden als Kontext vorangestellt - existiert schon eine
+   System-Message, wird angehängt (`\n\n---\n...`) statt eine zweite zu erzeugen.
+5. Streaming bleibt unberührt (die Änderung passiert am Request-Body, bevor er
+   an die Engine weitergereicht wird - derselbe Mechanismus wie beim
+   `max_tokens`-Sicherheitsnetz).
+
+Schlägt die Suche fehl (Qdrant down, Embedding-Modell nicht ladbar, RAG global
+nicht aktiviert) wird still übersprungen und der Chat läuft normal weiter - RAG
+ist ein Zusatz und darf den eigentlichen Request nie zum Scheitern bringen.
+
+**Im Dashboard sichtbar:** eine neue RAG-Spalte bei Aktive Anfragen und Letzte
+Anfragen zeigt, ob und mit welcher Collection automatisches RAG gegriffen hat
+(Tooltip nennt die Anzahl eingefügter Treffer); "–" heißt entweder keine
+Collection für dieses Modell konfiguriert, oder nichts ausreichend Relevantes
+gefunden.
+
 ## Von Ollama auf vLLM übernommene Modelle
 
 Ollama wurde gestoppt und deaktiviert (`systemctl disable ollama`). Alle zuvor über

@@ -58,6 +58,17 @@ class ModelConfig(BaseModel):
     max_tokens: Optional[int] = None
     # Override für dieses Modell - None = default_pricing (siehe Config unten) gilt.
     pricing: Optional[Pricing] = None
+    # Automatisches server-seitiges RAG (siehe rag.apply_auto_rag): falls
+    # gesetzt (Name einer existierenden Collection, siehe /dashboard/rag),
+    # wird bei JEDER Chat-Anfrage an dieses Modell automatisch in dieser
+    # Collection gesucht (letzte User-Nachricht als Suchtext) und relevante
+    # Treffer als Kontext vorangestellt - der Client (VS Code, curl, ...)
+    # bekommt davon nichts mit und muss nichts Besonderes unterstützen. None =
+    # kein automatisches RAG für dieses Modell (Default). Live änderbar über
+    # den Config-Editor, kein Neustart nötig. Setzt rag.enabled +
+    # rag.embedding_model voraus (siehe RagConfig unten), sonst wird still
+    # übersprungen.
+    rag_collection: Optional[str] = None
 
 
 class RagConfig(BaseModel):
@@ -71,6 +82,14 @@ class RagConfig(BaseModel):
     default_collection: str = "default"
     chunk_size_chars: int = 1500
     chunk_overlap_chars: int = 200
+    # Schwellenwerte fürs automatische server-seitige RAG (siehe
+    # ModelConfig.rag_collection oben / rag.apply_auto_rag) - gelten global
+    # für alle Modelle mit gesetzter rag_collection. auto_rag_min_score
+    # verhindert, dass bei einer inhaltlich unpassenden Frage sinnlos
+    # (irrelevanter) Kontext eingefügt wird - kostet Tokens und kann sogar von
+    # der eigentlichen Antwort ablenken.
+    auto_rag_top_k: int = 3
+    auto_rag_min_score: float = 0.5
 
 
 class Config(BaseModel):

@@ -518,6 +518,11 @@ async def proxy_v1(path: str, request: Request):
     telemetry.mark_ready(rid)
 
     body = _apply_default_max_tokens(cfg, model, path, parsed_body, body)
+    if parsed_body is not None and path == "chat/completions":
+        rag_result = await rag.apply_auto_rag(model, parsed_body.get("messages") or [])
+        if rag_result:
+            telemetry.mark_rag_used(rid, rag_result["collection"], rag_result["hits"])
+            body = json.dumps(parsed_body).encode("utf-8")
 
     target = f"http://{cfg.engine_host}:{engine_status['port']}/v1/{path}"
     client = httpx.AsyncClient(timeout=None)

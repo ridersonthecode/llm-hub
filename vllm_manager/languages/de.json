@@ -52,7 +52,9 @@
   "th.throughput": "Durchsatz",
   "th.phase": "Phase",
   "th.app": "App",
+  "th.rag": "RAG",
   "th.cost": "Kosten",
+  "rag.hitsTooltip": "Automatisches RAG hat die Collection \"{collection}\" genutzt ({hits} relevante Treffer als Kontext eingefügt).",
 
   "badge.coldStart": "🥶 Kaltstart läuft…",
   "badge.ready": "✅ bereit",
@@ -246,6 +248,9 @@
   "cfg.field.defaultCollection": "Standard-Collection",
   "cfg.field.chunkSize": "Chunk-Größe (Zeichen)",
   "cfg.field.chunkOverlap": "Chunk-Overlap (Zeichen)",
+  "cfg.hint.autoRag": "Die folgenden Einstellungen gelten für automatisches server-seitiges RAG (siehe \"Auto-RAG-Collection\" bei jedem Modell weiter unten) - nicht für manuelle Suchen über die RAG-Seite/API, die ihr eigenes top_k pro Anfrage mitgeben.",
+  "cfg.field.autoRagTopK": "Auto-RAG: Treffer pro Anfrage",
+  "cfg.field.autoRagMinScore": "Auto-RAG: Mindest-Relevanz-Score",
   "cfg.field.modelName": "Modellname / Pfad",
   "cfg.field.modelEnabled": "Aktiviert",
   "cfg.field.task": "Task",
@@ -253,6 +258,8 @@
   "cfg.field.gpuMemUtil": "GPU-Speicherauslastung",
   "cfg.field.maxTokens": "Max. Ausgabe-Tokens (Sicherheitsnetz, leer = unbegrenzt)",
   "cfg.hint.maxTokens": "Begrenzt die Generierungslänge nur, wenn der Client selbst keinen max_tokens-Wert anfragt - schützt vor durchgehenden/sich wiederholenden Generierungen, ohne normale Antworten einzuschränken.",
+  "cfg.field.ragCollection": "Auto-RAG-Collection (leer = aus)",
+  "cfg.hint.ragCollection": "Falls gesetzt, durchsucht jede Chat-Anfrage an dieses Modell automatisch diese Collection und stellt relevanten Kontext voran - der Client muss dafür nichts Besonderes unterstützen. Setzt voraus, dass RAG aktiviert ist und ein Embedding-Modell konfiguriert wurde (siehe RAG-Abschnitt weiter unten).",
   "cfg.field.toolCallParser": "Tool-Call-Parser",
   "cfg.field.reasoningParser": "Reasoning-Parser",
   "cfg.field.autoToolChoice": "Auto Tool Choice aktivieren",
@@ -348,6 +355,8 @@
 
   "help.throughput.title": "Durchsatz",
   "help.throughput.body": "Aktuelle Generierungsgeschwindigkeit dieser laufenden Anfrage in Tokens pro Sekunde, live berechnet aus den bisher gestreamten Tokens seit Antwortbeginn (nach Ladezeit/Prompt-Verarbeitung).",
+  "help.rag.title": "RAG",
+  "help.rag.body": "Zeigt, ob automatisches server-seitiges RAG für diese Anfrage gegriffen hat: das Modell hat eine \"Auto-RAG-Collection\" konfiguriert (Config-Editor), die letzte User-Nachricht wurde also in dieser Collection gesucht und relevante Treffer wurden als Kontext vorangestellt - ohne dass der Client irgendetwas Besonderes tun musste. \"–\" bedeutet entweder: für dieses Modell ist keine Collection konfiguriert, oder es wurde nichts ausreichend Relevantes gefunden (unter dem Mindest-Score).",
 
   "help.cost.title": "Kosten",
   "help.cost.body": "Rein fiktiver Vergleichswert: was diese Tokens über eine Cloud-API gekostet hätten (Default: Claude-Sonnet-5-Preise, pro Modell anpassbar im Config-Editor). Der lokale Betrieb ist und bleibt kostenlos - siehe die eigene Kostenseite (💰 Costs) für Details, Verlauf und Preis-Konfiguration.",

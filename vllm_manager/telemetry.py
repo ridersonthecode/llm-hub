@@ -71,6 +71,11 @@ def start_request(model: str, path: str, is_stream: bool = False, user_agent: Op
         # das Dashboard eine kleine Zeitleiste zeigen kann.
         "phase": "loading",
         "phase_history": [{"phase": "loading", "at": last_request_at}],
+        # Gesetzt von mark_rag_used(), falls automatisches server-seitiges RAG
+        # gegriffen hat (siehe rag.apply_auto_rag / ModelConfig.rag_collection).
+        "rag_used": False,
+        "rag_collection": None,
+        "rag_hits": 0,
     }
     _publish({"type": "request_start"})
     return rid
@@ -118,6 +123,19 @@ def increment_reasoning_tokens(rid: str) -> None:
 
 def mark_tool_call(rid: str) -> None:
     _set_phase(rid, "tool_call")
+
+
+def mark_rag_used(rid: str, collection: str, hits: int) -> None:
+    """Markiert, dass für diese Anfrage automatisch RAG-Kontext eingefügt
+    wurde (siehe rag.apply_auto_rag, aufgerufen von main.py/ollama_compat.py)
+    - landet dank finish_request() (verschiebt denselben Dict in
+    recent_requests) automatisch auch in der Verlaufsansicht, nicht nur bei
+    Active Requests."""
+    r = active_requests.get(rid)
+    if r is not None:
+        r["rag_used"] = True
+        r["rag_collection"] = collection
+        r["rag_hits"] = hits
 
 
 def update_partial_usage(rid: str, prompt_tokens: Optional[int], completion_tokens: Optional[int]) -> None:

@@ -296,6 +296,17 @@ CONFIG_DASHBOARD_HTML = r"""<!doctype html>
           <input type="number" id="f-rag_chunk_overlap_chars" min="0">
         </div>
       </div>
+      <div class="hint" data-i18n="cfg.hint.autoRag">Settings below apply to automatic server-side RAG (see "Auto-RAG collection" on each model further down) - not to manual searches via the RAG page/API, which take their own top_k per request.</div>
+      <div class="row">
+        <div>
+          <label data-i18n="cfg.field.autoRagTopK">Auto-RAG: matches per request</label>
+          <input type="number" id="f-rag_auto_rag_top_k" min="1" max="20">
+        </div>
+        <div>
+          <label data-i18n="cfg.field.autoRagMinScore">Auto-RAG: minimum relevance score</label>
+          <input type="number" id="f-rag_auto_rag_min_score" min="0" max="1" step="0.05">
+        </div>
+      </div>
     </div>
   </section>
 
@@ -402,6 +413,8 @@ function clearDirty() {
   $("dirty-indicator").style.display = "none";
 }
 
+let ragCollectionNames = [];
+
 async function loadConfig() {
   const res = await fetch("/config", { headers: authHeaders() });
   if (res.status === 401) { await ensureApiKey(); return loadConfig(); }
@@ -414,6 +427,16 @@ async function loadConfig() {
   } else {
     $("startup-warning-banner").style.display = "none";
   }
+  // Für das Autovervollständigungs-Datalist beim "Auto-RAG collection"-Feld -
+  // rein informativ (Freitextfeld bleibt trotzdem editierbar), schlägt still
+  // fehl, falls RAG gar nicht konfiguriert ist (400 von /rag/collections).
+  try {
+    const ragRes = await fetch("/rag/collections", { headers: authHeaders() });
+    if (ragRes.ok) {
+      const ragData = await ragRes.json();
+      ragCollectionNames = (ragData.collections || []).map(c => c.name);
+    }
+  } catch (e) { /* RAG nicht konfiguriert - Datalist bleibt einfach leer */ }
   renderForm();
   renderModels();
   clearDirty();
@@ -457,6 +480,8 @@ function renderForm() {
   $("f-rag_default_collection").value = rag.default_collection ?? "default";
   $("f-rag_chunk_size_chars").value = rag.chunk_size_chars ?? 1500;
   $("f-rag_chunk_overlap_chars").value = rag.chunk_overlap_chars ?? 200;
+  $("f-rag_auto_rag_top_k").value = rag.auto_rag_top_k ?? 3;
+  $("f-rag_auto_rag_min_score").value = rag.auto_rag_min_score ?? 0.5;
 
   populateModelSelects();
   $("f-default_model").value = state.default_model ?? "";
@@ -469,7 +494,8 @@ function renderForm() {
     + "#f-dsa_gpu_memory_utilization,#f-dsa_max_model_len,"
     + "#f-pricing_input_per_mtok,#f-pricing_output_per_mtok,"
     + "#f-rag_enabled,#f-rag_qdrant_host,#f-rag_qdrant_port,#f-rag_default_collection,"
-    + "#f-rag_chunk_size_chars,#f-rag_chunk_overlap_chars,#f-default_model,#f-rag_embedding_model")
+    + "#f-rag_chunk_size_chars,#f-rag_chunk_overlap_chars,#f-rag_auto_rag_top_k,#f-rag_auto_rag_min_score,"
+    + "#f-default_model,#f-rag_embedding_model")
     .forEach(el => { el.oninput = markDirty; el.onchange = markDirty; });
 }
 
@@ -546,6 +572,10 @@ function renderModels() {
         <input type="number" class="m-field" data-idx="${i}" data-field="max_tokens" min="1" value="${m.max_tokens ?? ""}">
         <div class="hint" data-i18n="cfg.hint.maxTokens">Caps generation length only when the client itself doesn't request a max_tokens value - protects against runaway/repeating generations without limiting normal replies.</div>
 
+        <label data-i18n="cfg.field.ragCollection">Auto-RAG collection (empty = off)</label>
+        <input type="text" class="m-field" data-idx="${i}" data-field="rag_collection" list="rag-collection-options" value="${esc(m.rag_collection ?? "")}">
+        <div class="hint" data-i18n="cfg.hint.ragCollection">If set, every chat request to this model automatically searches this collection and prepends relevant context - the client doesn't need to support anything special. Requires RAG to be enabled with an embedding model configured (see the RAG section below).</div>
+
         <div class="row">
           <div>
             <label data-i18n="cfg.field.toolCallParser">Tool call parser</label>
@@ -603,7 +633,8 @@ function renderModels() {
       <option value="qwen3"><option value="deepseek_r1"><option value="deepseek_v3">
       <option value="granite"><option value="mistral"><option value="openai_gptoss">
       <option value="hunyuan_a13b"><option value="glm45"><option value="glm47">
-    </datalist>`;
+    </datalist>
+    <datalist id="rag-collection-options">${ragCollectionNames.map(n => `<option value="${esc(n)}">`).join("")}</datalist>`;
 
   document.querySelectorAll(".accordion-header").forEach(el => {
     el.addEventListener("click", () => {
@@ -631,7 +662,7 @@ function renderModels() {
         if (num === null) delete pricing[sub]; else pricing[sub] = num;
         modelsList[idx].pricing = Object.keys(pricing).length ? pricing : null;
       } else {
-        modelsList[idx][field] = val === "" && (field === "tool_call_parser" || field === "reasoning_parser" || field === "hf_token" || field === "notes") ? null : val;
+        modelsList[idx][field] = val === "" && (field === "tool_call_parser" || field === "reasoning_parser" || field === "hf_token" || field === "notes" || field === "rag_collection") ? null : val;
       }
       markDirty();
       if (field === "name" || field === "task") { populateModelSelects(); }
@@ -785,7 +816,7 @@ $("add-model-btn").addEventListener("click", () => {
     name: "", enabled: true, task: "generate", max_model_len: null,
     gpu_memory_utilization: null, tool_call_parser: null, reasoning_parser: null,
     enable_auto_tool_choice: false, vision: false, extra_args: [], hf_token: null, notes: "",
-    max_tokens: null,
+    max_tokens: null, rag_collection: null,
   });
   openAccordions.add(modelsList.length - 1);
   markDirty();
@@ -852,6 +883,8 @@ function buildPayload() {
       default_collection: $("f-rag_default_collection").value,
       chunk_size_chars: parseInt($("f-rag_chunk_size_chars").value, 10),
       chunk_overlap_chars: parseInt($("f-rag_chunk_overlap_chars").value, 10),
+      auto_rag_top_k: parseInt($("f-rag_auto_rag_top_k").value, 10),
+      auto_rag_min_score: parseFloat($("f-rag_auto_rag_min_score").value),
     },
   };
 }

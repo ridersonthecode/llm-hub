@@ -166,6 +166,71 @@ async def add_file(collection: str, path: str, metadata: Optional[dict] = None) 
     return await add_text(collection, text, source=str(p), metadata=meta)
 
 
+def _extract_query_text(content) -> str:
+    """Extrahiert reinen Text aus einem Chat-Message-content-Feld - das ist
+    entweder ein einfacher String oder (bei multimodalen/Vision-Requests) eine
+    Liste von {"type": "text", "text": "..."}-Objekten."""
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        return " ".join(
+            part.get("text", "") for part in content
+            if isinstance(part, dict) and part.get("type") == "text"
+        )
+    return ""
+
+
+async def apply_auto_rag(model: str, messages: list) -> Optional[dict]:
+    """Automatisches server-seitiges RAG (siehe ModelConfig.rag_collection in
+    config.py): durchsucht bei einer Chat-Anfrage an ein so konfiguriertes
+    Modell automatisch die zugeordnete Collection nach der letzten
+    User-Nachricht und stellt relevante Treffer als System-Kontext voran -
+    verändert `messages` IN PLACE. Aufgerufen von main.py (/v1/chat/
+    completions) und ollama_compat.py (/api/chat), damit beide Client-Arten
+    (OpenAI-API wie VS Code, Ollama-API-Alt-Tools) davon profitieren, ohne
+    selbst irgendetwas Besonderes unterstützen zu müssen.
+
+    Gibt None zurück, wenn nichts angewendet wurde (kein rag_collection
+    konfiguriert, RAG global nicht aktiviert, kein Suchtext in der letzten
+    User-Nachricht, keine ausreichend relevanten Treffer, oder ein Fehler bei
+    Qdrant/Embedding-Modell - RAG ist ein Zusatz und darf den eigentlichen
+    Chat nie zum Scheitern bringen), sonst {"collection": ..., "hits": N}
+    fürs Telemetrie-Tracking im Dashboard (Active/Recent Requests)."""
+    cfg = get_config()
+    mcfg = cfg.models.get(model)
+    collection = mcfg.rag_collection if mcfg else None
+    if not collection or not cfg.rag.enabled or not cfg.rag.embedding_model:
+        return None
+    query_text = ""
+    for m in reversed(messages or []):
+        if m.get("role") == "user":
+            query_text = _extract_query_text(m.get("content"))
+            break
+    if not query_text.strip():
+        return None
+    try:
+        results = await search(collection, query_text, top_k=cfg.rag.auto_rag_top_k)
+    except Exception as e:
+        logger.warning(
+            "Automatisches RAG für Modell '%s' (Collection '%s') fehlgeschlagen, "
+            "fahre ohne RAG-Kontext fort: %s", model, collection, e,
+        )
+        return None
+    relevant = [r for r in results if (r.get("score") or 0) >= cfg.rag.auto_rag_min_score]
+    if not relevant:
+        return None
+    context_block = "\n\n".join(f"[{r.get('source') or '?'}] {r.get('text') or ''}" for r in relevant)
+    header = (
+        f"Relevanter Kontext aus der Wissensdatenbank \"{collection}\" "
+        f"(nur nutzen, falls er zur Frage passt):\n\n{context_block}"
+    )
+    if messages and messages[0].get("role") == "system":
+        messages[0]["content"] = f"{messages[0].get('content') or ''}\n\n---\n{header}"
+    else:
+        messages.insert(0, {"role": "system", "content": header})
+    return {"collection": collection, "hits": len(relevant)}
+
+
 async def search(collection: str, query: str, top_k: int = 5) -> list[dict]:
     cfg = get_config()
     _require_rag(cfg)

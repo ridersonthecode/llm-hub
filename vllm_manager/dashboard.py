@@ -612,6 +612,16 @@ function appCell(userAgent) {
   return `<span title="${esc(userAgent)}">${esc(short)}</span>`;
 }
 
+// Zeigt, ob automatisches server-seitiges RAG für diese Anfrage gegriffen hat
+// (siehe rag.apply_auto_rag / ModelConfig.rag_collection) - r.rag_used wird
+// von telemetry.mark_rag_used() gesetzt, überlebt dank finish_request() auch
+// den Übergang von Active in Recent Requests.
+function ragCell(r) {
+  if (!r.rag_used) return `<span class="hint">–</span>`;
+  const title = t("rag.hitsTooltip", { collection: r.rag_collection, hits: r.rag_hits });
+  return `<span class="badge ok" title="${esc(title)}">📚 ${esc(r.rag_collection)}</span>`;
+}
+
 // --- Hilfe-Icons (Fragezeichen neben Spaltenüberschriften/Labels) ----------
 // Klickbares "?" öffnet ein Modal mit Erklärung, siehe help.<key>.title/body
 // in den Übersetzungsdateien. Ein Icon kann von mehreren Stellen aus verlinkt
@@ -785,7 +795,7 @@ function render(data) {
     safeSetHTML($("active-request-box"), `<div class="empty">${t("empty.noActiveRequest")}</div>`);
   } else {
     safeSetHTML($("active-request-box"), `<div class="table-scroll"><table><thead><tr>
-      <th>${t("th.model")}</th><th>${t("th.app")}</th><th>${t("th.endpoint")}</th><th>${t("th.port")}</th><th>${t("th.phase")}${helpIcon("phase")}</th><th>${t("th.elapsed")}</th><th>${t("th.loadTime")}${helpIcon("loadTime")}</th><th>${t("th.ttft")}${helpIcon("ttft")}</th><th>${t("th.tokensPromptGen")}${helpIcon("liveTokens")}</th><th>${t("th.reasoningTokens")}${helpIcon("liveTokens")}</th><th>${t("th.throughput")}${helpIcon("throughput")}</th><th>${t("th.cost")}${helpIcon("cost")}</th>
+      <th>${t("th.model")}</th><th>${t("th.app")}</th><th>${t("th.endpoint")}</th><th>${t("th.port")}</th><th>${t("th.rag")}${helpIcon("rag")}</th><th>${t("th.phase")}${helpIcon("phase")}</th><th>${t("th.elapsed")}</th><th>${t("th.loadTime")}${helpIcon("loadTime")}</th><th>${t("th.ttft")}${helpIcon("ttft")}</th><th>${t("th.tokensPromptGen")}${helpIcon("liveTokens")}</th><th>${t("th.reasoningTokens")}${helpIcon("liveTokens")}</th><th>${t("th.throughput")}${helpIcon("throughput")}</th><th>${t("th.cost")}${helpIcon("cost")}</th>
       </tr></thead><tbody>` + active.map(r => {
         const elapsed = Date.now()/1000 - r.started_at;
         const port = (engs.find(e => e.loaded_model === r.model) || {}).port;
@@ -812,6 +822,7 @@ function render(data) {
           <td class="mono">${appCell(r.user_agent)}</td>
           <td class="mono">${esc(r.path || "–")}${r.is_stream ? ` <span class="badge idle">${t("badge.stream")}</span>` : ""}</td>
           <td class="mono">${port ?? "–"}</td>
+          <td>${ragCell(r)}</td>
           <td>
             <span class="badge ${pi.badgeClass}" title="${esc(timeline)}">${pi.icon} ${esc(pi.label())}</span>
             <div class="hint">${esc(t("phase.since", { duration: fmtDuration(phaseSinceSec) }))}</div>
@@ -873,11 +884,12 @@ function render(data) {
     safeSetHTML($("recent-box"), `<div class="empty">${t("empty.noRecentRequests")}</div>`);
   } else {
     safeSetHTML($("recent-box"), `<div class="table-scroll"><table><thead><tr>
-      <th>${t("th.time")}</th><th>${t("th.model")}</th><th>${t("th.app")}</th><th>${t("th.status")}</th><th>${t("th.loadTime")}${helpIcon("loadTime")}</th><th>${t("th.duration")}</th><th>${t("th.ttft")}${helpIcon("ttft")}</th><th>${t("th.promptTokens")}${helpIcon("requestTokens")}</th><th>${t("th.complTokens")}${helpIcon("requestTokens")}</th><th>${t("th.cost")}${helpIcon("cost")}</th>
+      <th>${t("th.time")}</th><th>${t("th.model")}</th><th>${t("th.app")}</th><th>${t("th.rag")}${helpIcon("rag")}</th><th>${t("th.status")}</th><th>${t("th.loadTime")}${helpIcon("loadTime")}</th><th>${t("th.duration")}</th><th>${t("th.ttft")}${helpIcon("ttft")}</th><th>${t("th.promptTokens")}${helpIcon("requestTokens")}</th><th>${t("th.complTokens")}${helpIcon("requestTokens")}</th><th>${t("th.cost")}${helpIcon("cost")}</th>
       </tr></thead><tbody>` + recent.map(r => `<tr>
         <td class="mono">${new Date(r.started_at*1000).toLocaleTimeString(localeFor(currentLang))}</td>
         <td>${esc(modelName(r.model))}</td>
         <td class="mono">${appCell(r.user_agent)}</td>
+        <td>${ragCell(r)}</td>
         <td><span class="badge ${r.status === 'ok' ? 'ok' : 'error'}">${r.status === 'ok' ? t("status.ok") : t("status.error")}</span></td>
         <td class="mono">${r.queued_ms ? fmtMs(r.queued_ms) : "–"}</td>
         <td class="mono">${fmtMs(r.duration_ms)}</td>

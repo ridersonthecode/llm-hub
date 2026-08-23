@@ -52,7 +52,9 @@
   "th.throughput": "Throughput",
   "th.phase": "Phase",
   "th.app": "App",
+  "th.rag": "RAG",
   "th.cost": "Cost",
+  "rag.hitsTooltip": "Automatic RAG used collection \"{collection}\" ({hits} relevant match(es) included as context).",
 
   "badge.coldStart": "🥶 Cold start in progress…",
   "badge.ready": "✅ ready",
@@ -246,6 +248,9 @@
   "cfg.field.defaultCollection": "Default collection",
   "cfg.field.chunkSize": "Chunk size (chars)",
   "cfg.field.chunkOverlap": "Chunk overlap (chars)",
+  "cfg.hint.autoRag": "Settings below apply to automatic server-side RAG (see \"Auto-RAG collection\" on each model further down) - not to manual searches via the RAG page/API, which take their own top_k per request.",
+  "cfg.field.autoRagTopK": "Auto-RAG: matches per request",
+  "cfg.field.autoRagMinScore": "Auto-RAG: minimum relevance score",
   "cfg.field.modelName": "Model name / path",
   "cfg.field.modelEnabled": "Enabled",
   "cfg.field.task": "Task",
@@ -253,6 +258,8 @@
   "cfg.field.gpuMemUtil": "GPU memory utilization",
   "cfg.field.maxTokens": "Max output tokens (safety net, empty = unbounded)",
   "cfg.hint.maxTokens": "Caps generation length only when the client itself doesn't request a max_tokens value - protects against runaway/repeating generations without limiting normal replies.",
+  "cfg.field.ragCollection": "Auto-RAG collection (empty = off)",
+  "cfg.hint.ragCollection": "If set, every chat request to this model automatically searches this collection and prepends relevant context - the client doesn't need to support anything special. Requires RAG to be enabled with an embedding model configured (see the RAG section below).",
   "cfg.field.toolCallParser": "Tool call parser",
   "cfg.field.reasoningParser": "Reasoning parser",
   "cfg.field.autoToolChoice": "Enable auto tool choice",
@@ -348,6 +355,8 @@
 
   "help.throughput.title": "Throughput",
   "help.throughput.body": "Current generation speed of this running request in tokens per second, calculated live from the tokens streamed so far since the answer started (after load time/prompt processing).",
+  "help.rag.title": "RAG",
+  "help.rag.body": "Shows whether automatic server-side RAG kicked in for this request: the model has an \"Auto-RAG collection\" configured (Config Editor), so the last user message was searched against that collection and relevant matches were prepended as context - without the client having to do anything special. \"–\" means either no collection is configured for this model, or nothing relevant enough was found (below the minimum score).",
 
   "help.cost.title": "Cost",
   "help.cost.body": "Purely fictional comparison value: what these tokens would have cost via a cloud API (default: Claude Sonnet 5 pricing, adjustable per model in the Config Editor). Local operation is and remains free - see the dedicated Costs page (💰 Costs) for details, history, and pricing configuration.",
