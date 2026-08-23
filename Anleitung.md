@@ -85,7 +85,8 @@ Wichtige Felder:
 | `gpu_memory_ceiling` | Obergrenze für die Summe der `gpu_memory_utilization` aller gleichzeitig laufenden Engines. Default `0.9`. |
 | `default_model` | Wird verwendet, wenn ein Request kein `"model"`-Feld mitschickt. |
 | `default_serve_args` | Fallback-Werte für `gpu_memory_utilization` / `max_model_len`, falls ein Modell keine eigenen hat. |
-| `models.<name>` | Pro-Modell-Overrides: `tool_call_parser`, `max_model_len`, `gpu_memory_utilization`, `enable_auto_tool_choice`, `extra_args` (Liste beliebiger zusätzlicher `vllm serve`-Flags), `hf_token`, `enabled` (auf `false` setzen um ein kaputtes/gesperrtes Modell zu deaktivieren, ohne den Eintrag zu löschen), `notes`. |
+| `models.<name>` | Pro-Modell-Overrides: `tool_call_parser`, `reasoning_parser` (trennt `<think>...</think>` in ein eigenes `reasoning_content`-Feld statt es in die normale Antwort zu mischen, z.B. `"qwen3"` für Qwen3-Thinking-Modelle - gültige Werte: `vllm serve --help=all \| grep -A2 reasoning-parser`), `max_model_len`, `gpu_memory_utilization`, `enable_auto_tool_choice`, `extra_args` (Liste beliebiger zusätzlicher `vllm serve`-Flags), `hf_token`, `enabled` (auf `false` setzen um ein kaputtes/gesperrtes Modell zu deaktivieren, ohne den Eintrag zu löschen), `notes`. |
+| _(alle obigen Felder auch per Formular statt von Hand)_ | Siehe [Config-Editor](#config-editor-dashboardconfig) unter Live-Dashboard weiter unten - Inputfelder/Dropdowns/Checkboxen statt rohem JSON, mit Validierung, automatischem Backup und Live-Übernahme oder Dienst-Neustart. |
 
 ## API benutzen
 
@@ -182,11 +183,16 @@ Zeigt in Echtzeit per WebSocket (kein Polling, kein Neuladen der Seite nötig):
 - **Pool-Speicherbudget**: Summe der `gpu_memory_utilization` aller geladenen Engines
   gegen `gpu_memory_ceiling`, als Balken
 - Zeitpunkt des letzten Prompts ("vor Xs")
-- Aktive Anfrage: Modell-Ladezeit (falls gerade ein Kaltstart lief) getrennt von der
-  reinen Generierungs-TTFT, sowie Tokens grob live mitgezählt
+- Aktive Anfragen als Tabelle (eine Zeile je laufender Anfrage - bei Hot Pool
+  ggf. mehrere gleichzeitig): Modell, Endpoint (`chat/completions`, `embeddings`,
+  ...) inkl. Stream-Badge, Engine-Port, Status (🥶 Kaltstart falls gerade das
+  Modell noch lädt / läuft), Gesamtlaufzeit, Modell-Ladezeit getrennt von der
+  reinen Generierungs-TTFT, Tokens, und live berechneter Durchsatz (Tokens/Sek.)
 - System-Auslastung: GPU-Auslastung/-Temperatur/-Leistung (`nvidia-smi`) und
   RAM-Auslastung (`/proc/meminfo`, deckt wegen Unified Memory auch den
-  GPU-Speicherbedarf ab) als Live-Charts
+  GPU-Speicherbedarf ab) als Live-Charts - direkt unter der Kachel-Übersicht,
+  vor den modellbezogenen Abschnitten (Geladene Modelle/Aktive Anfragen/Verlauf
+  bleiben dadurch zusammenhängend statt durch die Hardware-Anzeige getrennt)
 - Modell-Verlauf (wie `ollama ps`, aber historisch): welches Modell wann geladen/
   entladen/verdrängt/abgestürzt ist, inkl. Grund
 - Laufende Downloads (gleiche Daten wie `/models/pull`), ganz unten auf der Seite
@@ -232,18 +238,124 @@ Alle registrierten (`config.json`) und zusätzlich lokal gecachten Modelle, mit 
   `customendpoint`-Eintrags - mit Kopieren-Button. Die `url` wird dynamisch aus der
   Adresse gebaut, über die das Dashboard gerade aufgerufen wurde.
 
+### Config-Editor (`/dashboard/config`)
+
+Erreichbar über den "⚙️ Config →"-Link oben im Haupt-Dashboard. Bearbeitet
+`config.json` über echte Formularfelder (Inputs/Dropdowns/Checkboxen) statt
+rohem JSON - inkl. aller Server-/Hot-Pool-/RAG-Einstellungen und einer
+aufklappbaren Liste je registriertem Modell (Tool-Call-/Reasoning-Parser,
+`max_model_len`, `gpu_memory_utilization`, `extra_args`, HF-Token, Notizen, ...)
+mit "+ Modell hinzufügen" und Entfernen-Button pro Eintrag.
+
+**Aktivierungswege** (Button oben, während des Scrollens sichtbar):
+- **"Speichern (live übernehmen)"**: validiert die Eingaben serverseitig
+  (Pydantic - bei Fehlern wird **nichts** geschrieben, stattdessen die
+  Fehlermeldung angezeigt), sichert die bisherige `config.json` automatisch als
+  Backup und übernimmt die neue Config sofort im laufenden Prozess. Wirkt für
+  praktisch alles sofort (nächster Request/nächster Modellstart liest die neuen
+  Werte) - **außer** `host`/`port` (der Bind-Socket des Managers selbst), die
+  sind mit einem 🔁-Badge markiert und brauchen einen echten Neustart. Bereits
+  laufende Engines behalten ihre alten Serve-Args, bis sie neu geladen werden.
+- **"Speichern & Dienst neu starten"**: wie oben, stößt danach zusätzlich
+  `sudo systemctl restart vllm` an. Braucht **passwortlosen sudo** für genau
+  diesen Befehl (selbst einzurichten, z.B. per `visudo`-Eintrag - der Manager
+  richtet das aus Sicherheitsgründen nicht selbst ein). Ohne passenden
+  sudoers-Eintrag schlägt der Button mit einer klaren Fehlermeldung fehl, statt
+  unbemerkt nichts zu tun.
+
+**Backups** (`config_backups/` neben `config.json`, nicht Teil von Git): vor
+jedem Save wird die bisherige `config.json` als `config-<Zeitstempel>.json`
+gesichert (Historie der letzten 20 Änderungen, mit "Wiederherstellen"-Button
+pro Zeile im Backups-Abschnitt der Seite).
+
+**Absturzschutz beim Programmstart:** zusätzlich zur Zeitstempel-Historie wird
+nach jedem erfolgreichen Start/Save eine `last_known_good.json` gepflegt. Lässt
+sich `config.json` beim nächsten Start nicht mehr laden (kaputtes JSON, ungültige
+Werte, von Hand editiert) - der Dienst crasht **nicht**, sondern startet
+automatisch mit `last_known_good.json`, sichert die kaputte Datei zur
+Fehlersuche als `config-broken-<Zeitstempel>.json` weg und zeigt eine
+auffällige Warnung oben im Config-Editor an (inkl. Fehlermeldung). Die defekte
+`config.json` bleibt dabei unangetastet auf der Platte liegen - ein Speichern
+über den Editor (der ja die aktuell laufende, funktionierende Config anzeigt)
+repariert sie beim nächsten Save automatisch wieder.
+
 ## MCP-Server (für KI-Agenten)
 
 Erreichbar unter `http://<LAN-IP>:11434/mcp` (Streamable-HTTP-Transport). Werkzeuge:
 
 - `list_models` – registrierte, gecachte und aktuell geladene Modelle
-- `server_status` – Status der aktiven Engine
+- `server_status` – Status aller aktiven Engines (Hot Pool)
 - `pull_model(model, revision?, hf_token?)` – Download starten, gibt `job_id` zurück
 - `pull_status(job_id)` – Fortschritt abfragen
 - `load_model(model)` – Modell laden (blockierend)
-- `unload_model()` – aktuelles Modell entladen
+- `unload_model(model?)` – Modell entladen (ohne Angabe: alle)
+- `rag_add_text(text, collection?, source?)` / `rag_add_file(path, collection?)` /
+  `rag_search(query, collection?, top_k?)` / `rag_list_collections()` /
+  `rag_list_documents(collection?)` / `rag_delete_document(document_id, collection?)` /
+  `rag_delete_collection(collection)` – siehe [RAG](#rag-retrieval-augmented-generation) unten
 
 Einen MCP-Client (z.B. Claude, Hermes Agent) einfach auf diese URL zeigen lassen.
+
+## RAG (Retrieval-Augmented Generation)
+
+Optionale Erweiterung: eigene Texte/Dokumente in eine Wissensdatenbank ablegen und
+per semantischer Suche wiederfinden (Hintergrund siehe
+[docs/erklaerung-quantisierung-und-tokens-pro-sekunde.md](docs/erklaerung-quantisierung-und-tokens-pro-sekunde.md#7-was-ist-rag-und-wozu-braucht-man-es)).
+
+**Architektur:**
+
+```
+Qdrant (Docker-Container, Port 6333/6334, --restart unless-stopped)
+  ↑ speichert Vektoren + Metadaten pro Collection
+vLLM-Manager (vllm_manager/rag.py)
+  ↑ embedded Text über ein Embedding-Modell im Hot Pool
+  ↑ (Qwen/Qwen3-Embedding-0.6B, läuft mit --runner pooling statt generate)
+      ├─ /rag/* (REST, von der Dashboard-Seite genutzt)
+      ├─ rag_*-MCP-Tools (für KI-Agenten)
+      └─ /dashboard/rag (eigene Verwaltungsseite, EN/DE)
+```
+
+**Setup:** Qdrant läuft als Docker-Container:
+
+```bash
+docker volume create qdrant_storage
+docker run -d --name qdrant --restart unless-stopped \
+  -p 6333:6333 -p 6334:6334 \
+  -v qdrant_storage:/qdrant/storage \
+  qdrant/qdrant
+```
+
+In `config.json` unter `"rag"`: `enabled: true`, `embedding_model` auf ein
+registriertes Modell mit `"task": "embed"` gesetzt (Beispiel bereits in
+`config.example.json`). `chunk_size_chars`/`chunk_overlap_chars` steuern, wie
+Texte beim Ablegen zerlegt werden (Default 1500/200 Zeichen, versucht an Absatz-/
+Satzgrenzen zu brechen).
+
+**Nutzung:**
+
+```bash
+# Text hinzufügen
+curl -X POST http://<LAN-IP>:11434/rag/collections/meine-docs/text \
+  -H "Content-Type: application/json" \
+  -d '{"text": "...", "source": "notiz-vom-22.08"}'
+
+# Datei hinzufügen (PDF/TXT/MD) - Pfad gilt auf dem Server, nicht dem Client!
+curl -X POST http://<LAN-IP>:11434/rag/collections/meine-docs/file \
+  -H "Content-Type: application/json" -d '{"path": "/pfad/zur/datei.pdf"}'
+
+# Suchen
+curl -X POST http://<LAN-IP>:11434/rag/collections/meine-docs/search \
+  -H "Content-Type: application/json" -d '{"query": "...", "top_k": 5}'
+```
+
+Dieselben Operationen stehen auch als `rag_*`-MCP-Tools (für KI-Agenten) und über
+die Dashboard-Seite **`http://<LAN-IP>:11434/dashboard/rag`** zur Verfügung
+(Collections/Dokumente durchsuchen, hinzufügen, löschen, Such-Testbox).
+
+**Wichtig:** Das Embedding-Modell wird sowohl beim Ablegen als auch bei **jeder
+einzelnen Suche** neu aufgerufen (Suchanfrage muss in denselben Vektorraum
+eingebettet werden) - läuft dafür ganz normal im Hot Pool mit und bleibt bei
+`max_concurrent_models >= 2` neben Chat-Modellen warm.
 
 ## Von Ollama auf vLLM übernommene Modelle
 
@@ -251,17 +363,29 @@ Ollama wurde gestoppt und deaktiviert (`systemctl disable ollama`). Alle zuvor �
 Ollama genutzten Modelle wurden auf ihr HuggingFace-Äquivalent gemappt und in
 `config.json` registriert (Downloads liefen am 2026-08-22 an, Fortschritt s.o.):
 
-| Ollama-Modell | vLLM/HuggingFace-Äquivalent | Größe |
-|---|---|---|
-| `qwen3:8b` | `Qwen/Qwen3-8B` | 16.4 GB |
-| `nemotron-3-nano:4b` | `nvidia/NVIDIA-Nemotron-3-Nano-4B-FP8` | 5.3 GB |
-| `qwen3.8:27b` | `Qwen/Qwen3.8-27B-FP8` | 30.9 GB |
-| `qwen3-coder:30b-a3b-q4_K_M` + `qwen3-coder-256k:latest` | `Qwen/Qwen3-Coder-30B-A3B-Instruct-FP8` | 31.2 GB |
-| `qwen3.6:35b` | `Qwen/Qwen3.6-35B-A3B-FP8` | 37.5 GB |
-| `nemotron-3.5-lightning:latest` | `nvidia/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-NVFP4` | 21.6 GB |
-| `nemotron-cascade-2:latest` | `nvidia/Nemotron-Cascade-2-30B-A3B` | 63.2 GB (nur BF16 verfügbar) |
-| `qwen3-next:80b` | `nvidia/Qwen3-Next-80B-A3B-Instruct-NVFP4` | 50.8 GB |
-| `llama3.2:latest` | `meta-llama/Llama-3.2-3B-Instruct` | 6.4 GB | **gated – noch nicht heruntergeladen, siehe unten** |
+| Ollama-Modell | vLLM/HuggingFace-Äquivalent | Größe | max_model_len |
+|---|---|---|---|
+| `qwen3:8b` | `Qwen/Qwen3-8B` | 16.4 GB | 40960 (nativ) |
+| `nemotron-3-nano:4b` | `nvidia/NVIDIA-Nemotron-3-Nano-4B-FP8` | 5.3 GB | 262144 (nativ) |
+| `qwen3.8:27b` | `Qwen/Qwen3.8-27B-FP8` | 30.9 GB | 262144 (nativ) |
+| `qwen3-coder:30b-a3b-q4_K_M` + `qwen3-coder-256k:latest` | `Qwen/Qwen3-Coder-30B-A3B-Instruct-FP8` | 31.2 GB | 262144 (nativ) |
+| `qwen3.6:35b` | `Qwen/Qwen3.6-35B-A3B-FP8` | 37.5 GB | 262144 (nativ) |
+| `nemotron-3.5-lightning:latest` | `nvidia/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-NVFP4` | 21.6 GB | 1048576 (nativ, Hybrid-Mamba) |
+| `nemotron-cascade-2:latest` | `nvidia/Nemotron-Cascade-2-30B-A3B` | 63.2 GB (nur BF16 verfügbar) | 262144 (nativ) |
+| `qwen3-next:80b` | `nvidia/Qwen3-Next-80B-A3B-Instruct-NVFP4` | 50.8 GB | 262144 (nativ) |
+| `llama3.2:latest` | `meta-llama/Llama-3.2-3B-Instruct` | 6.4 GB | **gated – noch nicht heruntergeladen, siehe unten** | 131072 (nativ) |
+
+`max_model_len` ist jeweils auf den echten nativen Kontext des Modells gesetzt
+(aus `text_config.max_position_embeddings` im jeweiligen HF `config.json`, kein
+YaRN/Rope-Scaling nötig) - **nicht** künstlich auf 32768 gedeckelt wie in einer
+früheren Version dieser Anleitung. Live geprüft: `Qwen3.8-27B-FP8` (262144,
+1.66x KV-Cache-Concurrency-Headroom bei `gpu_memory_utilization: 0.5`) und
+`Nemotron-3.5-Lightning` (1048576, 12.18x Headroom dank Hybrid-Mamba-Architektur
+mit konstanter State-Größe statt klassischem Attention-KV-Cache) starten damit
+sauber. Die übrigen Werte in der Tabelle sind nach demselben Muster gesetzt,
+aber nicht einzeln live getestet - bei `gpu_memory_utilization`-bedingtem
+Start-Fehler (KV-Cache zu klein für `max_model_len`) den Wert in `config.json`
+für das jeweilige Modell senken oder `gpu_memory_utilization` erhöhen.
 
 **Wichtige Einschränkung:** Alle Tool-Call-Parser für die Nemotron-Modelle und
 `llama3_json` für Llama wurden **nicht live getestet** (nur `hermes` für

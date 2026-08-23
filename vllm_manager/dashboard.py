@@ -240,6 +240,12 @@ DASHBOARD_HTML = r"""<!doctype html>
     border-radius:8px; height:36px; padding:0 8px; font-size:13px; cursor:pointer; flex:0 0 auto;
   }
   #lang-select:hover { background:var(--panel-2); }
+  #rag-link, #config-link {
+    display:inline-flex; align-items:center; background:var(--panel); border:1px solid var(--border);
+    color:var(--text); text-decoration:none; border-radius:8px; height:36px; padding:0 12px;
+    font-size:13px; flex:0 0 auto; box-sizing:border-box;
+  }
+  #rag-link:hover, #config-link:hover { background:var(--panel-2); border-color: var(--accent); }
   .unload-btn {
     background:var(--panel-2); border:1px solid var(--border); color:var(--text);
     border-radius:6px; padding:4px 10px; font-size:12px; cursor:pointer;
@@ -269,7 +275,6 @@ DASHBOARD_HTML = r"""<!doctype html>
   .empty { color:var(--text-dim); font-size:13px; padding: 14px; text-align:center; background:var(--panel); border:1px solid var(--border); border-radius:10px; }
   .bar-bg { background:var(--panel-2); border-radius:6px; height:6px; overflow:hidden; margin-top:6px; }
   .bar-fg { background:var(--accent); height:100%; transition: width .3s; }
-  .active-req { border-left: 3px solid var(--accent); padding-left:10px; }
 
   .chart-grid { display:grid; grid-template-columns: repeat(auto-fit, minmax(280px,1fr)); gap:14px; }
   .chart-card canvas { width:100%; height:70px; display:block; margin-top:8px; }
@@ -326,6 +331,8 @@ DASHBOARD_HTML = r"""<!doctype html>
       <div class="sub"><span class="conn"><span class="dot" id="conn-dot"></span><span id="conn-text" data-i18n="nav.connecting">connecting…</span></span></div>
     </div>
     <div class="topbar-actions">
+      <a href="/dashboard/config" id="config-link" data-i18n="nav.configLink">⚙️ Config →</a>
+      <a href="/dashboard/rag" id="rag-link" data-i18n="nav.ragLink">RAG →</a>
       <select id="lang-select" data-i18n-title="lang.selectTitle" title="Language"></select>
       <button id="theme-toggle" data-i18n-title="theme.toggleTitle" title="Toggle theme">🌙</button>
     </div>
@@ -355,16 +362,6 @@ DASHBOARD_HTML = r"""<!doctype html>
   </div>
 
   <section>
-    <h2 data-i18n="section.loadedModels">Loaded Models</h2>
-    <div id="engines-box"></div>
-  </section>
-
-  <section>
-    <h2 data-i18n="section.activeRequest">Active Request</h2>
-    <div id="active-request-box"></div>
-  </section>
-
-  <section>
     <h2 data-i18n="section.systemUsage">System Usage</h2>
     <div class="chart-grid">
       <div class="card chart-card">
@@ -383,13 +380,23 @@ DASHBOARD_HTML = r"""<!doctype html>
   </section>
 
   <section>
-    <h2 data-i18n="section.modelHistory">Model History</h2>
-    <div id="history-box"></div>
+    <h2 data-i18n="section.loadedModels">Loaded Models</h2>
+    <div id="engines-box"></div>
+  </section>
+
+  <section>
+    <h2 data-i18n="section.activeRequest">Active Request</h2>
+    <div id="active-request-box"></div>
   </section>
 
   <section>
     <h2 data-i18n="section.recentRequests">Recent Requests</h2>
     <div id="recent-box"></div>
+  </section>
+
+  <section>
+    <h2 data-i18n="section.modelHistory">Model History</h2>
+    <div id="history-box"></div>
   </section>
 
   <section>
@@ -482,7 +489,10 @@ function fmtDuration(seconds) {
   return s > 0 ? `${m}m ${s}s` : `${m}m`;
 }
 function esc(s) { return (s ?? "").toString().replace(/[&<>]/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;"}[c])); }
-function shortModel(m) { return m ? m.split("/").pop() : "–"; }
+// Voller Modellname statt nur des letzten Pfad-Teils - zwei verschiedene
+// Modelle können denselben Kurznamen haben (z.B. lokal quantisierte Modelle
+// vs. HF-Repos mit demselben Dateinamen), das führt sonst zu Verwechslungen.
+function modelName(m) { return m || "–"; }
 function reasonLabel(r) {
   if (r === "ready") return t("reason.ready");
   if (r === "loading") return t("reason.loading");
@@ -492,8 +502,8 @@ function reasonLabel(r) {
   if (r === "timeout") return t("reason.timeout");
   if (r === "shutdown") return t("reason.shutdown");
   if (r === "restart") return t("reason.restart");
-  if (r && r.startsWith("replaced_by:")) return t("reason.replacedBy", { model: esc(shortModel(r.slice(13))) });
-  if (r && r.startsWith("evicted_for:")) return t("reason.evictedFor", { model: esc(shortModel(r.slice(12))) });
+  if (r && r.startsWith("replaced_by:")) return t("reason.replacedBy", { model: esc(modelName(r.slice(13))) });
+  if (r && r.startsWith("evicted_for:")) return t("reason.evictedFor", { model: esc(modelName(r.slice(12))) });
   return esc(r || "–");
 }
 function reasonBadgeClass(r) {
@@ -554,7 +564,7 @@ function render(data) {
 
   $("loaded-count").textContent = engs.length + " / " + (pool.slots_total ?? engs.length);
   $("loaded-list").textContent = engs.length
-    ? engs.map(e => shortModel(e.loaded_model)).join(", ")
+    ? engs.map(e => modelName(e.loaded_model)).join(", ")
     : t("card.loadedModels.none");
 
   if (engs.length === 0) {
@@ -572,7 +582,7 @@ function render(data) {
           ? t(e.state === "loading" ? "engine.loadingSince" : "engine.runningSince", { duration: fmtDuration(e.uptime_seconds) })
           : (e.last_error ? t("engine.error", { msg: esc(e.last_error.split("\n")[0]) }) : "–");
         return `<tr>
-          <td>${esc(shortModel(e.loaded_model))}</td>
+          <td>${esc(modelName(e.loaded_model))}</td>
           <td>${badge}</td>
           <td class="mono">${e.port ?? "–"}</td>
           <td class="mono">${since}</td>
@@ -617,14 +627,34 @@ function render(data) {
   if (active.length === 0) {
     $("active-request-box").innerHTML = `<div class="empty">${t("empty.noActiveRequest")}</div>`;
   } else {
-    $("active-request-box").innerHTML = active.map(r => {
-      const elapsed = (Date.now()/1000 - r.started_at);
-      const loadHint = r.queued_ms ? t("active.loadTime", { ms: fmtMs(r.queued_ms) }) : "";
-      return `<div class="card active-req">
-        <div class="value small">${esc(shortModel(r.model))} <span class="badge running">${t("badge.running")}</span></div>
-        <div class="hint">${t("active.since", { duration: fmtDuration(elapsed) })}${loadHint} · ${t("active.ttft", { ms: fmtMs(r.ttft_ms) })} · ${t("active.tokensStreamed", { n: r.tokens_streamed })}</div>
-      </div>`;
-    }).join("");
+    $("active-request-box").innerHTML = `<table><thead><tr>
+      <th>${t("th.model")}</th><th>${t("th.endpoint")}</th><th>${t("th.port")}</th><th>${t("th.status")}</th><th>${t("th.elapsed")}</th><th>${t("th.loadTime")}</th><th>${t("th.ttft")}</th><th>${t("th.tokens")}</th><th>${t("th.throughput")}</th>
+      </tr></thead><tbody>` + active.map(r => {
+        const elapsed = Date.now()/1000 - r.started_at;
+        const port = (engs.find(e => e.loaded_model === r.model) || {}).port;
+        // queued_ms wird erst gesetzt, sobald das Modell bereit ist (siehe
+        // telemetry.mark_ready) - bis dahin wartet die Anfrage auf einen
+        // Kaltstart/Modellwechsel, es wird also noch nichts generiert.
+        const loading = r.queued_ms === null || r.queued_ms === undefined;
+        const badge = loading
+          ? `<span class="badge loading">${t("badge.coldStart")}</span>`
+          : `<span class="badge running">${t("badge.running")}</span>`;
+        const genElapsedSec = loading ? null : Math.max(0, elapsed - r.queued_ms / 1000);
+        const throughput = (!loading && r.tokens_streamed > 0 && genElapsedSec > 0.05)
+          ? (r.tokens_streamed / genElapsedSec).toFixed(1) + " tok/s"
+          : "–";
+        return `<tr>
+          <td>${esc(modelName(r.model))}</td>
+          <td class="mono">${esc(r.path || "–")}${r.is_stream ? ` <span class="badge idle">${t("badge.stream")}</span>` : ""}</td>
+          <td class="mono">${port ?? "–"}</td>
+          <td>${badge}</td>
+          <td class="mono">${fmtDuration(elapsed)}</td>
+          <td class="mono">${r.queued_ms ? fmtMs(r.queued_ms) : "–"}</td>
+          <td class="mono">${fmtMs(r.ttft_ms)}</td>
+          <td class="mono">${r.tokens_streamed ?? 0}</td>
+          <td class="mono">${throughput}</td>
+        </tr>`;
+      }).join("") + `</tbody></table>`;
   }
 
   const hist = data.model_history || [];
@@ -640,7 +670,7 @@ function render(data) {
           : fmtDuration(h.duration_seconds);
         const errHint = h.error ? `<div class="hint" style="margin-top:4px;">${esc(h.error.split("\n")[0])}</div>` : "";
         return `<tr>
-        <td>${esc(shortModel(h.model))}</td>
+        <td>${esc(modelName(h.model))}</td>
         <td><span class="badge ${reasonBadgeClass(h.reason)}">${reasonLabel(h.reason)}</span>${errHint}</td>
         <td class="mono">${h.loaded_at ? new Date(h.loaded_at*1000).toLocaleTimeString(localeFor(currentLang)) : "–"}</td>
         <td class="mono">${ongoing ? "–" : new Date(h.unloaded_at*1000).toLocaleTimeString(localeFor(currentLang))}</td>
@@ -672,7 +702,7 @@ function render(data) {
       <th>${t("th.time")}</th><th>${t("th.model")}</th><th>${t("th.status")}</th><th>${t("th.loadTime")}</th><th>${t("th.duration")}</th><th>${t("th.ttft")}</th><th>${t("th.promptTokens")}</th><th>${t("th.complTokens")}</th>
       </tr></thead><tbody>` + recent.map(r => `<tr>
         <td class="mono">${new Date(r.started_at*1000).toLocaleTimeString(localeFor(currentLang))}</td>
-        <td>${esc(shortModel(r.model))}</td>
+        <td>${esc(modelName(r.model))}</td>
         <td><span class="badge ${r.status === 'ok' ? 'ok' : 'error'}">${r.status === 'ok' ? t("status.ok") : t("status.error")}</span></td>
         <td class="mono">${r.queued_ms ? fmtMs(r.queued_ms) : "–"}</td>
         <td class="mono">${fmtMs(r.duration_ms)}</td>
@@ -689,7 +719,7 @@ function render(data) {
   } else {
     $("models-catalog-box").innerHTML = catalog.map((m, i) => `
       <div class="model-item" data-idx="${i}">
-        <div class="name">${esc(shortModel(m.model))}</div>
+        <div class="name">${esc(modelName(m.model))}</div>
         <div class="badges">
           ${m.loaded ? `<span class="badge running">${t("badge.loaded")}</span>` : ""}
           <span class="badge ${m.cached ? 'ok' : 'idle'}">${m.cached ? t("badge.cached") : t("badge.notCached")}</span>
@@ -705,7 +735,7 @@ function render(data) {
 
 // --- Modell manuell entladen (Dashboard-Button) --------------------------
 async function unloadModel(model, btn) {
-  if (!confirm(t("confirm.unload", { model: shortModel(model) }))) return;
+  if (!confirm(t("confirm.unload", { model: modelName(model) }))) return;
   const original = btn.textContent;
   btn.disabled = true;
   btn.textContent = t("action.unloading");
@@ -756,7 +786,7 @@ function openModal(m) {
   const outputBudget = Math.max(512, Math.min(4096, Math.floor(m.max_model_len / 4)));
   const entry = {
     id: m.model,
-    name: shortModel(m.model),
+    name: modelName(m.model),
     url: url,
     toolCalling: !!m.tool_calling,
     vision: !!m.vision,
@@ -775,12 +805,42 @@ $("model-modal-overlay").addEventListener("click", (e) => {
   if (e.target.id === "model-modal-overlay") closeModal();
 });
 document.addEventListener("keydown", (e) => { if (e.key === "Escape") closeModal(); });
+// navigator.clipboard gibt es nur in "sicheren Kontexten" (HTTPS oder
+// localhost) - dieses Dashboard läuft absichtlich über eine reine
+// HTTP-LAN-IP (siehe Sicherheit in Anleitung.md), da ist die Clipboard-API
+// im Browser gar nicht vorhanden. Fallback über eine unsichtbare Textarea +
+// execCommand("copy"), die auch über HTTP funktioniert.
+function copyText(text) {
+  if (navigator.clipboard && window.isSecureContext) {
+    return navigator.clipboard.writeText(text);
+  }
+  return new Promise((resolve, reject) => {
+    const ta = document.createElement("textarea");
+    ta.value = text;
+    ta.style.position = "fixed";
+    ta.style.top = "-1000px";
+    ta.style.opacity = "0";
+    document.body.appendChild(ta);
+    ta.focus();
+    ta.select();
+    try {
+      const ok = document.execCommand("copy");
+      document.body.removeChild(ta);
+      ok ? resolve() : reject(new Error("execCommand('copy') fehlgeschlagen"));
+    } catch (e) {
+      document.body.removeChild(ta);
+      reject(e);
+    }
+  });
+}
 $("modal-copy-btn").addEventListener("click", () => {
-  navigator.clipboard.writeText($("modal-json").textContent).then(() => {
+  copyText($("modal-json").textContent).then(() => {
     const btn = $("modal-copy-btn");
     const old = btn.textContent;
     btn.textContent = t("modal.copied");
     setTimeout(() => { btn.textContent = old; }, 1500);
+  }).catch((e) => {
+    alert(t("error.generic", { msg: e.message }));
   });
 });
 

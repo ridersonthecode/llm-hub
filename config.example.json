@@ -21,7 +21,7 @@
   "models": {
     "NousResearch/Hermes-3-Llama-3.1-8B": {
       "tool_call_parser": "hermes",
-      "max_model_len": 65536,
+      "max_model_len": 131072,
       "gpu_memory_utilization": 0.5,
       "enable_auto_tool_choice": true,
       "enabled": true,
@@ -37,15 +37,16 @@
     },
     "Qwen/Qwen3-8B": {
       "tool_call_parser": "qwen3_xml",
-      "max_model_len": 32768,
+      "reasoning_parser": "qwen3",
+      "max_model_len": 40960,
       "gpu_memory_utilization": 0.35,
       "enable_auto_tool_choice": true,
       "enabled": true,
-      "notes": "Ersetzt Ollama-Modell qwen3:8b."
+      "notes": "Ersetzt Ollama-Modell qwen3:8b. reasoning_parser trennt <think>...</think> in ein eigenes 'reasoning_content'-Feld (OpenAI/DeepSeek-R1-Format), statt es als normalen Text in die Antwort zu mischen - Clients mit Reasoning-Unterstützung (VS Code, Open WebUI, ...) blenden es dann einklappbar aus."
     },
     "nvidia/NVIDIA-Nemotron-3-Nano-4B-FP8": {
       "tool_call_parser": "hermes",
-      "max_model_len": 32768,
+      "max_model_len": 262144,
       "gpu_memory_utilization": 0.3,
       "enable_auto_tool_choice": true,
       "enabled": true,
@@ -53,7 +54,8 @@
     },
     "Qwen/Qwen3.8-27B-FP8": {
       "tool_call_parser": "qwen3_xml",
-      "max_model_len": 32768,
+      "reasoning_parser": "qwen3",
+      "max_model_len": 262144,
       "gpu_memory_utilization": 0.5,
       "enable_auto_tool_choice": true,
       "vision": true,
@@ -62,7 +64,7 @@
     },
     "Qwen/Qwen3-Coder-30B-A3B-Instruct-FP8": {
       "tool_call_parser": "qwen3_coder",
-      "max_model_len": 32768,
+      "max_model_len": 262144,
       "gpu_memory_utilization": 0.5,
       "enable_auto_tool_choice": true,
       "enabled": true,
@@ -70,7 +72,8 @@
     },
     "Qwen/Qwen3.6-35B-A3B-FP8": {
       "tool_call_parser": "qwen3_xml",
-      "max_model_len": 32768,
+      "reasoning_parser": "qwen3",
+      "max_model_len": 262144,
       "gpu_memory_utilization": 0.55,
       "enable_auto_tool_choice": true,
       "vision": true,
@@ -79,7 +82,7 @@
     },
     "nvidia/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-NVFP4": {
       "tool_call_parser": "hermes",
-      "max_model_len": 32768,
+      "max_model_len": 1048576,
       "gpu_memory_utilization": 0.5,
       "enable_auto_tool_choice": true,
       "enabled": true,
@@ -87,7 +90,7 @@
     },
     "nvidia/Nemotron-Cascade-2-30B-A3B": {
       "tool_call_parser": "hermes",
-      "max_model_len": 32768,
+      "max_model_len": 262144,
       "gpu_memory_utilization": 0.65,
       "enable_auto_tool_choice": true,
       "enabled": true,
@@ -95,7 +98,7 @@
     },
     "nvidia/Qwen3-Next-80B-A3B-Instruct-NVFP4": {
       "tool_call_parser": "qwen3_xml",
-      "max_model_len": 32768,
+      "max_model_len": 262144,
       "gpu_memory_utilization": 0.7,
       "enable_auto_tool_choice": true,
       "enabled": true,
@@ -103,12 +106,28 @@
     },
     "meta-llama/Llama-3.2-3B-Instruct": {
       "tool_call_parser": "llama3_json",
-      "max_model_len": 32768,
+      "max_model_len": 131072,
       "gpu_memory_utilization": 0.3,
       "enable_auto_tool_choice": true,
       "enabled": false,
       "hf_token": null,
       "notes": "Ersetzt Ollama-Modell llama3.2:latest. Gated Modell: erst auf huggingface.co/meta-llama/Llama-3.2-3B-Instruct eingeloggt die Lizenz akzeptieren, dann hf_token setzen und enabled:true."
+    },
+    "Qwen/Qwen3-Embedding-0.6B": {
+      "task": "embed",
+      "max_model_len": 8192,
+      "gpu_memory_utilization": 0.1,
+      "enabled": true,
+      "notes": "Embedding-Modell für RAG. Läuft mit --runner pooling statt generate, wird über /v1/embeddings angesprochen (nicht /v1/chat/completions)."
     }
+  },
+  "rag": {
+    "enabled": false,
+    "qdrant_host": "127.0.0.1",
+    "qdrant_port": 6333,
+    "embedding_model": "Qwen/Qwen3-Embedding-0.6B",
+    "default_collection": "default",
+    "chunk_size_chars": 1500,
+    "chunk_overlap_chars": 200
   }
 }

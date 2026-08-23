@@ -12,13 +12,17 @@ import httpx
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import StreamingResponse
 
-from . import downloader, process_manager, telemetry
-from .auth import require_api_key
+from pydantic import ValidationError
+
+from . import config_editor, downloader, process_manager, rag, telemetry
+from .auth import ApiKeyMiddleware
 from .catalog import list_cached_models
-from .config import get_config, load_config
+from .config import get_config
+from .config_dashboard import router as config_dashboard_router
 from .dashboard import router as dashboard_router
 from .mcp_tools import mcp
 from .ollama_compat import router as ollama_router
+from .rag_dashboard import router as rag_dashboard_router
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 logger = logging.getLogger("vllm_manager")
@@ -41,7 +45,7 @@ async def _idle_watchdog() -> None:
 
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
-    load_config()
+    config_editor.load_config_with_fallback()
     watchdog = asyncio.create_task(_idle_watchdog())
     async with mcp.session_manager.run():
         yield
@@ -53,14 +57,11 @@ app = FastAPI(title="vLLM Manager", lifespan=lifespan)
 app.mount("/mcp", mcp.streamable_http_app())
 app.include_router(dashboard_router)
 app.include_router(ollama_router)
-
-
-@app.middleware("http")
-async def api_key_middleware(request: Request, call_next):
-    err = require_api_key(request)
-    if err is not None:
-        return err
-    return await call_next(request)
+app.include_router(rag_dashboard_router)
+app.include_router(config_dashboard_router)
+# Reine ASGI-Middleware statt @app.middleware("http") - siehe auth.py
+# Docstring: BaseHTTPMiddleware bricht Streaming-Responses (stream: true).
+app.add_middleware(ApiKeyMiddleware)
 
 
 @app.get("/health")
@@ -131,6 +132,138 @@ async def unload_model_endpoint(model: str):
     return {"status": "not_loaded", "currently_loaded": process_manager.loaded_models()}
 
 
+# --- RAG (Retrieval-Augmented Generation) ---------------------------------
+# Backend für die Dashboard-Seite /dashboard/rag. Dieselbe Logik ist auch über
+# die rag_*-MCP-Tools nutzbar (siehe mcp_tools.py) - beide rufen rag.py auf.
+
+
+@app.get("/rag/collections")
+async def rag_list_collections_endpoint():
+    try:
+        return {"collections": await rag.list_collections()}
+    except rag.RagNotConfigured as e:
+        raise HTTPException(400, str(e))
+
+
+@app.get("/rag/collections/{collection}/documents")
+async def rag_list_documents_endpoint(collection: str):
+    try:
+        return {"collection": collection, "documents": await rag.list_documents(collection)}
+    except rag.RagNotConfigured as e:
+        raise HTTPException(400, str(e))
+
+
+@app.post("/rag/collections/{collection}/text")
+async def rag_add_text_endpoint(collection: str, body: dict):
+    text = body.get("text")
+    if not text:
+        raise HTTPException(400, "'text' fehlt im Request-Body.")
+    try:
+        return await rag.add_text(collection, text, source=body.get("source", "text"))
+    except rag.RagNotConfigured as e:
+        raise HTTPException(400, str(e))
+
+
+@app.post("/rag/collections/{collection}/file")
+async def rag_add_file_endpoint(collection: str, body: dict):
+    path = body.get("path")
+    if not path:
+        raise HTTPException(400, "'path' fehlt im Request-Body.")
+    try:
+        return await rag.add_file(collection, path)
+    except rag.RagNotConfigured as e:
+        raise HTTPException(400, str(e))
+    except FileNotFoundError as e:
+        raise HTTPException(404, str(e))
+
+
+@app.post("/rag/collections/{collection}/search")
+async def rag_search_endpoint(collection: str, body: dict):
+    query = body.get("query")
+    if not query:
+        raise HTTPException(400, "'query' fehlt im Request-Body.")
+    try:
+        results = await rag.search(collection, query, int(body.get("top_k", 5)))
+    except rag.RagNotConfigured as e:
+        raise HTTPException(400, str(e))
+    return {"collection": collection, "results": results}
+
+
+@app.delete("/rag/collections/{collection}/documents/{document_id}")
+async def rag_delete_document_endpoint(collection: str, document_id: str):
+    try:
+        return await rag.delete_document(collection, document_id)
+    except rag.RagNotConfigured as e:
+        raise HTTPException(400, str(e))
+
+
+@app.delete("/rag/collections/{collection}")
+async def rag_delete_collection_endpoint(collection: str):
+    try:
+        return await rag.delete_collection(collection)
+    except rag.RagNotConfigured as e:
+        raise HTTPException(400, str(e))
+
+
+# --- Config-Editor (/dashboard/config) -------------------------------------
+# Backend für die Config-Editor-Seite: liest/schreibt config.json über
+# config_editor.py (Validierung + automatisches Backup + Live-Übernahme ohne
+# Neustart für alles außer host/port, siehe dortige Docstrings).
+
+# Felder, die nur beim Neustart des Manager-Prozesses selbst greifen (der
+# Bind-Socket von uvicorn) - alles andere liest jeder Request/jeder neue
+# Engine-Start ohnehin frisch über get_config(), ein Restart ist dafür nicht
+# nötig.
+RESTART_REQUIRED_FIELDS = {"host", "port"}
+
+
+@app.get("/config")
+async def get_config_endpoint():
+    return {
+        "config": get_config().model_dump(),
+        "startup_warning": config_editor.startup_warning,
+    }
+
+
+@app.post("/config")
+async def save_config_endpoint(body: dict):
+    old_dump = get_config().model_dump()
+    try:
+        new_cfg, backup_name = config_editor.save_config(body)
+    except ValidationError as e:
+        raise HTTPException(422, json.loads(e.json()))
+    new_dump = new_cfg.model_dump()
+    restart_recommended = any(old_dump.get(f) != new_dump.get(f) for f in RESTART_REQUIRED_FIELDS)
+    return {"ok": True, "backup": backup_name, "restart_recommended": restart_recommended}
+
+
+@app.get("/config/backups")
+async def list_config_backups_endpoint():
+    return {"backups": config_editor.list_backups()}
+
+
+@app.post("/config/restore")
+async def restore_config_backup_endpoint(body: dict):
+    filename = body.get("filename")
+    if not filename:
+        raise HTTPException(400, "'filename' fehlt im Request-Body.")
+    try:
+        new_cfg, backup_name = config_editor.restore_backup(filename)
+    except FileNotFoundError:
+        raise HTTPException(404, f"Backup '{filename}' nicht gefunden.")
+    except ValidationError as e:
+        raise HTTPException(422, json.loads(e.json()))
+    return {"ok": True, "backup": backup_name, "config": new_cfg.model_dump()}
+
+
+@app.post("/config/restart")
+async def restart_service_endpoint():
+    ok, message = config_editor.restart_service()
+    if not ok:
+        raise HTTPException(500, message)
+    return {"ok": True, "message": message}
+
+
 # --- OpenAI-kompatibler Proxy mit Auto-Load -------------------------------
 
 HOP_BY_HOP = {"host", "authorization", "content-length", "connection"}
@@ -162,7 +295,7 @@ async def proxy_v1(path: str, request: Request):
     if not model:
         raise HTTPException(400, "Kein 'model' im Request-Body und kein default_model in config.json konfiguriert.")
 
-    rid = telemetry.start_request(model, path)
+    rid = telemetry.start_request(model, path, is_stream)
 
     cached = set(list_cached_models(cfg.hf_home))
     if model not in cfg.models and model not in cached:

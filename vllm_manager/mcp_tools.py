@@ -7,7 +7,7 @@ from typing import Optional
 from mcp.server.fastmcp import FastMCP
 from mcp.server.transport_security import TransportSecuritySettings
 
-from . import downloader, process_manager
+from . import downloader, process_manager, rag
 from .catalog import list_cached_models
 from .config import get_config
 
@@ -95,3 +95,68 @@ async def unload_model(model: Optional[str] = None) -> dict:
     einem Hot Pool mit mehreren gleichzeitig laufenden Modellen)."""
     await process_manager.stop_engine(model)
     return {"status": "unloaded", "model": model or "all"}
+
+
+# --- RAG (Retrieval-Augmented Generation) ---------------------------------
+# Muss in config.json unter "rag" aktiviert sein (embedding_model gesetzt),
+# sonst werfen diese Tools einen Fehler mit Hinweis, was zu konfigurieren ist.
+
+@mcp.tool()
+async def rag_add_text(text: str, collection: Optional[str] = None, source: str = "text") -> dict:
+    """Fügt einen Text der RAG-Wissensdatenbank hinzu (wird automatisch in
+    Chunks zerlegt und eingebettet). `collection` gruppiert zusammengehörige
+    Dokumente (z.B. pro Projekt) - ohne Angabe wird die Default-Collection aus
+    config.json verwendet. Gibt document_id und Anzahl erzeugter Chunks zurück."""
+    cfg = get_config()
+    col = collection or cfg.rag.default_collection
+    return await rag.add_text(col, text, source=source)
+
+
+@mcp.tool()
+async def rag_add_file(path: str, collection: Optional[str] = None) -> dict:
+    """Fügt eine Datei (PDF oder Text/Markdown) der RAG-Wissensdatenbank hinzu.
+    WICHTIG: `path` muss auf dem Server laufen, auf dem der vLLM-Manager läuft
+    (nicht auf deinem eigenen Rechner) - für Dateien von woanders stattdessen
+    den Inhalt lesen und rag_add_text() verwenden."""
+    cfg = get_config()
+    col = collection or cfg.rag.default_collection
+    return await rag.add_file(col, path)
+
+
+@mcp.tool()
+async def rag_search(query: str, collection: Optional[str] = None, top_k: int = 5) -> dict:
+    """Sucht die relevantesten Text-Ausschnitte zu einer Anfrage in der RAG-
+    Wissensdatenbank (semantische Ähnlichkeitssuche, kein reiner Stichwort-
+    Abgleich). Ergebnis absteigend nach Relevanz sortiert."""
+    cfg = get_config()
+    col = collection or cfg.rag.default_collection
+    return {"collection": col, "results": await rag.search(col, query, top_k)}
+
+
+@mcp.tool()
+async def rag_list_collections() -> dict:
+    """Listet alle RAG-Collections mit Anzahl gespeicherter Chunks."""
+    return {"collections": await rag.list_collections()}
+
+
+@mcp.tool()
+async def rag_list_documents(collection: Optional[str] = None) -> dict:
+    """Listet alle Dokumente (gruppiert aus den einzelnen Chunks) einer
+    Collection, neueste zuerst."""
+    cfg = get_config()
+    col = collection or cfg.rag.default_collection
+    return {"collection": col, "documents": await rag.list_documents(col)}
+
+
+@mcp.tool()
+async def rag_delete_document(document_id: str, collection: Optional[str] = None) -> dict:
+    """Löscht ein Dokument (alle seine Chunks) aus einer Collection."""
+    cfg = get_config()
+    col = collection or cfg.rag.default_collection
+    return await rag.delete_document(col, document_id)
+
+
+@mcp.tool()
+async def rag_delete_collection(collection: str) -> dict:
+    """Löscht eine komplette RAG-Collection inkl. aller enthaltenen Dokumente."""
+    return await rag.delete_collection(collection)

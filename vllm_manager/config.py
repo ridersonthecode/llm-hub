@@ -20,14 +20,38 @@ class ApiKeyConfig(BaseModel):
 
 class ModelConfig(BaseModel):
     tool_call_parser: Optional[str] = None
+    # Trennt vLLMs Antwort in "reasoning_content" (Denkprozess) und "content"
+    # (eigentliche Antwort), analog zu DeepSeek-R1s API. Ohne das landet bei
+    # Thinking-Modellen (z.B. Qwen3) der komplette <think>...</think>-Block
+    # als normaler Text im Chat, statt in der einklappbaren Reasoning-Box.
+    # Gültige Werte: vllm serve --help=all | grep -A2 reasoning-parser, z.B.
+    # "qwen3", "deepseek_r1", "granite", "mistral", ...
+    reasoning_parser: Optional[str] = None
     max_model_len: Optional[int] = None
     gpu_memory_utilization: Optional[float] = None
     enable_auto_tool_choice: bool = False
     vision: bool = False
+    # "generate" (normales Chat-/Completion-Modell) oder "embed"
+    # (Embedding-Modell für RAG, z.B. Qwen3-Embedding). Steuert, ob vllm serve
+    # mit --runner pooling gestartet wird (vLLMs Nachfolger von --task).
+    task: str = "generate"
     extra_args: list[str] = Field(default_factory=list)
     hf_token: Optional[str] = None
     notes: Optional[str] = None
     enabled: bool = True
+
+
+class RagConfig(BaseModel):
+    """Konfiguration für die optionale RAG-Erweiterung (Qdrant + Embedding-Modell)."""
+
+    enabled: bool = False
+    qdrant_host: str = "127.0.0.1"
+    qdrant_port: int = 6333
+    # Muss ein in "models" registriertes Modell mit task:"embed" sein.
+    embedding_model: Optional[str] = None
+    default_collection: str = "default"
+    chunk_size_chars: int = 1500
+    chunk_overlap_chars: int = 200
 
 
 class Config(BaseModel):
@@ -55,6 +79,7 @@ class Config(BaseModel):
     startup_timeout_seconds: int = 900
     default_serve_args: dict = Field(default_factory=dict)
     models: dict[str, ModelConfig] = Field(default_factory=dict)
+    rag: RagConfig = Field(default_factory=RagConfig)
 
     def resolved_vllm_bin(self) -> str:
         if self.vllm_bin:
@@ -81,6 +106,16 @@ def load_config(path: Path = CONFIG_PATH) -> Config:
     with open(path, encoding="utf-8") as f:
         data = json.load(f)
     _config = Config(**data)
+    return _config
+
+
+def set_config(cfg: Config) -> Config:
+    """Übernimmt eine bereits validierte Config direkt ins Live-Objekt, ohne
+    erneut von der Platte zu lesen (genutzt vom Config-Editor nach dem
+    Schreiben, siehe config_editor.py - vermeidet ein unnötiges zweites
+    Parsen/Validieren derselben Daten)."""
+    global _config
+    _config = cfg
     return _config
 
 

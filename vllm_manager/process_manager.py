@@ -115,10 +115,15 @@ def _build_command(cfg: Config, model: str, port: int) -> list[str]:
         "--max-model-len", str(mml),
     ]
     if mcfg:
+        if mcfg.task == "embed":
+            # vLLM >=0.26 hat das alte "--task" durch "--runner" ersetzt.
+            cmd += ["--runner", "pooling"]
         if mcfg.enable_auto_tool_choice:
             cmd.append("--enable-auto-tool-choice")
         if mcfg.tool_call_parser:
             cmd += ["--tool-call-parser", mcfg.tool_call_parser]
+        if mcfg.reasoning_parser:
+            cmd += ["--reasoning-parser", mcfg.reasoning_parser]
         cmd += list(mcfg.extra_args or [])
     return cmd
 

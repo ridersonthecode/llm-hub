@@ -25,11 +25,22 @@ Dashboard, MCP): siehe [Anleitung.md](Anleitung.md).
   `GET /models/pull/{job_id}` (Bytes, Prozent, Geschwindigkeit, ETA)
 - **MCP-Server** unter `/mcp` (Streamable HTTP) - Modelle per KI-Agent auflisten,
   herunterladen, laden/entladen
+- **RAG** (optional): eigene Texte/Dokumente (PDF/TXT/MD) in Qdrant ablegen und
+  per semantischer Suche wiederfinden - über `rag_*`-MCP-Tools, `/rag/*`-REST-API
+  oder die Dashboard-Seite `/dashboard/rag`. Embedding-Modell läuft im Hot Pool
+  wie jedes andere Modell.
 - **Live-Dashboard** unter `/dashboard` (WebSocket, kein Polling): geladene
   Modelle inkl. Kaltstart-/Bereit-Status mit manuellem Entladen-Button, Modell-
-  Verlauf, aktive Anfrage mit TTFT/Tokenverbrauch, GPU-/RAM-Live-Charts, Downloads,
-  Modell-Katalog mit HF-Link + VS-Code-JSON-Snippet – zweisprachig (Englisch
-  Standard, Deutsch wählbar, siehe [`vllm_manager/languages/`](vllm_manager/languages/))
+  Verlauf, aktive Anfragen mit Endpoint/Port/TTFT/Live-Durchsatz je laufender
+  Anfrage, GPU-/RAM-Live-Charts, Downloads, Modell-Katalog mit HF-Link +
+  VS-Code-JSON-Snippet – zweisprachig (Englisch Standard, Deutsch wählbar,
+  siehe [`vllm_manager/languages/`](vllm_manager/languages/))
+- **Config-Editor** unter `/dashboard/config`: `config.json` per Formular
+  bearbeiten (Inputs/Dropdowns/Checkboxen, inkl. Modell-Liste) statt roher
+  JSON-Datei - mit serverseitiger Validierung, automatischem Backup vor jedem
+  Speichern, Live-Übernahme ohne Neustart (bis auf `host`/`port`) oder
+  optionalem vollem Dienst-Neustart, und Fallback auf die letzte funktionierende
+  Config, falls `config.json` beim Start mal nicht lädt
 - **Optionaler API-Key** (standardmäßig deaktiviert), zentrale `config.json`
   (kein `sudo` zum Ändern nötig)
 
@@ -38,13 +49,16 @@ Dashboard, MCP): siehe [Anleitung.md](Anleitung.md).
 ```bash
 python3 -m venv .venv
 source .venv/bin/activate
-pip install vllm fastapi "uvicorn[standard]" httpx huggingface_hub "mcp[cli]"
+pip install vllm fastapi "uvicorn[standard]" httpx huggingface_hub "mcp[cli]" qdrant-client pypdf
 
 cp config.example.json config.json
 # config.json anpassen: hf_home-Pfad, ggf. Modelle/Parameter
 
 python -m vllm_manager
 ```
+
+Für RAG zusätzlich Qdrant starten (Docker) und in `config.json` unter `"rag"` aktivieren
+– siehe [Anleitung.md](Anleitung.md#rag-retrieval-augmented-generation).
 
 Für dauerhaften Betrieb: [vllm.service](vllm.service) nach
 `/etc/systemd/system/vllm.service` kopieren (Pfade/User anpassen), dann:

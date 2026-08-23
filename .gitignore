@@ -7,9 +7,22 @@ __pycache__/
 models/
 logs/
 
+# Selbst quantisierte Modellgewichte (mehrere zig GB, siehe
+# docs/anleitung-eigene-awq-quantisierung.md zum Nachbauen statt Committen)
+models-quantized/
+
+# Eigenes venv zum Quantisieren - nur das Skript selbst tracken, nicht die
+# venv-Inhalte (Interpreter/Packages, maschinenspezifisch, mehrere GB)
+.venv-quantize/*
+!.venv-quantize/quantize_qwen38.py
+
 # Lokale, ggf. sensible Konfiguration (API-Key, HF-Token, absolute Pfade).
 # Vorlage siehe config.example.json.
 config.json
+
+# Automatische Backups des Config-Editors (vllm_manager/config_editor.py) -
+# enthalten dieselben sensiblen Daten wie config.json.
+config_backups/
 
 # Claude Code lokale Projekt-Settings (Permissions dieser Maschine)
 .claude/settings.local.json

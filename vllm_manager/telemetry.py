@@ -39,7 +39,7 @@ def _publish(event: dict) -> None:
             pass  # Dashboard bekommt beim nächsten Heartbeat ohnehin einen frischen Snapshot
 
 
-def start_request(model: str, path: str) -> str:
+def start_request(model: str, path: str, is_stream: bool = False) -> str:
     global last_request_at, _request_counter
     _request_counter += 1
     rid = f"{int(time.time() * 1000)}-{_request_counter}"
@@ -48,6 +48,7 @@ def start_request(model: str, path: str) -> str:
         "id": rid,
         "model": model,
         "path": path,
+        "is_stream": is_stream,
         "started_at": last_request_at,
         "ready_at": None,  # gesetzt sobald das Modell geladen ist und die Anfrage weitergereicht wird
         "queued_ms": None,  # Wartezeit auf Modell-Autostart/-Wechsel, falls nötig
