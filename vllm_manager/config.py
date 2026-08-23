@@ -69,6 +69,23 @@ class ModelConfig(BaseModel):
     # rag.embedding_model voraus (siehe RagConfig unten), sonst wird still
     # übersprungen.
     rag_collection: Optional[str] = None
+    # Vorbeugung gegen Wiederholungsschleifen im Denkprozess/Antwort (siehe
+    # main.py: _apply_default_repetition_penalty). vLLM-eigener Sampling-
+    # Parameter (kein OpenAI-Standardfeld, aber von vLLMs Server direkt
+    # unterstützt) - Werte >1.0 bestrafen bereits erzeugte Tokens, senken also
+    # die Wahrscheinlichkeit exakter Wiederholungen. Greift NUR, wenn der
+    # Request selbst kein repetition_penalty mitschickt. None = kein
+    # server-seitiger Default (wie bisher, reines vLLM-/Client-Verhalten).
+    # Sinnvoller Startwert bei anfälligen Modellen: 1.1-1.3.
+    repetition_penalty: Optional[float] = None
+    # Sicherheitsnetz gegen Wiederholungsschleifen: liest den Antwort-Stream
+    # live mit (main.py gen()) und bricht die Anfrage ab, sobald derselbe
+    # Text-Abschnitt mehrfach hintereinander exakt wiederkehrt - typisches
+    # Symptom kleinerer Reasoning-Modelle, die im Denkprozess (<think>...)
+    # hängen bleiben. Nur für gestreamte Anfragen wirksam (siehe main.py-
+    # Docstring). Default an; pro Modell abschaltbar, falls es zu
+    # Fehlalarmen bei absichtlich repetitiven Antworten kommt.
+    repetition_detection: bool = True
 
 
 class RagConfig(BaseModel):

@@ -668,6 +668,15 @@ function reasonBadgeClass(r) {
 }
 function jobStateLabel(s) { return (TRANSLATIONS[currentLang] || {})["job." + s] !== undefined || (TRANSLATIONS[DEFAULT_LANG] || {})["job." + s] !== undefined ? t("job." + s) : esc(s); }
 
+// Status einer abgeschlossenen Anfrage (Letzte Anfragen) - "aborted_loop"
+// (siehe main.py _has_repetition_loop) bekommt eine eigene, erkennbare
+// Markierung statt generisch als "Fehler" durchzugehen.
+function statusCell(r) {
+  if (r.status === "ok") return `<span class="badge ok">${t("status.ok")}</span>`;
+  if (r.status === "aborted_loop") return `<span class="badge error" title="${esc(t("status.abortedLoopHint"))}">${t("status.abortedLoop")}</span>`;
+  return `<span class="badge error">${t("status.error")}</span>`;
+}
+
 // Phasen einer aktiven Anfrage (siehe telemetry.py _set_phase): was die
 // Engine gerade tut, für die Active-Requests-Tabelle im Dashboard.
 const PHASE_META = {
@@ -890,7 +899,7 @@ function render(data) {
         <td>${esc(modelName(r.model))}</td>
         <td class="mono">${appCell(r.user_agent)}</td>
         <td>${ragCell(r)}</td>
-        <td><span class="badge ${r.status === 'ok' ? 'ok' : 'error'}">${r.status === 'ok' ? t("status.ok") : t("status.error")}</span></td>
+        <td>${statusCell(r)}</td>
         <td class="mono">${r.queued_ms ? fmtMs(r.queued_ms) : "–"}</td>
         <td class="mono">${fmtMs(r.duration_ms)}</td>
         <td class="mono">${fmtMs(r.ttft_ms)}</td>

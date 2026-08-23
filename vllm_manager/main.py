@@ -451,6 +451,94 @@ def _apply_default_max_tokens(cfg, model: str, path: str, parsed_body, body: byt
     return json.dumps(parsed_body).encode("utf-8")
 
 
+def _apply_default_repetition_penalty(cfg, model: str, path: str, parsed_body, body: bytes) -> bytes:
+    """Injiziert models.<model>.repetition_penalty (siehe config.py) in den
+    Request-Body, falls konfiguriert UND der Client selbst kein
+    repetition_penalty mitschickt - ein expliziter Client-Wunsch wird nie
+    überschrieben. Vorbeugung gegen Wiederholungsschleifen (kleinere
+    Reasoning-Modelle wie Nemotron-3-Nano neigen dazu, siehe ModelConfig.
+    repetition_penalty-Docstring)."""
+    if parsed_body is None or path not in _MAX_TOKENS_PATHS:
+        return body
+    mcfg = cfg.models.get(model)
+    if mcfg is None or mcfg.repetition_penalty is None:
+        return body
+    if "repetition_penalty" in parsed_body:
+        return body
+    parsed_body["repetition_penalty"] = mcfg.repetition_penalty
+    return json.dumps(parsed_body).encode("utf-8")
+
+
+# Sicherheitsnetz gegen Wiederholungsschleifen (siehe ModelConfig.
+# repetition_detection-Docstring): prüft, ob das Ende des bisher gestreamten
+# Texts aus demselben Abschnitt mehrfach hintereinander EXAKT besteht - das
+# typische Muster, wenn ein (meist kleineres) Reasoning-Modell im
+# Denkprozess hängen bleibt und denselben Satz/Satzteil endlos wiederholt.
+#
+# Wichtig: die Länge des sich wiederholenden Abschnitts (die "Periode") ist
+# vorher nicht bekannt - ein Modell könnte einen 3-Zeichen-Tick genauso wie
+# einen ganzen 200-Zeichen-Satz wiederholen. Ein naiver Ansatz mit fest
+# gewählten Fenstergrößen verpasst praktisch jede Periode, die kein Vielfaches
+# der gewählten Fenstergröße ist - deshalb wird hier JEDE Periodenlänge in
+# einem plausiblen Bereich einzeln geprüft (billig genug: pro Aufruf nur
+# einige hundert schnelle C-seitige String-Vergleiche über höchstens
+# _REPETITION_LOOKBACK Zeichen). Kürzere Perioden verlangen mehr exakte
+# Wiederholungen, bevor sie als Schleife gelten - ein zufälliges
+# Zusammentreffen bei "und und" (Periode ~4) ist normal, bei einem ganzen
+# wiederholten Satz (Periode >80) dagegen praktisch ausgeschlossen.
+_REPETITION_LOOKBACK = 2000
+_REPETITION_MIN_PERIOD = 3
+_REPETITION_MAX_PERIOD = 400
+
+
+def _min_repeats_for_period(period: int) -> int:
+    if period < 10:
+        return 8
+    if period < 30:
+        return 6
+    if period < 80:
+        return 4
+    return 3
+
+
+def _has_repetition_loop(text: str) -> bool:
+    tail = text[-_REPETITION_LOOKBACK:]
+    n = len(tail)
+    for period in range(_REPETITION_MIN_PERIOD, _REPETITION_MAX_PERIOD + 1):
+        min_repeats = _min_repeats_for_period(period)
+        needed = period * min_repeats
+        if n < needed:
+            # NICHT einfach abbrechen: min_repeats_for_period() ist eine
+            # Treppenfunktion, "needed" also nicht streng monoton in period
+            # (z.B. period=9→8 Wiederholungen=72 Zeichen, period=10→6
+            # Wiederholungen=60 Zeichen - kleiner trotz größerer Periode).
+            continue
+        segment = tail[-needed:]
+        pattern = segment[:period]
+        if all(segment[i * period:(i + 1) * period] == pattern for i in range(min_repeats)):
+            return True
+    return False
+
+
+def _build_loop_abort_chunk(model: str, field: str) -> bytes:
+    """Baut einen synthetischen SSE-Abschluss-Chunk, der dem Client sichtbar
+    mitteilt, WARUM der Stream vorzeitig endet - statt ihn einfach kommentarlos
+    abzuschneiden (der Client würde sonst nur eine unerklärt abgebrochene
+    Antwort sehen). `field` ist "reasoning_content" oder "content", je nachdem
+    wo die Schleife erkannt wurde - die Notiz landet im selben Feld, damit sie
+    dort auftaucht, wo der Client gerade hinschaut (z.B. Reasoning-Box vs.
+    normaler Antworttext)."""
+    note = "\n\n[Automatisch abgebrochen: Wiederholungsschleife erkannt]"
+    obj = {
+        "id": "loop-abort",
+        "object": "chat.completion.chunk",
+        "created": int(time.time()),
+        "model": model,
+        "choices": [{"index": 0, "delta": {field: note}, "finish_reason": "stop"}],
+    }
+    return f"data: {json.dumps(obj)}\n\ndata: [DONE]\n\n".encode("utf-8")
+
+
 def _finish_and_record(rid: str, status: str, prompt_tokens=None, completion_tokens=None) -> None:
     """telemetry.finish_request() + Persistieren fürs fiktive Kostentracking
     (cost_tracker.py) in einem Rutsch - auch für früh abgebrochene Anfragen
@@ -518,6 +606,7 @@ async def proxy_v1(path: str, request: Request):
     telemetry.mark_ready(rid)
 
     body = _apply_default_max_tokens(cfg, model, path, parsed_body, body)
+    body = _apply_default_repetition_penalty(cfg, model, path, parsed_body, body)
     if parsed_body is not None and path == "chat/completions":
         rag_result = await rag.apply_auto_rag(model, parsed_body.get("messages") or [])
         if rag_result:
@@ -538,6 +627,17 @@ async def proxy_v1(path: str, request: Request):
         prompt_tokens = None
         completion_tokens = None
         status = result_status
+        # Wiederholungsschleifen-Erkennung (siehe _has_repetition_loop oben) -
+        # nur bei gestreamten Antworten möglich, da wir sonst erst nach dem
+        # kompletten (evtl. endlosen) Response irgendetwas sehen. mcfg ist
+        # None bei nur lokal gecachten, nicht registrierten Modellen - dann
+        # greift der Default (an), analog zu ModelConfig.repetition_detection.
+        mcfg = cfg.models.get(model)
+        detect_loop = is_stream and (mcfg.repetition_detection if mcfg is not None else True)
+        reasoning_buf = ""
+        content_buf = ""
+        aborted_loop = False
+        abort_field = "content"
         try:
             async for chunk in upstream.aiter_raw():
                 if first_chunk:
@@ -561,11 +661,19 @@ async def proxy_v1(path: str, request: Request):
                             delta = (choices[0].get("delta") or {}) if choices else {}
                             if delta.get("content"):
                                 telemetry.increment_tokens(rid)
+                                if detect_loop:
+                                    content_buf = (content_buf + delta["content"])[-_REPETITION_LOOKBACK:]
+                                    if _has_repetition_loop(content_buf):
+                                        aborted_loop, abort_field = True, "content"
                             # reasoning_content: separates Feld für den Denkprozess bei
                             # Modellen mit reasoning_parser (siehe config.json) - zählt
                             # NICHT in "content" hinein, deshalb eigener Zähler.
                             if delta.get("reasoning_content"):
                                 telemetry.increment_reasoning_tokens(rid)
+                                if detect_loop:
+                                    reasoning_buf = (reasoning_buf + delta["reasoning_content"])[-_REPETITION_LOOKBACK:]
+                                    if _has_repetition_loop(reasoning_buf):
+                                        aborted_loop, abort_field = True, "reasoning_content"
                             if delta.get("tool_calls"):
                                 telemetry.mark_tool_call(rid)
                             usage = obj.get("usage")
@@ -578,6 +686,18 @@ async def proxy_v1(path: str, request: Request):
                 else:
                     full_body.extend(chunk)
                 yield chunk
+                if aborted_loop:
+                    # Sichtbar machen statt einfach kommentarlos abzuschneiden,
+                    # dann den Upstream-Read beenden - schließt gleich im
+                    # finally-Block die Verbindung, was die Engine als
+                    # Client-Disconnect erkennt und die Generierung beendet.
+                    yield _build_loop_abort_chunk(model, abort_field)
+                    status = "aborted_loop"
+                    logger.warning(
+                        "Wiederholungsschleife erkannt und abgebrochen: Modell '%s', Feld '%s' (rid=%s)",
+                        model, abort_field, rid,
+                    )
+                    break
             if not is_stream and full_body:
                 try:
                     obj = json.loads(bytes(full_body))

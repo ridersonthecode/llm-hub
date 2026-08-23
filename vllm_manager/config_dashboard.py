@@ -576,6 +576,16 @@ function renderModels() {
         <input type="text" class="m-field" data-idx="${i}" data-field="rag_collection" list="rag-collection-options" value="${esc(m.rag_collection ?? "")}">
         <div class="hint" data-i18n="cfg.hint.ragCollection">If set, every chat request to this model automatically searches this collection and prepends relevant context - the client doesn't need to support anything special. Requires RAG to be enabled with an embedding model configured (see the RAG section below).</div>
 
+        <label data-i18n="cfg.field.repetitionPenalty">Repetition penalty (empty = off)</label>
+        <input type="number" class="m-field" data-idx="${i}" data-field="repetition_penalty" min="1" step="0.05" value="${m.repetition_penalty ?? ""}">
+        <div class="hint" data-i18n="cfg.hint.repetitionPenalty">Only applied when the client itself doesn't set repetition_penalty. Reduces the chance of runaway repetition loops (common with smaller reasoning models). Try 1.1-1.3 if a model tends to get stuck.</div>
+
+        <div class="check-row">
+          <input type="checkbox" class="m-field" data-idx="${i}" data-field="repetition_detection" id="m-repdet-${i}" ${m.repetition_detection !== false ? "checked" : ""}>
+          <label for="m-repdet-${i}" data-i18n="cfg.field.repetitionDetection">Detect and abort repetition loops (streamed requests)</label>
+        </div>
+        <div class="hint" data-i18n="cfg.hint.repetitionDetection">Watches the live stream and aborts the request if the same text keeps repeating verbatim - shows up in Active/Recent Requests as "Aborted (loop)". Disable only if a model is expected to legitimately repeat text.</div>
+
         <div class="row">
           <div>
             <label data-i18n="cfg.field.toolCallParser">Tool call parser</label>
@@ -651,7 +661,7 @@ function renderModels() {
       if (el.type === "checkbox") val = el.checked;
       else if (field === "extra_args") val = el.value.split("\n").map(s => s.trim()).filter(Boolean);
       else if (field === "max_model_len" || field === "max_tokens") val = el.value === "" ? null : parseInt(el.value, 10);
-      else if (field === "gpu_memory_utilization") val = el.value === "" ? null : parseFloat(el.value);
+      else if (field === "gpu_memory_utilization" || field === "repetition_penalty") val = el.value === "" ? null : parseFloat(el.value);
       else val = el.value;
       if (field === "pricing_input_per_mtok" || field === "pricing_output_per_mtok") {
         // Verschachteltes Feld (ModelConfig.pricing.*) statt eines flachen -
@@ -816,7 +826,7 @@ $("add-model-btn").addEventListener("click", () => {
     name: "", enabled: true, task: "generate", max_model_len: null,
     gpu_memory_utilization: null, tool_call_parser: null, reasoning_parser: null,
     enable_auto_tool_choice: false, vision: false, extra_args: [], hf_token: null, notes: "",
-    max_tokens: null, rag_collection: null,
+    max_tokens: null, rag_collection: null, repetition_penalty: null, repetition_detection: true,
   });
   openAccordions.add(modelsList.length - 1);
   markDirty();

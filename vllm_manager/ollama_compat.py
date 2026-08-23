@@ -130,6 +130,11 @@ async def api_chat(request: Request):
     mcfg = cfg.models.get(model)
     if mcfg is not None and mcfg.max_tokens is not None and "max_tokens" not in openai_body:
         openai_body["max_tokens"] = mcfg.max_tokens
+    # Vorbeugung gegen Wiederholungsschleifen (siehe main.py
+    # _apply_default_repetition_penalty / config.py ModelConfig.
+    # repetition_penalty) - nur wenn der Alt-Client selbst nichts vorgibt.
+    if mcfg is not None and mcfg.repetition_penalty is not None and "repetition_penalty" not in openai_body:
+        openai_body["repetition_penalty"] = mcfg.repetition_penalty
 
     rid = telemetry.start_request(model, "api/chat", user_agent=request.headers.get("user-agent"))
     try:

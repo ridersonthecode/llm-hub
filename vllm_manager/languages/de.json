@@ -133,6 +133,8 @@
 
   "status.ok": "OK",
   "status.error": "Fehler",
+  "status.abortedLoop": "Abgebrochen (Schleife)",
+  "status.abortedLoopHint": "Automatisch abgebrochen: das Modell hat denselben Text immer wieder wiederholt (eine Wiederholungsschleife, typisch bei kleineren Reasoning-Modellen). Lässt sich pro Modell im Config-Editor einstellen/abschalten (\"Wiederholungsschleifen erkennen und abbrechen\").",
 
   "ago.never": "noch keine",
   "ago.justNow": "gerade eben",
@@ -260,6 +262,10 @@
   "cfg.hint.maxTokens": "Begrenzt die Generierungslänge nur, wenn der Client selbst keinen max_tokens-Wert anfragt - schützt vor durchgehenden/sich wiederholenden Generierungen, ohne normale Antworten einzuschränken.",
   "cfg.field.ragCollection": "Auto-RAG-Collection (leer = aus)",
   "cfg.hint.ragCollection": "Falls gesetzt, durchsucht jede Chat-Anfrage an dieses Modell automatisch diese Collection und stellt relevanten Kontext voran - der Client muss dafür nichts Besonderes unterstützen. Setzt voraus, dass RAG aktiviert ist und ein Embedding-Modell konfiguriert wurde (siehe RAG-Abschnitt weiter unten).",
+  "cfg.field.repetitionPenalty": "Repetition Penalty (leer = aus)",
+  "cfg.hint.repetitionPenalty": "Greift nur, wenn der Client selbst kein repetition_penalty setzt. Senkt die Wahrscheinlichkeit durchgehender Wiederholungsschleifen (typisch bei kleineren Reasoning-Modellen). Bei anfälligen Modellen 1.1-1.3 probieren.",
+  "cfg.field.repetitionDetection": "Wiederholungsschleifen erkennen und abbrechen (gestreamte Anfragen)",
+  "cfg.hint.repetitionDetection": "Liest den laufenden Stream mit und bricht die Anfrage ab, wenn derselbe Text sich wortwörtlich wiederholt - erscheint bei Aktiven/Letzten Anfragen als \"Abgebrochen (Schleife)\". Nur abschalten, wenn ein Modell absichtlich Text wiederholen soll.",
   "cfg.field.toolCallParser": "Tool-Call-Parser",
   "cfg.field.reasoningParser": "Reasoning-Parser",
   "cfg.field.autoToolChoice": "Auto Tool Choice aktivieren",

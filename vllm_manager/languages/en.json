@@ -133,6 +133,8 @@
 
   "status.ok": "OK",
   "status.error": "Error",
+  "status.abortedLoop": "Aborted (loop)",
+  "status.abortedLoopHint": "Automatically aborted: the model repeated the same text over and over (a repetition loop, common with smaller reasoning models). Can be tuned or disabled per model in the Config Editor (\"Detect and abort repetition loops\").",
 
   "ago.never": "never",
   "ago.justNow": "just now",
@@ -260,6 +262,10 @@
   "cfg.hint.maxTokens": "Caps generation length only when the client itself doesn't request a max_tokens value - protects against runaway/repeating generations without limiting normal replies.",
   "cfg.field.ragCollection": "Auto-RAG collection (empty = off)",
   "cfg.hint.ragCollection": "If set, every chat request to this model automatically searches this collection and prepends relevant context - the client doesn't need to support anything special. Requires RAG to be enabled with an embedding model configured (see the RAG section below).",
+  "cfg.field.repetitionPenalty": "Repetition penalty (empty = off)",
+  "cfg.hint.repetitionPenalty": "Only applied when the client itself doesn't set repetition_penalty. Reduces the chance of runaway repetition loops (common with smaller reasoning models). Try 1.1-1.3 if a model tends to get stuck.",
+  "cfg.field.repetitionDetection": "Detect and abort repetition loops (streamed requests)",
+  "cfg.hint.repetitionDetection": "Watches the live stream and aborts the request if the same text keeps repeating verbatim - shows up in Active/Recent Requests as \"Aborted (loop)\". Disable only if a model is expected to legitimately repeat text.",
   "cfg.field.toolCallParser": "Tool call parser",
   "cfg.field.reasoningParser": "Reasoning parser",
   "cfg.field.autoToolChoice": "Enable auto tool choice",

@@ -273,6 +273,70 @@ Antworten nicht beschneiden, aber eine durchgehende Generierung auf ein
 absehbares Maximum begrenzen. Feinjustierung pro Modell jederzeit über den
 Config-Editor möglich.
 
+## Wiederholungsschleifen erkennen und abbrechen
+
+Anlass: kleinere Reasoning-Modelle (beobachtet bei `NVIDIA-Nemotron-3-Nano-4B-FP8`)
+bleiben gelegentlich im Denkprozess (`<think>...`) hängen und wiederholen denselben
+Satz/Satzteil endlos, statt zu einer Antwort zu kommen. `max_tokens` (siehe oben)
+begrenzt zwar den maximalen Schaden, lässt die Anfrage aber trotzdem bis zu dieser
+Grenze durchlaufen - bei 65.536 Tokens immer noch mehrere Minuten reine Verschwendung.
+
+**Warum passiert das?** Mehrere Faktoren kommen typischerweise zusammen:
+- **Kleinere Modelle** (hier 4B Parameter) haben eine schwächere Fähigkeit, intern
+  zu "verfolgen", dass sie einen Gedanken bereits mehrfach geäußert haben - bei
+  großen Modellen ist dasselbe Phänomen seltener, aber nicht unmöglich.
+- **Niedrige/deterministische Sampling-Parameter** (z.B. `temperature` nahe 0, wie
+  es Coding-Assistants wie VS Code Copilot Chat oft für reproduzierbare Antworten
+  verwenden) begünstigen das: bei nahezu greedy Decoding kann sich das Modell in
+  einen stabilen "Zyklus" hineinmanövrieren, aus dem es ohne zufälliges Abweichen
+  nicht mehr herausfindet.
+- **Lange Denkprozesse** geben dafür schlicht mehr Gelegenheit/Raum als kurze,
+  finale Antworten.
+- **Ohne `repetition_penalty`/`frequency_penalty`** (weder Client noch Server
+  setzen standardmäßig einen) wird eine einmal begonnene Wiederholung durch nichts
+  aktiv unattraktiver gemacht.
+
+**Zwei sich ergänzende Gegenmaßnahmen, beide pro Modell konfigurierbar (live
+änderbar über den Config-Editor, kein Neustart nötig):**
+
+### 1. Vorbeugend: `repetition_penalty`
+
+`models.<model>.repetition_penalty` in `config.json` (vLLM-eigener Sampling-
+Parameter, kein OpenAI-Standardfeld, aber von vLLMs Server direkt unterstützt und
+akzeptiert) wird in jeden Request an dieses Modell injiziert, **außer** der Client
+gibt selbst schon einen Wert vor - senkt die Wahrscheinlichkeit, dass eine Schleife
+überhaupt erst entsteht. Sinnvoller Startwert bei anfälligen Modellen: `1.1`-`1.3`
+(höher = aggressiver gegen Wiederholung, aber auch eher Einfluss auf normale,
+absichtlich wiederholende Formulierungen).
+
+### 2. Sicherheitsnetz: Live-Stream-Erkennung + Abbruch
+
+`models.<model>.repetition_detection` (Default: an) liest bei **gestreamten**
+Anfragen (nur dort ist das technisch möglich - bei nicht-gestreamten Anfragen sieht
+der Proxy erst die fertige, evtl. bereits sehr lange Antwort) live mit, ob der
+Text am Stream-Ende aus demselben Abschnitt mehrfach hintereinander **exakt**
+besteht (`main.py`, `_has_repetition_loop()`). Die Periodenlänge des Musters ist
+dabei nicht bekannt - erkannt wird jede Wiederholung von 3 bis 400 Zeichen Länge,
+kürzere Muster verlangen mehr exakte Wiederholungen (z.B. 8x bei sehr kurzen
+Mustern) als längere (3x bei > 80 Zeichen), damit natürliche Wortwiederholungen
+("der der", "the the") nicht fälschlich als Schleife gelten.
+
+Wird eine Schleife erkannt:
+- Die Verbindung zur Engine wird sofort geschlossen (spart tatsächlich Rechenzeit,
+  nicht nur eine kosmetische Client-seitige Kürzung - getestet mit einer Fake-Engine,
+  die bestätigt, dass sie den Abbruch bemerkt und aufhört zu generieren).
+- Der Client bekommt einen abschließenden Chunk mit einem sichtbaren Hinweis
+  ("Automatisch abgebrochen: Wiederholungsschleife erkannt") im selben Feld
+  (`content` oder `reasoning_content`), in dem die Schleife erkannt wurde, plus
+  regulärem `finish_reason: "stop"` - kein kommentarloser Abbruch.
+- Erscheint im Dashboard (Aktive/Letzte Anfragen) als eigener Status
+  "Abgebrochen (Schleife)", unterscheidbar von einem echten Fehler.
+
+**Einschränkung:** wirkt nur bei gestreamten Anfragen und nur über
+`/v1/chat/completions`/`/api/chat` (nicht bei `/v1/completions` oder
+nicht-gestreamten Requests) - ein Grund mehr, Streaming zu nutzen, wo es das
+Client-Tool zulässt.
+
 ## Live-Dashboard
 
 Erreichbar unter `http://<LAN-IP>:11434/dashboard` (z.B. `http://10.7.21.3:11434/dashboard`).
