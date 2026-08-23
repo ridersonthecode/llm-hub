@@ -931,18 +931,10 @@ function render(data) {
     safeSetHTML($("active-request-box"), `<div class="empty">${t("empty.noActiveRequest")}</div>`);
   } else {
     safeSetHTML($("active-request-box"), `<table><thead><tr>
-      <th>${t("th.model")}</th><th>${t("th.app")}</th><th>${t("th.endpoint")}</th><th>${t("th.port")}</th><th>${t("th.rag")}${helpIcon("rag")}</th><th>${t("th.phase")}${helpIcon("phase")}</th><th>${t("th.elapsed")}</th><th>${t("th.loadTime")}${helpIcon("loadTime")}</th><th>${t("th.ttft")}${helpIcon("ttft")}</th><th>${t("th.tokensPromptGen")}${helpIcon("liveTokens")}</th><th>${t("th.reasoningTokens")}${helpIcon("liveTokens")}</th><th>${t("th.throughput")}${helpIcon("throughput")}</th><th>${t("th.cost")}${helpIcon("cost")}</th>
+      <th>${t("th.model")}</th><th>${t("th.app")}</th><th>${t("th.endpoint")}</th><th>${t("th.port")}</th><th>${t("th.rag")}${helpIcon("rag")}</th><th>${t("th.phase")}${helpIcon("phase")}</th><th>${t("th.elapsed")}</th><th>${t("th.loadTime")}${helpIcon("loadTime")}</th><th>${t("th.ttft")}${helpIcon("ttft")}</th>
       </tr></thead><tbody>` + active.map(r => {
         const elapsed = Date.now()/1000 - r.started_at;
         const port = (engs.find(e => e.loaded_model === r.model) || {}).port;
-        // queued_ms wird erst gesetzt, sobald das Modell bereit ist (siehe
-        // telemetry.mark_ready) - bis dahin wartet die Anfrage auf einen
-        // Kaltstart/Modellwechsel, es wird also noch nichts generiert.
-        const loading = r.queued_ms === null || r.queued_ms === undefined;
-        const genElapsedSec = loading ? null : Math.max(0, elapsed - r.queued_ms / 1000);
-        const throughput = (!loading && r.tokens_streamed > 0 && genElapsedSec > 0.05)
-          ? (r.tokens_streamed / genElapsedSec).toFixed(1) + " tok/s"
-          : "–";
         const history = r.phase_history || [];
         const lastChange = history.length ? history[history.length - 1] : null;
         const phaseSinceSec = lastChange ? Math.max(0, Date.now()/1000 - lastChange.at) : elapsed;
@@ -966,10 +958,6 @@ function render(data) {
           <td class="mono">${fmtDuration(elapsed)}</td>
           <td class="mono">${r.queued_ms ? fmtMs(r.queued_ms) : "–"}</td>
           <td class="mono">${fmtMs(r.ttft_ms)}</td>
-          <td class="mono">${r.prompt_tokens ?? "–"} / ${r.tokens_streamed ?? 0}</td>
-          <td class="mono">${r.reasoning_tokens_streamed ?? 0}</td>
-          <td class="mono">${throughput}</td>
-          <td class="mono" title="${esc(t("cost.hint.soFarOutputOnly"))}">${fmtUsd(r.estimated_output_cost_usd) ?? "–"} <span class="hint">${t("cost.soFar")}</span></td>
         </tr>`;
       }).join("") + `</tbody></table>`);
   }
