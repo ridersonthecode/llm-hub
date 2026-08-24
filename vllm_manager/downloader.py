@@ -20,7 +20,7 @@ from typing import Optional
 
 from huggingface_hub import HfApi
 
-from . import catalog
+from . import catalog, config_editor
 from .config import get_config
 
 logger = logging.getLogger("vllm_manager.downloader")
@@ -191,6 +191,16 @@ async def _run_job(job: dict, hf_token: Optional[str]) -> None:
         # als "gecacht" auftauchen, mit korrekter (nicht 300s alter) Größe.
         catalog.invalidate_cache(cfg.hf_home)
         catalog.invalidate_size_cache(model)
+        # Ohne das bliebe ein per pull_model()/POST /models/pull heruntergeladenes
+        # Modell nur "gecacht, aber nicht registriert" (siehe GET /models) - lädt-
+        # bar, aber nie in der eigentlichen config.json-Modellliste sichtbar,
+        # bis es jemand manuell im Config-Editor nachträgt. Fire-and-forget: darf
+        # den Download-Job selbst nicht mehr beeinflussen (ist ja schon "done").
+        asyncio.create_task(config_editor.register_model_if_missing(
+            model,
+            note="Automatisch registriert nach Download (über /models/pull bzw. das "
+                 "MCP-Tool pull_model). Bitte Werte prüfen (nur automatisch erkannt).",
+        ))
     else:
         logger.error("Download fehlgeschlagen: %s (exit code %s)", model, proc.returncode)
         job["state"] = "error"

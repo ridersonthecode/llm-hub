@@ -19,6 +19,7 @@ enthält dieselben sensiblen Daten wie config.json selbst):
 """
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import shutil
@@ -29,6 +30,7 @@ from typing import Optional
 
 from pydantic import ValidationError
 
+from . import capability_detector
 from . import config as config_module
 from .config import CONFIG_PATH, Config
 
@@ -166,6 +168,73 @@ def save_config(new_data: dict) -> tuple[Config, Optional[str]]:
     global startup_warning
     startup_warning = None  # ein erfolgreicher manueller Save entschärft die Startup-Warnung
     return new_cfg, backup_name
+
+
+async def register_model_if_missing(model: str, note: str) -> bool:
+    """Trägt `model` automatisch in config.json ein, falls dort noch nicht
+    registriert - siehe Aufrufer (process_manager.ensure_loaded fürs erste
+    erfolgreiche Laden, downloader._run_job für einen fertigen Download).
+
+    Ohne das war ein Modell zwar über einen direkten Request oder das MCP-
+    Tool pull_model() nutzbar/ladbar (ensure_loaded() verlangt keine
+    Registrierung, vLLM lädt unbekannte Modelle einfach selbst von HF
+    herunter) und tauchte in GET /models korrekt als "gecacht, aber nicht in
+    config.json registriert" auf - aber eben NIE in der eigentlichen Modell-
+    Konfiguration, die der Nutzer im Config-Editor sieht und pflegt (Live
+    beobachtet: 2026-08-24).
+
+    Nutzt dieselbe Fähigkeiten-Erkennung wie der "Auto-detect capabilities"-
+    Button im Config-Editor (siehe capability_detector.py), damit der
+    Eintrag nicht mit reinen Rate-Defaults dasteht - bestmöglicher
+    Ausgangspunkt, ausdrücklich keine Garantie für Korrektheit (derselbe
+    Vorbehalt wie beim manuellen Button). Best-effort: schlägt die Erkennung
+    oder das Schreiben fehl, wird nur geloggt, NIE propagiert - eine
+    automatische Registrierung darf den eigentlichen Lade-/Download-Vorgang
+    nicht stören. Gibt True zurück, wenn tatsächlich neu registriert wurde."""
+    if model in config_module.get_config().models:
+        return False  # häufigster Fall - gar nicht erst blockierend nachschauen
+
+    def _do_register() -> bool:
+        # Config frisch lesen statt der oben schon geprüften - zwischen dem
+        # async-Einstieg und hier könnte sich (Race mit einem parallelen
+        # manuellen Save) etwas geändert haben.
+        current = config_module.get_config()
+        if model in current.models:
+            return False
+        try:
+            caps = capability_detector.detect_capabilities(model, current.hf_home)
+        except Exception:
+            logger.exception(
+                "Fähigkeiten-Erkennung für automatisch zu registrierendes Modell '%s' "
+                "fehlgeschlagen - trage trotzdem mit Standardwerten ein", model,
+            )
+            caps = None
+
+        entry: dict = {"notes": note}
+        if caps and caps.get("found"):
+            entry["task"] = caps["task"]["suggested"]
+            entry["vision"] = bool(caps["vision"]["detected"])
+            if caps["tool_calling"]["detected"]:
+                entry["enable_auto_tool_choice"] = True
+                entry["tool_call_parser"] = caps["tool_calling"]["suggested_parser"]
+            if caps["reasoning"]["detected"]:
+                entry["reasoning_parser"] = caps["reasoning"]["suggested_parser"]
+
+        dump = current.model_dump()
+        if model in dump["models"]:
+            return False
+        dump["models"][model] = entry
+        save_config(dump)
+        return True
+
+    try:
+        registered = await asyncio.to_thread(_do_register)
+    except Exception:
+        logger.exception("Konnte '%s' nicht automatisch in config.json eintragen", model)
+        return False
+    if registered:
+        logger.info("Modell '%s' automatisch in config.json eingetragen (%s)", model, note)
+    return registered
 
 
 def restore_backup(filename: str) -> tuple[Config, Optional[str]]:

@@ -58,7 +58,7 @@ try:
 except ImportError:  # pragma: no cover - psutil kommt transitiv über vllm mit
     psutil = None
 
-from . import telemetry
+from . import config_editor, telemetry
 from .config import CONFIG_PATH, Config, get_config
 
 logger = logging.getLogger("vllm_manager.engine")
@@ -966,6 +966,19 @@ async def ensure_loaded(model: str, wait: bool = True) -> dict:
             eng.state = "ready"
             eng.last_used = time.time()
             _persist_last_active(model)
+            # Fire-and-forget: ein per direktem Request geladenes, bisher
+            # nicht in config.json registriertes Modell (z.B. vLLM hat es
+            # selbst automatisch von HF heruntergeladen) wird jetzt
+            # nachgetragen - siehe config_editor.register_model_if_missing.
+            # Bewusst NICHT awaited, damit das die Antwort an den
+            # wartenden Aufrufer nicht verzögert.
+            asyncio.create_task(config_editor.register_model_if_missing(
+                model,
+                note="Automatisch registriert beim ersten erfolgreichen Laden - "
+                     "war lokal gecacht oder wurde von vLLM selbst von HF "
+                     "heruntergeladen, ohne vorher im Config-Editor angelegt zu sein. "
+                     "Bitte Werte prüfen (nur automatisch erkannt).",
+            ))
             return eng.status()
         await asyncio.sleep(2)
 
