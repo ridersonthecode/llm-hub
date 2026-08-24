@@ -93,7 +93,33 @@ RAG_DASHBOARD_HTML = r"""<!doctype html>
   .status-msg.error { color: var(--bad); }
   .score-bar-bg { background:var(--panel-2); border-radius:6px; height:6px; overflow:hidden; margin-top:4px; width:80px; }
   .score-bar-fg { background:var(--accent); height:100%; }
-  .snippet { color:var(--text-dim); font-size:12px; margin-top:4px; max-width:480px; }
+  .snippet { color:var(--text-dim); font-size:12px; margin-top:4px; max-width:480px; cursor:pointer; }
+  .snippet:hover { color:var(--text); text-decoration:underline; }
+  .view-doc-btn { background:none; border:none; color:var(--accent); cursor:pointer; font-size:13px; padding:0; margin-right:10px; }
+  .view-doc-btn:hover { text-decoration:underline; }
+
+  .modal-overlay {
+    display:none; position:fixed; inset:0; background:rgba(0,0,0,.5);
+    align-items:center; justify-content:center; z-index:100; padding:20px;
+  }
+  .modal-overlay.open { display:flex; }
+  .modal {
+    position:relative; background:var(--panel); border:1px solid var(--border); border-radius:12px;
+    max-width:720px; width:100%; max-height:85vh; overflow-y:auto; padding:22px;
+  }
+  .modal h3 { margin:0 0 4px; font-size:16px; word-break:break-all; }
+  .modal .hint { margin:0 0 16px; }
+  .modal .close-btn {
+    position:absolute; top:16px; right:20px; background:none; border:none;
+    color:var(--text-dim); font-size:20px; cursor:pointer; line-height:1;
+  }
+  .modal .chunk-block { margin-bottom:16px; }
+  .modal .chunk-block:last-child { margin-bottom:0; }
+  .modal .chunk-label { font-size:11px; color:var(--text-dim); text-transform:uppercase; letter-spacing:.04em; margin-bottom:6px; }
+  .modal .chunk-text {
+    background:var(--panel-2); border:1px solid var(--border); border-radius:8px;
+    padding:12px; font-family:var(--mono); font-size:12px; white-space:pre-wrap; word-break:break-word; margin:0;
+  }
   .app-footer {
     margin-top:32px; padding-top:16px; border-top:1px solid var(--border);
     display:flex; align-items:center; justify-content:center; gap:6px;
@@ -232,6 +258,15 @@ RAG_DASHBOARD_HTML = r"""<!doctype html>
     </section>
   </div>
 
+  <div class="modal-overlay" id="text-modal-overlay">
+    <div class="modal">
+      <button class="close-btn" id="text-modal-close">✕</button>
+      <h3 id="text-modal-title">–</h3>
+      <p class="hint" id="text-modal-hint"></p>
+      <div id="text-modal-body"></div>
+    </div>
+  </div>
+
   <footer class="app-footer">
     <span>© 2026</span>
     <a href="https://github.com/ridersonthecode" target="_blank" rel="noopener noreferrer" title="ridersonthecode on GitHub">
@@ -314,6 +349,35 @@ function authHeaders(extra) {
   const h = Object.assign({}, extra || {});
   if (apiKey) h["Authorization"] = "Bearer " + apiKey;
   return h;
+}
+
+// --- Text-Detail-Modal ------------------------------------------------
+// Zeigt gespeicherte Chunks vollständig (unabgeschnitten) an - für ein
+// ganzes Dokument (mehrere Chunks, siehe openDocumentModal) oder einen
+// einzelnen Treffer aus der Testsuche (siehe renderSearchResults).
+function openTextModal(title, hint, chunks) {
+  $("text-modal-title").textContent = title || "–";
+  $("text-modal-hint").textContent = hint || "";
+  $("text-modal-hint").style.display = hint ? "" : "none";
+  $("text-modal-body").innerHTML = chunks.map(c => `
+    <div class="chunk-block">
+      ${chunks.length > 1 ? `<div class="chunk-label">${esc(t("modal.chunkLabel", { i: (c.chunk_index ?? 0) + 1, n: c.chunk_count ?? chunks.length }))}</div>` : ""}
+      <pre class="chunk-text">${esc(c.text || "")}</pre>
+    </div>`).join("");
+  $("text-modal-overlay").classList.add("open");
+}
+function closeTextModal() { $("text-modal-overlay").classList.remove("open"); }
+$("text-modal-close").addEventListener("click", closeTextModal);
+$("text-modal-overlay").addEventListener("click", (e) => { if (e.target.id === "text-modal-overlay") closeTextModal(); });
+document.addEventListener("keydown", (e) => { if (e.key === "Escape") closeTextModal(); });
+
+async function openDocumentModal(collection, documentId, title) {
+  const res = await fetch(`/rag/collections/${encodeURIComponent(collection)}/documents/${encodeURIComponent(documentId)}/chunks`, { headers: authHeaders() });
+  if (!res.ok) { alert(t("error.generic", { msg: await res.text() })); return; }
+  const data = await res.json();
+  const chunks = data.chunks || [];
+  const hint = chunks.length > 1 ? t("modal.chunkCountHint", { n: chunks.length }) : "";
+  openTextModal(title, hint, chunks);
 }
 
 // --- Tabs --------------------------------------------------------------
@@ -410,7 +474,11 @@ function initDocumentsTable() {
       { title: t("th.source"), data: null, render: (d, type) => type === "display" ? esc(d.filename || d.source || "–") : (d.filename || d.source || "") },
       { title: t("th.chunks"), data: null, render: (d, type) => type !== "display" ? (d.chunk_count ?? -1) : (d.chunk_count ?? "–") },
       { title: t("th.addedAt"), data: null, render: (d, type) => type !== "display" ? (d.added_at ?? 0) : (d.added_at ? new Date(d.added_at * 1000).toLocaleString(localeFor(currentLang)) : "–") },
-      { title: t("th.action"), data: null, orderable: false, render: (d) => `<button class="btn danger del-doc-btn" data-id="${esc(d.document_id)}">${t("action.delete")}</button>` },
+      {
+        title: t("th.action"), data: null, orderable: false,
+        render: (d) => `<button class="view-doc-btn" data-id="${esc(d.document_id)}" data-title="${esc(d.filename || d.source || "–")}">${t("action.select")}</button>`
+          + `<button class="btn danger del-doc-btn" data-id="${esc(d.document_id)}">${t("action.delete")}</button>`,
+      },
     ],
   });
   // Wrapper (Suche/Paging/Tabelle) initial ausblenden - erst loadDocuments()
@@ -423,6 +491,9 @@ function initDocumentsTable() {
   // (globaler State) statt eines geschlossenen Parameters, da draw() nicht
   // pro loadDocuments()-Aufruf neu gebunden wird.
   documentsTable.on("draw", () => {
+    document.querySelectorAll("#documents-table .view-doc-btn").forEach(btn => {
+      btn.addEventListener("click", () => openDocumentModal(selectedCollection, btn.dataset.id, btn.dataset.title));
+    });
     document.querySelectorAll("#documents-table .del-doc-btn").forEach(btn => {
       btn.addEventListener("click", async () => {
         if (!confirm(t("confirm.deleteDocument"))) return;
@@ -531,12 +602,18 @@ function renderSearchResults(results) {
   }
   $("search-results-box").innerHTML = `<table><thead><tr>
     <th>${t("th.score")}</th><th>${t("th.text")}</th><th>${t("th.source")}</th>
-    </tr></thead><tbody>` + results.map(r => `
+    </tr></thead><tbody>` + results.map((r, i) => `
       <tr>
         <td class="mono">${(r.score ?? 0).toFixed(3)}<div class="score-bar-bg"><div class="score-bar-fg" style="width:${Math.max(0, Math.min(100, (r.score ?? 0) * 100))}%"></div></div></td>
-        <td><div class="snippet">${esc((r.text || "").slice(0, 300))}${(r.text || "").length > 300 ? "…" : ""}</div></td>
+        <td><div class="snippet" data-idx="${i}" title="${esc(t("action.viewFullText"))}">${esc((r.text || "").slice(0, 300))}${(r.text || "").length > 300 ? "…" : ""}</div></td>
         <td>${esc(r.source || "–")}</td>
       </tr>`).join("") + `</tbody></table>`;
+  document.querySelectorAll("#search-results-box .snippet").forEach(el => {
+    el.addEventListener("click", () => {
+      const r = results[el.dataset.idx];
+      openTextModal(r.source || "–", "", [{ chunk_index: r.chunk_index, chunk_count: r.chunk_count, text: r.text }]);
+    });
+  });
 }
 
 function refreshAll() {

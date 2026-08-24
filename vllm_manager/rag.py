@@ -339,6 +339,46 @@ async def list_documents(collection: str) -> list[dict]:
         await client.close()
 
 
+async def get_document_chunks(collection: str, document_id: str) -> list[dict]:
+    """Alle gespeicherten Chunks eines Dokuments MIT Volltext, sortiert nach
+    chunk_index - für die "Text komplett ansehen"-Modal im Dashboard
+    (list_documents() oben liefert bewusst nur Metadaten, kein Volltext, um
+    die Dokumentenliste schlank zu halten)."""
+    cfg = get_config()
+    _require_rag(cfg)
+    client = _qdrant_client(cfg)
+    try:
+        if not await client.collection_exists(collection):
+            return []
+        chunks: list[dict] = []
+        offset = None
+        flt = Filter(must=[FieldCondition(key="document_id", match=MatchValue(value=document_id))])
+        while True:
+            points, offset = await client.scroll(
+                collection_name=collection,
+                scroll_filter=flt,
+                limit=256,
+                offset=offset,
+                with_payload=True,
+                with_vectors=False,
+            )
+            for p in points:
+                pl = p.payload or {}
+                chunks.append({
+                    "chunk_index": pl.get("chunk_index"),
+                    "chunk_count": pl.get("chunk_count"),
+                    "text": pl.get("text"),
+                    "source": pl.get("source"),
+                    "added_at": pl.get("added_at"),
+                })
+            if offset is None:
+                break
+        chunks.sort(key=lambda c: c.get("chunk_index") if c.get("chunk_index") is not None else 0)
+        return chunks
+    finally:
+        await client.close()
+
+
 async def delete_document(collection: str, document_id: str) -> dict:
     cfg = get_config()
     _require_rag(cfg)

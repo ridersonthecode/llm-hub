@@ -291,6 +291,15 @@ async def rag_list_documents_endpoint(collection: str):
         raise HTTPException(400, str(e))
 
 
+@app.get("/rag/collections/{collection}/documents/{document_id}/chunks")
+async def rag_document_chunks_endpoint(collection: str, document_id: str):
+    try:
+        chunks = await rag.get_document_chunks(collection, document_id)
+    except rag.RagNotConfigured as e:
+        raise HTTPException(400, str(e))
+    return {"collection": collection, "document_id": document_id, "chunks": chunks}
+
+
 @app.post("/rag/collections/{collection}/text")
 async def rag_add_text_endpoint(collection: str, body: dict):
     text = body.get("text")
