@@ -404,6 +404,11 @@ DASHBOARD_HTML = r"""<!doctype html>
 
   .chart-grid { display:grid; grid-template-columns: repeat(auto-fit, minmax(280px,1fr)); gap:14px; }
   .chart-card canvas { width:100%; height:70px; display:block; margin-top:8px; }
+  .cpu-core-grid { display:grid; grid-template-columns: repeat(auto-fill, minmax(110px,1fr)); gap:8px; }
+  .cpu-core-tile { background:var(--panel); border:1px solid var(--border); border-radius:8px; padding:8px 10px; }
+  .cpu-core-tile .core-label { display:flex; justify-content:space-between; align-items:baseline; font-size:11px; color:var(--text-dim); }
+  .cpu-core-tile .core-value { font-size:13px; font-weight:600; color:var(--text); }
+  .cpu-core-tile canvas { width:100%; height:28px; display:block; margin-top:4px; }
 
   .model-grid { display:grid; grid-template-columns: 1fr 1fr; gap:10px; }
   @media (max-width: 640px) { .model-grid { grid-template-columns: 1fr; } }
@@ -585,7 +590,18 @@ DASHBOARD_HTML = r"""<!doctype html>
         <div class="hint" id="ram-extra"></div>
         <canvas id="ram-chart" width="400" height="70"></canvas>
       </div>
+      <div class="card chart-card">
+        <div class="label" data-i18n="section.cpuUsage">CPU Usage (Total)</div>
+        <div class="value" id="cpu-percent">–</div>
+        <div class="hint" id="cpu-extra"></div>
+        <canvas id="cpu-chart" width="400" height="70"></canvas>
+      </div>
     </div>
+  </section>
+
+  <section>
+    <h2 data-i18n="section.cpuPerCore">CPU Usage (per Core)</h2>
+    <div id="cpu-core-grid" class="cpu-core-grid"></div>
   </section>
 
   <section>
@@ -1044,12 +1060,35 @@ function phaseInfo(phase) {
   return { icon: meta.icon, badgeClass: meta.badgeClass, label: () => meta.key ? t(meta.key) : (phase || "–") };
 }
 
-// --- Live-Charts (GPU/RAM) ----------------------------------------------
+// --- Live-Charts (GPU/RAM/CPU) --------------------------------------------
 // Reine Canvas-Sparklines ohne externe Lib: rollierender Verlauf im Browser,
 // gefüttert von jedem WS-Snapshot (~1x/s durch den Heartbeat).
 const MAX_POINTS = 120;
 const gpuHistory = [];
 const ramHistory = [];
+const cpuHistory = [];
+// Pro-Kern-Verlauf: Länge (Kernanzahl) ist erst nach dem ersten Snapshot
+// bekannt, siehe ensureCoreGrid() unten - deshalb erst leer.
+let coreHistories = [];
+let coreGridBuilt = false;
+
+// Baut die Kern-Kachel-Grid EINMALIG auf, sobald die tatsächliche Kernanzahl
+// aus dem ersten WS-Snapshot bekannt ist (variiert je nach Maschine - fix im
+// HTML wäre auf einem System mit anderer Kernzahl falsch).
+function ensureCoreGrid(n) {
+  if (coreGridBuilt || !n) return;
+  const box = $("cpu-core-grid");
+  let html = "";
+  for (let i = 0; i < n; i++) {
+    html += `<div class="cpu-core-tile">
+      <div class="core-label"><span>CPU ${i}</span><span class="core-value" id="core-pct-${i}">–</span></div>
+      <canvas id="core-chart-${i}" width="110" height="28"></canvas>
+    </div>`;
+  }
+  box.innerHTML = html;
+  coreHistories = Array.from({ length: n }, () => []);
+  coreGridBuilt = true;
+}
 
 function pushHistory(arr, val) {
   arr.push(typeof val === "number" ? val : null);
@@ -1175,6 +1214,22 @@ function render(data) {
   $("ram-extra").className = "hint" + (ramSev === "warn" || ramSev === "bad" ? " " + ramSev : "");
   pushHistory(ramHistory, sys.ram_percent);
   drawChart($("ram-chart"), ramHistory, "--" + ramSev);
+
+  $("cpu-percent").textContent = fmtPct(sys.cpu_percent);
+  pushHistory(cpuHistory, sys.cpu_percent);
+  drawChart($("cpu-chart"), cpuHistory, "--accent");
+
+  const cores = sys.cpu_core_percent || [];
+  if (cores.length) {
+    ensureCoreGrid(cores.length);
+    if (!$("cpu-extra").textContent) $("cpu-extra").textContent = t("cpu.coreCount", { n: cores.length });
+    cores.forEach((v, i) => {
+      const pctEl = $("core-pct-" + i);
+      if (pctEl) pctEl.textContent = fmtPct(v);
+      pushHistory(coreHistories[i], v);
+      drawChart($("core-chart-" + i), coreHistories[i], "--accent");
+    });
+  }
 
   const active = data.active_requests || [];
   if (active.length === 0) {
