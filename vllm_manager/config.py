@@ -86,6 +86,15 @@ class ModelConfig(BaseModel):
     # Docstring). Default an; pro Modell abschaltbar, falls es zu
     # Fehlalarmen bei absichtlich repetitiven Antworten kommt.
     repetition_detection: bool = True
+    # Priorität bei der Verdrängungsauswahl in process_manager._make_room()
+    # (Hot Pool voll oder Speicherbudget knapp): HÖHERE Zahl = wird SPÄTER
+    # verdrängt (bevorzugt schlafen gelegt statt beendet, oder ganz
+    # verschont). Bei gleicher Priorität entscheidet weiterhin LRU (am
+    # längsten ungenutztes Modell zuerst) wie bisher. Default 0 = keine
+    # explizite Präferenz, verhält sich wie vor Einführung dieses Felds.
+    # Wird im Config-Editor per Drag-and-Drop-Liste gesetzt, nicht von Hand
+    # gepflegt - siehe cfg.section.priority.
+    priority: int = 0
 
 
 class RagConfig(BaseModel):
@@ -182,6 +191,13 @@ class Config(BaseModel):
         if self.vllm_bin:
             return self.vllm_bin
         return str(Path(sys.executable).parent / "vllm")
+
+    def priority_for(self, model: str) -> int:
+        """Siehe ModelConfig.priority - 0 (neutral) für unbekannte/nicht
+        registrierte Modelle, z.B. per HF-Repo-Name direkt geladen ohne
+        eigenen models.<name>-Eintrag."""
+        mcfg = self.models.get(model)
+        return mcfg.priority if mcfg else 0
 
     def serve_args_for(self, model: str) -> tuple[float, int]:
         mcfg = self.models.get(model)

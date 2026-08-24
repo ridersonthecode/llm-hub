@@ -120,6 +120,22 @@ CONFIG_DASHBOARD_HTML = r"""<!doctype html>
   .badge.ok { background: var(--good-bg); color: var(--good); }
   .badge.idle { background: var(--panel-2); color: var(--text-dim); }
 
+  .priority-list { display:flex; flex-direction:column; gap:6px; margin-top:8px; }
+  .priority-item {
+    display:flex; align-items:center; gap:10px; padding:8px 12px;
+    background:var(--panel); border:1px solid var(--border); border-radius:8px;
+    cursor:grab; user-select:none;
+  }
+  .priority-item:active { cursor:grabbing; }
+  .priority-item.dragging { opacity:.4; }
+  .priority-item.drag-over { border-color:var(--accent); }
+  .priority-item .drag-handle { color:var(--text-dim); font-size:14px; flex:0 0 auto; }
+  .priority-item .priority-rank {
+    flex:0 0 auto; min-width:22px; text-align:center; font-size:11px; font-weight:700;
+    color:var(--text-dim); background:var(--panel-2); border-radius:20px; padding:2px 0;
+  }
+  .priority-item .priority-name { font-family:var(--mono); font-size:13px; flex:1; word-break:break-all; }
+
   .help-icon {
     display:inline-flex; align-items:center; justify-content:center;
     width:14px; height:14px; border-radius:50%; background:var(--panel-2);
@@ -312,6 +328,14 @@ CONFIG_DASHBOARD_HTML = r"""<!doctype html>
       </div>
       <label><span data-i18n="cfg.field.queueTimeout">Queue timeout (seconds)</span><span class="help-icon" data-help="cfg_queueTimeout" data-i18n-title="help.clickForInfo" title="Click for more info">?</span></label>
       <input type="number" id="f-queue_timeout_seconds" min="1">
+    </div>
+  </section>
+
+  <section>
+    <h2><span data-i18n="cfg.section.priority">Model priority (eviction risk)</span><span class="help-icon" data-help="cfg_priority" data-i18n-title="help.clickForInfo" title="Click for more info">?</span></h2>
+    <div class="card">
+      <p class="hint" data-i18n="cfg.priority.hint">Drag to reorder. Models higher in this list are evicted later (kept warm longest) when the pool needs room - ties are still broken by least-recently-used, as before. Only enabled models are shown.</p>
+      <div id="priority-list" class="priority-list"></div>
     </div>
   </section>
 
@@ -576,6 +600,7 @@ async function loadConfig() {
   } catch (e) { /* RAG nicht konfiguriert - Datalist bleibt einfach leer */ }
   renderForm();
   renderModels();
+  renderPriorityList();
   clearDirty();
   await loadBackups();
 }
@@ -818,6 +843,7 @@ function renderModels() {
         const header = document.querySelector(`.accordion-item[data-idx="${idx}"] .name`);
         if (header) header.textContent = val || t("cfg.hint.unnamedModel");
       }
+      if (field === "name" || field === "enabled") { renderPriorityList(); }
     };
     el.addEventListener("input", handler);
     el.addEventListener("change", handler);
@@ -844,6 +870,77 @@ function renderModels() {
   // wurden oben mit dem Englisch-Fallback-Text erzeugt - erst hierdurch werden
   // sie tatsächlich in der aktuell gewählten Sprache angezeigt.
   applyStaticI18n();
+  renderPriorityList();
+}
+
+// --- Modell-Priorität: Drag-and-Drop-Liste --------------------------------
+// Reordern schreibt modelsList[i].priority direkt (höhere Zahl = wird später
+// verdrängt, siehe ModelConfig.priority in config.py) - beim bloßen Anzeigen
+// wird NICHTS umgeschrieben, nur beim tatsächlichen Ablegen einer Drag-
+// Operation, damit ein Nutzer, der diese Liste nie anfasst, auch weiterhin
+// das alte reine LRU-Verhalten bekommt (alle Modelle bleiben bei priority=0).
+let priorityDragged = null;
+
+function renderPriorityList() {
+  const box = $("priority-list");
+  if (!box) return; // Seite evtl. noch nicht vollständig gerendert
+  const items = modelsList.filter(m => m.enabled !== false && (m.name || "").trim());
+  if (items.length === 0) {
+    box.innerHTML = `<div class="empty">${t("empty.noModelsKnown")}</div>`;
+    return;
+  }
+  // Anzeigereihenfolge: aktuelle Priorität absteigend, bei Gleichstand
+  // alphabetisch - rein für die Darstellung, ändert modelsList nicht.
+  items.sort((a, b) => (b.priority ?? 0) - (a.priority ?? 0)
+    || (a.name || "").localeCompare(b.name || "", undefined, { sensitivity: "base" }));
+  box.innerHTML = items.map((m, i) => `
+    <div class="priority-item" draggable="true" data-name="${esc(m.name)}">
+      <span class="drag-handle">⠿⠿</span>
+      <span class="priority-rank">${i + 1}</span>
+      <span class="priority-name">${esc(m.name)}</span>
+    </div>
+  `).join("");
+  bindPriorityDrag();
+}
+
+function bindPriorityDrag() {
+  const box = $("priority-list");
+  box.querySelectorAll(".priority-item").forEach(el => {
+    el.addEventListener("dragstart", () => {
+      priorityDragged = el;
+      // Erst NACH dem aktuellen Event-Loop-Turn ausblenden, sonst zeigt der
+      // native Drag-Ghost (Browser-Screenshot des Elements) bereits "opacity:.4".
+      setTimeout(() => el.classList.add("dragging"), 0);
+    });
+    el.addEventListener("dragend", () => {
+      el.classList.remove("dragging");
+      box.querySelectorAll(".drag-over").forEach(x => x.classList.remove("drag-over"));
+      priorityDragged = null;
+      applyPriorityOrder();
+    });
+    el.addEventListener("dragover", (e) => {
+      e.preventDefault();
+      if (!priorityDragged || priorityDragged === el) return;
+      const rect = el.getBoundingClientRect();
+      const before = (e.clientY - rect.top) < rect.height / 2;
+      box.insertBefore(priorityDragged, before ? el : el.nextSibling);
+    });
+  });
+}
+
+function applyPriorityOrder() {
+  const names = Array.from($("priority-list").querySelectorAll(".priority-item")).map(el => el.dataset.name);
+  const n = names.length;
+  let changed = false;
+  names.forEach((name, i) => {
+    const m = modelsList.find(x => x.name === name);
+    if (!m) return;
+    const newPriority = n - i; // oben in der Liste = höchste Zahl = zuletzt verdrängt
+    if (m.priority !== newPriority) changed = true;
+    m.priority = newPriority;
+  });
+  if (changed) markDirty();
+  renderPriorityList(); // Rang-Nummern (1..n) neu anzeigen
 }
 
 // --- Lokale Modell-Dateien unwiderruflich von der Platte löschen ---------
@@ -969,6 +1066,7 @@ $("add-model-btn").addEventListener("click", () => {
     gpu_memory_utilization: null, tool_call_parser: null, reasoning_parser: null,
     enable_auto_tool_choice: false, vision: false, extra_args: [], hf_token: null, notes: "",
     max_tokens: null, rag_collection: null, repetition_penalty: null, repetition_detection: true,
+    priority: 0,
   });
   openAccordions.add(modelsList.length - 1);
   markDirty();

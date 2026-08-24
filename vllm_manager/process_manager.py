@@ -497,16 +497,19 @@ async def _make_room(cfg: Config, model: str, gmu: float) -> None:
         ) + gmu
 
     async def evict_one(prefer_sleep: bool, allow_kill_sleeping: bool) -> bool:
-        """Verdrängt EINE Engine per LRU. True bei Erfolg, False wenn gerade
-        nichts Verdrängbares da ist (alle übrigen Engines sind geschützt,
-        oder - bei prefer_sleep ohne allow_kill_sleeping - bereits am
-        Schlafen und deshalb tabu für diese Phase)."""
+        """Verdrängt EINE Engine per Priorität+LRU. True bei Erfolg, False
+        wenn gerade nichts Verdrängbares da ist (alle übrigen Engines sind
+        geschützt, oder - bei prefer_sleep ohne allow_kill_sleeping - bereits
+        am Schlafen und deshalb tabu für diese Phase)."""
         candidates = [e for e in others() if e.model not in protected_models()]
         if prefer_sleep and not allow_kill_sleeping:
             candidates = [e for e in candidates if e.state != "sleeping"]
         if not candidates:
             return False
-        victim = min(candidates, key=lambda e: e.last_used)
+        # Niedrigste Priorität zuerst (siehe ModelConfig.priority - höhere
+        # Zahl = wird später verdrängt), bei Gleichstand wie bisher LRU
+        # (am längsten ungenutzt zuerst).
+        victim = min(candidates, key=lambda e: (cfg.priority_for(e.model), e.last_used))
         if prefer_sleep and victim.sleep_capable and victim.state != "sleeping":
             logger.info("Schicke Modell '%s' in Sleep Mode, um Platz für '%s' zu schaffen", victim.model, model)
             await sleep_engine(victim.model, reason=f"evicted_for:{model}")
