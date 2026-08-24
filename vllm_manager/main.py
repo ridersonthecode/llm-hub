@@ -11,7 +11,7 @@ from typing import Optional
 
 import asyncio
 import httpx
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import FastAPI, Header, HTTPException, Request
 from fastapi.responses import StreamingResponse
 from fastapi.staticfiles import StaticFiles
 
@@ -437,19 +437,31 @@ RESTART_REQUIRED_FIELDS = {"host", "port"}
 
 @app.get("/config")
 async def get_config_endpoint():
+    cfg = get_config()
     return {
-        "config": get_config().model_dump(),
+        "config": cfg.model_dump(),
         "startup_warning": config_editor.startup_warning,
+        # Vom Dashboard-Editor bei GET gemerkt und beim POST unten wieder
+        # mitgeschickt (Header X-Config-Fingerprint) - erkennt, ob config.json
+        # zwischen Laden und Speichern von anderer Stelle geändert wurde (z.B.
+        # eine automatische Selbstkorrektur oder ein zweiter offener Tab), damit
+        # ein Save aus einem inzwischen veralteten Editor-Zustand diese Änderung
+        # nicht stillschweigend überschreibt. Siehe config_editor.save_config().
+        "fingerprint": config_editor.config_fingerprint(cfg),
     }
 
 
 @app.post("/config")
-async def save_config_endpoint(body: dict):
+async def save_config_endpoint(body: dict, x_config_fingerprint: Optional[str] = Header(None)):
     old_dump = get_config().model_dump()
     try:
-        new_cfg, backup_name = config_editor.save_config(body)
+        new_cfg, backup_name = config_editor.save_config(
+            body, expected_fingerprint=x_config_fingerprint
+        )
     except ValidationError as e:
         raise HTTPException(422, json.loads(e.json()))
+    except config_editor.ConfigConflictError as e:
+        raise HTTPException(409, str(e))
     new_dump = new_cfg.model_dump()
     restart_recommended = any(old_dump.get(f) != new_dump.get(f) for f in RESTART_REQUIRED_FIELDS)
     return {"ok": True, "backup": backup_name, "restart_recommended": restart_recommended}

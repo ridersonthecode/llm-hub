@@ -566,6 +566,14 @@ let state = null;
 let modelsList = [];
 let dirty = false;
 let openAccordions = new Set();
+// Fingerabdruck der zuletzt geladenen Config (siehe GET /config), wird beim
+// Speichern als X-Config-Fingerprint-Header mitgeschickt - erkennt, ob
+// config.json zwischenzeitlich von anderer Stelle geändert wurde (z.B. eine
+// automatische Selbstkorrektur im Hintergrund oder ein zweiter offener Tab),
+// damit ein Save aus diesem inzwischen veralteten Editor-Zustand diese
+// Änderung nicht stillschweigend überschreibt (Server antwortet dann mit 409,
+// siehe doSave()).
+let configFingerprint = null;
 
 function markDirty() {
   dirty = true;
@@ -583,6 +591,7 @@ async function loadConfig() {
   if (res.status === 401) { await ensureApiKey(); return loadConfig(); }
   const data = await res.json();
   state = data.config;
+  configFingerprint = data.fingerprint ?? null;
   modelsList = Object.entries(state.models || {}).map(([name, m]) => Object.assign({ name }, m));
   // Alphabetisch (case-insensitive) - Backend liefert cfg.models bereits sortiert
   // (siehe config.py: sort_models()), hier zusätzlich sortiert für den Fall, dass
@@ -780,6 +789,10 @@ function renderModels() {
           <input type="checkbox" class="m-field" data-idx="${i}" data-field="fast_load" id="m-fastload-${i}" ${m.fast_load ? "checked" : ""}>
           <label for="m-fastload-${i}" data-i18n="cfg.field.fastLoad">Fast load (--enforce-eager)</label>${helpIcon("cfg_fastLoad")}
         </div>
+        <div>
+          <label><span data-i18n="cfg.field.cudagraphCaptureSizes">CUDA graph capture sizes (comma-separated, empty = vLLM default)</span>${helpIcon("cfg_cudagraphCaptureSizes")}</label>
+          <input type="text" class="m-field" data-idx="${i}" data-field="cudagraph_capture_sizes" placeholder="1,2,4,8,16" value="${esc(m.cudagraph_capture_sizes ?? "")}">
+        </div>
 
         <div class="row">
           <div>
@@ -846,7 +859,7 @@ function renderModels() {
         if (num === null) delete pricing[sub]; else pricing[sub] = num;
         modelsList[idx].pricing = Object.keys(pricing).length ? pricing : null;
       } else {
-        modelsList[idx][field] = val === "" && (field === "tool_call_parser" || field === "reasoning_parser" || field === "hf_token" || field === "notes" || field === "rag_collection") ? null : val;
+        modelsList[idx][field] = val === "" && (field === "tool_call_parser" || field === "reasoning_parser" || field === "hf_token" || field === "notes" || field === "rag_collection" || field === "cudagraph_capture_sizes") ? null : val;
       }
       markDirty();
       if (field === "name" || field === "task") { populateModelSelects(); }
@@ -1190,7 +1203,23 @@ async function doSave() {
   statusEl.className = "status-msg";
   statusEl.textContent = "…";
   try {
-    const res = await fetch("/config", { method: "POST", headers: authHeaders(), body: JSON.stringify(buildPayload()) });
+    const res = await fetch("/config", {
+      method: "POST",
+      headers: authHeaders(configFingerprint ? { "X-Config-Fingerprint": configFingerprint } : {}),
+      body: JSON.stringify(buildPayload()),
+    });
+    if (res.status === 409) {
+      // config.json wurde zwischenzeitlich von anderer Stelle geändert (siehe
+      // main.py save_config_endpoint) - NICHT einfach nochmal speichern, das
+      // würde die fremde Änderung überschreiben. State bleibt bewusst
+      // unverändert (kein loadConfig()), damit die eigene, noch ungespeicherte
+      // Änderung sichtbar bleibt und der Nutzer sie nach dem manuellen Neuladen
+      // erneut eintragen kann.
+      const data = await res.json().catch(() => ({}));
+      statusEl.className = "status-msg error";
+      statusEl.textContent = t("cfg.status.conflict", { msg: data.detail || "" });
+      return false;
+    }
     const data = await res.json();
     if (!res.ok) throw new Error(formatValidationError(data.detail ?? data));
     clearDirty();

@@ -20,13 +20,15 @@ enthält dieselben sensiblen Daten wie config.json selbst):
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import logging
 import shutil
 import subprocess
+import threading
 import time
 from pathlib import Path
-from typing import Optional
+from typing import Callable, Optional
 
 from pydantic import ValidationError
 
@@ -35,6 +37,35 @@ from . import config as config_module
 from .config import CONFIG_PATH, Config
 
 logger = logging.getLogger("vllm_manager.config_editor")
+
+# Schützt JEDEN Schreibzugriff auf config.json (save_config UND patch_config,
+# siehe unten) - threading.Lock statt asyncio.Lock, weil Aufrufer teils über
+# asyncio.to_thread() in einem echten Worker-Thread laufen (ein asyncio.Lock
+# wirkt nur innerhalb derselben Event-Loop/desselben Threads, hier brauchen
+# wir echten Cross-Thread-Ausschluss). Ohne dieses Lock konnten zwei
+# gleichzeitige Schreiber (z.B. ein manueller Dashboard-Save UND eine
+# automatische Hintergrund-Korrektur wie register_model_if_missing oder
+# process_manager._autocorrect_kv_cache_deficit) sich gegenseitig
+# überschreiben - live beobachtet: 2026-08-24, siehe patch_config()-Docstring.
+_config_write_lock = threading.Lock()
+
+
+class ConfigConflictError(Exception):
+    """config.json wurde zwischen dem Laden (GET /config) und diesem Save-
+    Versuch von anderer Stelle geändert (siehe save_config(expected_fingerprint=...)).
+    Der Aufruf wird verworfen, statt die zwischenzeitliche Änderung stillschweigend
+    zu überschreiben - der Nutzer soll neu laden und seine Änderung erneut eintragen."""
+    pass
+
+
+def config_fingerprint(cfg: Optional[Config] = None) -> str:
+    """Kurzer, deterministischer Fingerabdruck des aktuell aktiven Configs (oder
+    eines übergebenen), zum Erkennen zwischenzeitlicher Änderungen (siehe
+    ConfigConflictError). Kein Sicherheitsmerkmal, nur Änderungserkennung -
+    16 Hex-Zeichen reichen dafür locker."""
+    c = cfg if cfg is not None else config_module.get_config()
+    canonical = json.dumps(c.model_dump(), sort_keys=True, default=str)
+    return hashlib.sha256(canonical.encode()).hexdigest()[:16]
 
 # Neben der tatsächlich verwendeten config.json (nicht fest PROJECT_ROOT!) -
 # CONFIG_PATH kann über die Umgebungsvariable VLLM_MANAGER_CONFIG woanders
@@ -147,26 +178,102 @@ def list_backups() -> list[dict]:
     return out
 
 
-def save_config(new_data: dict) -> tuple[Config, Optional[str]]:
+def save_config(
+    new_data: dict, *, expected_fingerprint: Optional[str] = None
+) -> tuple[Config, Optional[str]]:
     """Validiert new_data, sichert die aktuelle config.json als Backup,
     schreibt new_data atomar nach config.json und übernimmt sie live ins
     laufende Programm. Wirft pydantic.ValidationError bei ungültigen Daten -
-    dabei wird NICHTS geschrieben. Gibt (neue Config, Backup-Dateiname) zurück."""
+    dabei wird NICHTS geschrieben. Gibt (neue Config, Backup-Dateiname) zurück.
+
+    expected_fingerprint (optional): Fingerabdruck (siehe config_fingerprint()),
+    den der Aufrufer beim LADEN der Ausgangsdaten gesehen hat. Weicht die
+    aktuell aktive Config beim Schreiben davon ab, ist config.json seither
+    von anderer Stelle geändert worden (z.B. automatische Selbstkorrektur
+    zwischen Laden und Klick auf "Speichern" im Dashboard-Editor) - new_data
+    ist dann ein FLACHER SNAPSHOT der alten Datei und würde diese Änderung
+    stillschweigend wieder rückgängig machen. Statt das zuzulassen, wird
+    ConfigConflictError geworfen und NICHTS geschrieben; der Aufrufer soll
+    neu laden und seine Änderung auf der frischen Version wiederholen. Wird
+    aktuell vom Dashboard-Editor genutzt (siehe main.py), NICHT von
+    patch_config() unten - die braucht das nicht, weil sie ohnehin immer
+    frisch von der Platte liest, statt einen Snapshot zu überschreiben."""
     new_cfg = Config(**new_data)  # wirft ValidationError, wenn ungültig
     config_module.sort_models(new_cfg)  # Modelle alphabetisch, bevor geschrieben/übernommen wird
 
-    _ensure_backups_dir()
-    backup_name = None
-    if CONFIG_PATH.exists():
-        backup_name = f"config-{_timestamp()}.json"
-        shutil.copy2(CONFIG_PATH, BACKUPS_DIR / backup_name)
-        _prune_backups()
+    with _config_write_lock:
+        if expected_fingerprint is not None:
+            current_fp = config_fingerprint()
+            if current_fp != expected_fingerprint:
+                raise ConfigConflictError(
+                    "Die Konfiguration wurde zwischenzeitlich von anderer Stelle "
+                    "geändert (z.B. eine automatische Korrektur im Hintergrund oder "
+                    "ein anderer geöffneter Tab) - bitte neu laden und die eigene "
+                    "Änderung erneut eintragen, um nichts zu überschreiben."
+                )
 
-    _atomic_write_json(CONFIG_PATH, new_cfg.model_dump())
-    config_module.set_config(new_cfg)
-    _snapshot_last_known_good(new_cfg)
-    global startup_warning
-    startup_warning = None  # ein erfolgreicher manueller Save entschärft die Startup-Warnung
+        _ensure_backups_dir()
+        backup_name = None
+        if CONFIG_PATH.exists():
+            backup_name = f"config-{_timestamp()}.json"
+            shutil.copy2(CONFIG_PATH, BACKUPS_DIR / backup_name)
+            _prune_backups()
+
+        _atomic_write_json(CONFIG_PATH, new_cfg.model_dump())
+        config_module.set_config(new_cfg)
+        _snapshot_last_known_good(new_cfg)
+        global startup_warning
+        startup_warning = None  # ein erfolgreicher manueller Save entschärft die Startup-Warnung
+    return new_cfg, backup_name
+
+
+def patch_config(mutate: Callable[[dict], object]) -> Optional[tuple[Config, Optional[str]]]:
+    """Für automatische Hintergrund-Schreiber (register_model_if_missing unten,
+    process_manager._autocorrect_kv_cache_deficit) statt eines rohen
+    get_config() -> model_dump() -> ... -> save_config()-Umwegs.
+
+    Der Unterschied ist entscheidend: get_config() liefert die evtl. schon
+    veraltete In-Memory-Kopie, die u.U. schon vor Sekunden (bei großen
+    Modellen: nach einem kompletten Kaltstart-Versuch) geladen wurde. Baut ein
+    Hintergrund-Prozess darauf einen vollständigen dict-Snapshot und schreibt
+    den später komplett zurück, überschreibt er JEDE Änderung, die in der
+    Zwischenzeit über den Dashboard-Editor gespeichert wurde - live
+    beobachtet: 2026-08-24 (gemeldet als "ich speichere eine Änderung, aber
+    nach einem Neustart ist wieder die alte Version aktiv").
+
+    patch_config() behebt das, indem es config.json UNMITTELBAR vor dem
+    Schreiben frisch von der Platte liest (nicht die zwischengespeicherte
+    Kopie), `mutate(dump)` darauf anwendet und sofort - noch innerhalb
+    desselben Lock-Abschnitts, also ohne dass dazwischen ein anderer Schreiber
+    reinfunken kann - zurückschreibt. `mutate` darf `dump` in-place ändern;
+    gibt sie explizit False zurück, wird NICHTS geschrieben (Konvention für
+    "beim frischen Nachsehen war die Änderung gar nicht mehr nötig", z.B. weil
+    das Modell inzwischen schon anderweitig registriert wurde) - dann liefert
+    diese Funktion None statt (Config, Backup-Dateiname).
+
+    Kein expected_fingerprint nötig (anders als save_config oben): dieser
+    Pfad liest ja ohnehin garantiert frisch, es gibt also nichts, wovon er
+    "veraltet" sein könnte."""
+    with _config_write_lock:
+        current = config_module.load_config()  # frisch von Disk, NICHT get_config()
+        dump = current.model_dump()
+        if mutate(dump) is False:
+            return None
+        new_cfg = Config(**dump)
+        config_module.sort_models(new_cfg)
+
+        _ensure_backups_dir()
+        backup_name = None
+        if CONFIG_PATH.exists():
+            backup_name = f"config-{_timestamp()}.json"
+            shutil.copy2(CONFIG_PATH, BACKUPS_DIR / backup_name)
+            _prune_backups()
+
+        _atomic_write_json(CONFIG_PATH, new_cfg.model_dump())
+        config_module.set_config(new_cfg)
+        _snapshot_last_known_good(new_cfg)
+        global startup_warning
+        startup_warning = None
     return new_cfg, backup_name
 
 
@@ -194,48 +301,48 @@ async def register_model_if_missing(model: str, note: str) -> bool:
     if model in config_module.get_config().models:
         return False  # häufigster Fall - gar nicht erst blockierend nachschauen
 
-    def _do_register() -> bool:
-        # Config frisch lesen statt der oben schon geprüften - zwischen dem
-        # async-Einstieg und hier könnte sich (Race mit einem parallelen
-        # manuellen Save) etwas geändert haben.
-        current = config_module.get_config()
-        if model in current.models:
-            return False
-        try:
-            caps = capability_detector.detect_capabilities(model, current.hf_home)
-        except Exception:
-            logger.exception(
-                "Fähigkeiten-Erkennung für automatisch zu registrierendes Modell '%s' "
-                "fehlgeschlagen - trage trotzdem mit Standardwerten ein", model,
-            )
-            caps = None
+    # Fähigkeiten-Erkennung VOR dem eigentlichen Schreiben (kann dauern - liest
+    # Dateien, ggf. Netzwerk) - bewusst außerhalb von patch_config()/dessen Lock,
+    # damit ein langsamer detect_capabilities() nicht alle anderen Config-
+    # Schreiber blockiert. Der eigentliche Write in _mutate() unten prüft
+    # `model in dump["models"]` dann nochmal gegen den zu diesem Zeitpunkt
+    # frisch von der Platte gelesenen Stand (siehe patch_config()-Docstring) -
+    # das hier ist also nur eine Vorab-Optimierung, keine Korrektheitsannahme.
+    current = config_module.get_config()
+    try:
+        caps = await asyncio.to_thread(capability_detector.detect_capabilities, model, current.hf_home)
+    except Exception:
+        logger.exception(
+            "Fähigkeiten-Erkennung für automatisch zu registrierendes Modell '%s' "
+            "fehlgeschlagen - trage trotzdem mit Standardwerten ein", model,
+        )
+        caps = None
 
-        entry: dict = {"notes": note}
-        if caps and caps.get("found"):
-            entry["task"] = caps["task"]["suggested"]
-            entry["vision"] = bool(caps["vision"]["detected"])
-            if caps["tool_calling"]["detected"]:
-                entry["enable_auto_tool_choice"] = True
-                entry["tool_call_parser"] = caps["tool_calling"]["suggested_parser"]
-            if caps["reasoning"]["detected"]:
-                entry["reasoning_parser"] = caps["reasoning"]["suggested_parser"]
-            if caps["max_model_len"]["suggested"] is not None:
-                entry["max_model_len"] = caps["max_model_len"]["suggested"]
-            if caps["gpu_memory_utilization"]["suggested"] is not None:
-                entry["gpu_memory_utilization"] = caps["gpu_memory_utilization"]["suggested"]
+    entry: dict = {"notes": note}
+    if caps and caps.get("found"):
+        entry["task"] = caps["task"]["suggested"]
+        entry["vision"] = bool(caps["vision"]["detected"])
+        if caps["tool_calling"]["detected"]:
+            entry["enable_auto_tool_choice"] = True
+            entry["tool_call_parser"] = caps["tool_calling"]["suggested_parser"]
+        if caps["reasoning"]["detected"]:
+            entry["reasoning_parser"] = caps["reasoning"]["suggested_parser"]
+        if caps["max_model_len"]["suggested"] is not None:
+            entry["max_model_len"] = caps["max_model_len"]["suggested"]
+        if caps["gpu_memory_utilization"]["suggested"] is not None:
+            entry["gpu_memory_utilization"] = caps["gpu_memory_utilization"]["suggested"]
 
-        dump = current.model_dump()
+    def _mutate(dump: dict):
         if model in dump["models"]:
-            return False
+            return False  # zwischenzeitlich schon anderweitig registriert (z.B. paralleler Download)
         dump["models"][model] = entry
-        save_config(dump)
-        return True
 
     try:
-        registered = await asyncio.to_thread(_do_register)
+        result = await asyncio.to_thread(patch_config, _mutate)
     except Exception:
         logger.exception("Konnte '%s' nicht automatisch in config.json eintragen", model)
         return False
+    registered = result is not None
     if registered:
         logger.info("Modell '%s' automatisch in config.json eingetragen (%s)", model, note)
     return registered

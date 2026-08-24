@@ -340,6 +340,23 @@ async def wake_engine(model: str, wake_timeout: float = 120.0) -> dict:
     return await ensure_loaded(model, wait=True)
 
 
+def _parse_cudagraph_sizes(raw: str) -> list[int]:
+    """Parst ModelConfig.cudagraph_capture_sizes ("1, 2,4 8,16" o.ä.) in eine
+    aufsteigend sortierte, deduplizierte Liste positiver Ints. Ungültige/leere
+    Teile werden stillschweigend übersprungen statt die Engine am Start zu
+    hindern - eine verkorkste Eingabe soll bestenfalls zum vLLM-Standard
+    zurückfallen, nicht den Modellstart blockieren."""
+    sizes: set[int] = set()
+    for part in raw.replace(",", " ").split():
+        try:
+            n = int(part)
+        except ValueError:
+            continue
+        if n > 0:
+            sizes.add(n)
+    return sorted(sizes)
+
+
 def _build_command(cfg: Config, model: str, port: int) -> list[str]:
     mcfg = cfg.models.get(model)
     gmu, mml = cfg.serve_args_for(model)
@@ -369,6 +386,13 @@ def _build_command(cfg: Config, model: str, port: int) -> list[str]:
             # Siehe ModelConfig.fast_load - deaktiviert CUDA-Graph-Capture,
             # verkürzt den Kaltstart auf Kosten der Dauer-Inferenzgeschwindigkeit.
             cmd.append("--enforce-eager")
+        elif mcfg.cudagraph_capture_sizes:
+            # Siehe ModelConfig.cudagraph_capture_sizes - schmalere Liste statt
+            # vLLMs ~51 Standardgrößen, verkürzt Capture-Zeit ohne Durchsatz im
+            # abgedeckten Bereich zu verlieren. Ignoriert bei fast_load (siehe oben).
+            sizes = _parse_cudagraph_sizes(mcfg.cudagraph_capture_sizes)
+            if sizes:
+                cmd += ["--cudagraph-capture-sizes"] + [str(s) for s in sizes]
         cmd += list(mcfg.extra_args or [])
     return cmd
 
@@ -920,21 +944,35 @@ async def _autocorrect_kv_cache_deficit(model: str, error_message: str) -> bool:
         "auf %.3f, trage das in config.json ein und versuche erneut zu laden.",
         model, current_gmu, deficit_gib, new_gmu,
     )
-    dump = cfg.model_dump()
-    entry = dump["models"].setdefault(model, {})
-    entry["gpu_memory_utilization"] = new_gmu
-    old_notes = (entry.get("notes") or "").strip()
-    correction_note = (
-        f"gpu_memory_utilization automatisch von {current_gmu} auf {new_gmu} korrigiert "
-        f"(KV-Cache-Defizit {deficit_gib:.2f} GiB laut vLLM-Fehlermeldung beim Start)."
-    )
-    entry["notes"] = f"{old_notes}\n{correction_note}".strip() if old_notes else correction_note
+
+    def _mutate(dump: dict):
+        # Der obige cfg-Snapshot kann durch die Zeit für Log-Tail-Read und
+        # GPU-Abfrage schon wieder veraltet sein (siehe config_editor.
+        # patch_config()-Docstring - Auslöser dieses Mechanismus war genau
+        # diese Funktion). Deshalb hier NICHT den oben berechneten new_gmu
+        # blind draufschreiben, sondern gegen den gerade frisch von der
+        # Platte gelesenen Wert neu rechnen - falls der z.B. durch einen
+        # parallelen manuellen Fix im Dashboard-Editor inzwischen schon
+        # ausreicht, gibt es nichts mehr zu tun.
+        fresh_gmu, _ = Config(**dump).serve_args_for(model)
+        recomputed_new_gmu = min(0.95, round(fresh_gmu + (deficit_gib * 1.35) / total_gib, 3))
+        if recomputed_new_gmu <= fresh_gmu:
+            return False
+        entry = dump["models"].setdefault(model, {})
+        entry["gpu_memory_utilization"] = recomputed_new_gmu
+        old_notes = (entry.get("notes") or "").strip()
+        correction_note = (
+            f"gpu_memory_utilization automatisch von {fresh_gmu} auf {recomputed_new_gmu} korrigiert "
+            f"(KV-Cache-Defizit {deficit_gib:.2f} GiB laut vLLM-Fehlermeldung beim Start)."
+        )
+        entry["notes"] = f"{old_notes}\n{correction_note}".strip() if old_notes else correction_note
+
     try:
-        await asyncio.to_thread(config_editor.save_config, dump)
+        result = await asyncio.to_thread(config_editor.patch_config, _mutate)
     except Exception:
         logger.exception("Konnte automatisch korrigiertes gpu_memory_utilization für '%s' nicht speichern", model)
         return False
-    return True
+    return result is not None
 
 
 MAX_KV_CACHE_AUTOCORRECT_ATTEMPTS = 3

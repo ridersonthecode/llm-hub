@@ -53,6 +53,24 @@ class ModelConfig(BaseModel):
     # greift die Graph-Capture ohnehin nur beim allerersten Laden, dort
     # bringt es entsprechend weniger. Default aus.
     fast_load: bool = False
+    # Begrenzt, für welche Batch-Größen vLLM beim Kaltstart CUDA-Graphen
+    # aufzeichnet (siehe process_manager._build_command, Flag
+    # --cudagraph-capture-sizes). Ohne dieses Feld leitet vLLM die Liste aus
+    # max_num_seqs (Default 256) ab: [1,2,4] + 8er-Schritte bis 256 + 16er-
+    # Schritte bis 512 - satte ~51 Größen, für die JEWEILS ein echter
+    # Forward-Pass durchs Modell läuft, nur um den Graphen aufzuzeichnen.
+    # Live gemessen: davon stammten ~35s der ~290s Kaltstart eines 35B-Modells.
+    # Für einen Heimserver, der selten mehr als eine Handvoll gleichzeitiger
+    # Sequenzen bedient, ist das massive Overkill. Kommagetrennte Liste
+    # realistischer Batch-Größen (z.B. "1,2,4,8,16") reduziert die Capture-
+    # Zeit etwa proportional zur Anzahl der Größen, OHNE die Dauer-
+    # Geschwindigkeit im abgedeckten Bereich zu verschlechtern - anders als
+    # fast_load also kein Kompromiss im Normalbetrieb, nur bei seltenen
+    # Lastspitzen jenseits der größten angegebenen Zahl fällt vLLM für die
+    # überzähligen Sequenzen auf den langsameren Eager-Pfad zurück. Wird
+    # ignoriert, wenn fast_load aktiv ist (dort gibt es ohnehin keine
+    # CUDA-Graphen). None/leer = vLLMs Standardliste (kein Override).
+    cudagraph_capture_sizes: Optional[str] = None
     # "generate" (normales Chat-/Completion-Modell) oder "embed"
     # (Embedding-Modell für RAG, z.B. Qwen3-Embedding). Steuert, ob vllm serve
     # mit --runner pooling gestartet wird (vLLMs Nachfolger von --task).
