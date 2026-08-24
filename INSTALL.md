@@ -6,10 +6,11 @@ von oben nach unten durchgehen. Für Hintergrund/Details zu einzelnen Features
 siehe [Anleitung.md](Anleitung.md) - dieses Dokument ist bewusst nur die reine
 Installations-Checkliste.
 
-**Was im ZIP enthalten ist:** der komplette Code (`vllm_manager/`), die volle
-Git-Historie (`.git/`, Remote zeigt auf GitHub), Doku, `config.example.json`
-(mit den heute [2026-08-24] leergetesteten/getunten Startwerten) und die
-systemd-Unit-Vorlage.
+**Was im ZIP enthalten ist:** der komplette Code (`vllm_manager/`) als reiner
+Datei-Snapshot (**kein** `.git` - auf dem neuen Spark ist also keine
+Git-Anmeldung nötig, einfach entpacken und loslegen), Doku,
+`config.example.json` (mit den heute [2026-08-24] leergetesteten/getunten
+Startwerten) und die systemd-Unit-Vorlage.
 
 **Was NICHT enthalten ist (bewusst, siehe `.gitignore`):**
 - `.venv/` - wird in Schritt 3 neu gebaut (Python-Pakete sind u.a.
@@ -64,7 +65,7 @@ scp vllm-manager.zip <user>@<neuer-spark>:~/
 cd ~
 unzip vllm-manager.zip -d vllm
 cd vllm
-git log --oneline -3    # sollte die aktuelle Historie zeigen, u.a. den heutigen Stand
+ls    # sollte u.a. vllm_manager/, INSTALL.md, config.example.json, vllm.service zeigen
 ```
 
 ## 3. Python-Umgebung aufsetzen
