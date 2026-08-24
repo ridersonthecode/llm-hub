@@ -219,6 +219,10 @@ async def register_model_if_missing(model: str, note: str) -> bool:
                 entry["tool_call_parser"] = caps["tool_calling"]["suggested_parser"]
             if caps["reasoning"]["detected"]:
                 entry["reasoning_parser"] = caps["reasoning"]["suggested_parser"]
+            if caps["max_model_len"]["suggested"] is not None:
+                entry["max_model_len"] = caps["max_model_len"]["suggested"]
+            if caps["gpu_memory_utilization"]["suggested"] is not None:
+                entry["gpu_memory_utilization"] = caps["gpu_memory_utilization"]["suggested"]
 
         dump = current.model_dump()
         if model in dump["models"]:

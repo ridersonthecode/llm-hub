@@ -199,7 +199,9 @@ async def _run_job(job: dict, hf_token: Optional[str]) -> None:
         asyncio.create_task(config_editor.register_model_if_missing(
             model,
             note="Automatisch registriert nach Download (über /models/pull bzw. das "
-                 "MCP-Tool pull_model). Bitte Werte prüfen (nur automatisch erkannt).",
+                 "MCP-Tool pull_model). Bitte Werte prüfen (nur automatisch erkannt) - "
+                 "gpu_memory_utilization ist ein konservativer Minimalwert zum sicheren "
+                 "Start, für mehr Kontext/Durchsatz ggf. erhöhen.",
         ))
     else:
         logger.error("Download fehlgeschlagen: %s (exit code %s)", model, proc.returncode)

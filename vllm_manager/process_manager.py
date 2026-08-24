@@ -977,7 +977,9 @@ async def ensure_loaded(model: str, wait: bool = True) -> dict:
                 note="Automatisch registriert beim ersten erfolgreichen Laden - "
                      "war lokal gecacht oder wurde von vLLM selbst von HF "
                      "heruntergeladen, ohne vorher im Config-Editor angelegt zu sein. "
-                     "Bitte Werte prüfen (nur automatisch erkannt).",
+                     "Bitte Werte prüfen (nur automatisch erkannt) - gpu_memory_utilization "
+                     "ist ein konservativer Minimalwert zum sicheren Start, für mehr Kontext/"
+                     "Durchsatz ggf. erhöhen.",
             ))
             return eng.status()
         await asyncio.sleep(2)

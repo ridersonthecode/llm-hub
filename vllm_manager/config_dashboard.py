@@ -1035,6 +1035,8 @@ function renderDetectResults(idx, data) {
     [t("badge.toolCalling"), valueCell(data.tool_calling.detected ? (data.tool_calling.suggested_parser || true) : false), data.tool_calling.confidence, data.tool_calling.evidence],
     [t("badge.reasoning"), valueCell(data.reasoning.detected ? (data.reasoning.suggested_parser || true) : false), data.reasoning.confidence, data.reasoning.evidence],
     [t("cfg.field.task"), valueCell(data.task.suggested), data.task.confidence, data.task.evidence],
+    [t("cfg.field.maxModelLen"), valueCell(data.max_model_len.suggested), data.max_model_len.confidence, data.max_model_len.evidence],
+    [t("cfg.field.gpuMemUtil"), valueCell(data.gpu_memory_utilization.suggested), data.gpu_memory_utilization.confidence, data.gpu_memory_utilization.evidence],
   ];
   box.innerHTML = `
     <div class="card" style="margin-top:8px;">
@@ -1062,6 +1064,8 @@ function applyDetected(idx, data) {
   m.tool_call_parser = data.tool_calling.detected ? (data.tool_calling.suggested_parser || m.tool_call_parser) : null;
   m.reasoning_parser = data.reasoning.detected ? (data.reasoning.suggested_parser || m.reasoning_parser) : null;
   m.task = data.task.suggested;
+  if (data.max_model_len.suggested != null) m.max_model_len = data.max_model_len.suggested;
+  if (data.gpu_memory_utilization.suggested != null) m.gpu_memory_utilization = data.gpu_memory_utilization.suggested;
   markDirty();
   openAccordions.add(idx);
   renderModels();
