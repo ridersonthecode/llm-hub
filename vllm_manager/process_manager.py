@@ -66,14 +66,6 @@ logger = logging.getLogger("vllm_manager.engine")
 LOG_DIR = Path(__file__).resolve().parent.parent / "logs"
 LOG_DIR.mkdir(exist_ok=True)
 
-# Live gemessen (2026-08-24, 35B-Modell): Sleep Mode gibt NICHT den gesamten
-# reservierten Speicher zurück (KV-Cache/Aktivierungs-Puffer bleiben teils
-# belegt) - nur ~21 von ~43 GiB. Fließt konservativ in die schnelle Config-
-# Schätzung (_make_room.total_util) ein, damit die NICHT bei jedem
-# schlafenden Modell optimistisch "0" annimmt - der Live-GPU-Check bleibt
-# trotzdem die eigentliche Absicherung.
-SLEEPING_ENGINE_RETAINED_FRACTION = 0.5
-
 MAX_HISTORY = 50
 # Verlauf abgeschlossener Modell-Sessions (neueste zuerst) - wie "ollama ps",
 # nur historisch statt nur der aktuelle Zustand. Überlebt keinen Dienst-Neustart.
@@ -442,21 +434,31 @@ async def _make_room(cfg: Config, model: str, gmu: float) -> None:
             | {e.model for e in engines.values() if e.state == "loading" and e.model != model}
         )
 
-    def total_util() -> float:
-        # Schlafende Engines zählen mit SLEEPING_ENGINE_RETAINED_FRACTION statt
-        # 0 - Sleep Mode gibt live gemessen nur ~50% des reservierten Speichers
-        # zurück, nicht alles (siehe Konstante oben). Der Live-GPU-Check unten
-        # bleibt die eigentliche Absicherung, falls auch das noch zu
-        # optimistisch war.
+    def total_util_optimistic() -> float:
+        # NUR für die Frage "sollte Phase 1+2 überhaupt noch etwas
+        # einschläfern" - schlafende Engines zählen hier optimistisch mit 0.
+        # Das ist bewusst NICHT die autoritative Zahl (die liefert erst der
+        # Live-GPU-Check in Phase 3 unten) - eine konservativere Schätzung
+        # hier hatte live einen Bug verursacht: sie ließ Phase 1+2 nach EINEM
+        # Sleep glauben, das reiche nicht, und dieselbe (jetzt schlafende)
+        # Engine wurde im nächsten Durchlauf sofort hart beendet - Sleep
+        # Mode brachte dadurch nie etwas. Phase 1+2 darf ein bereits
+        # schlafendes Modell deshalb NIE hart beenden (siehe evict_one
+        # allow_kill_sleeping) - das entscheidet einzig Phase 3 anhand
+        # ECHTER Zahlen.
         return sum(
-            cfg.serve_args_for(e.model)[0] * (SLEEPING_ENGINE_RETAINED_FRACTION if e.state == "sleeping" else 1.0)
+            0.0 if e.state == "sleeping" else cfg.serve_args_for(e.model)[0]
             for e in others()
         ) + gmu
 
-    async def evict_one(prefer_sleep: bool) -> bool:
+    async def evict_one(prefer_sleep: bool, allow_kill_sleeping: bool) -> bool:
         """Verdrängt EINE Engine per LRU. True bei Erfolg, False wenn gerade
-        nichts Verdrängbares da ist (alle übrigen Engines sind geschützt)."""
+        nichts Verdrängbares da ist (alle übrigen Engines sind geschützt,
+        oder - bei prefer_sleep ohne allow_kill_sleeping - bereits am
+        Schlafen und deshalb tabu für diese Phase)."""
         candidates = [e for e in others() if e.model not in protected_models()]
+        if prefer_sleep and not allow_kill_sleeping:
+            candidates = [e for e in candidates if e.state != "sleeping"]
         if not candidates:
             return False
         victim = min(candidates, key=lambda e: e.last_used)
@@ -466,20 +468,31 @@ async def _make_room(cfg: Config, model: str, gmu: float) -> None:
         else:
             if victim.state == "sleeping":
                 logger.info(
-                    "Beende schlafendes Modell '%s' endgültig (Sleep Mode allein reicht nicht aus), "
-                    "um Platz für '%s' zu schaffen", victim.model, model,
+                    "Beende schlafendes Modell '%s' endgültig (Sleep Mode allein reicht nicht aus, "
+                    "laut Live-Speicherprüfung), um Platz für '%s' zu schaffen", victim.model, model,
                 )
             else:
                 logger.info("Verdränge Modell '%s' aus dem Pool, um Platz für '%s' zu schaffen", victim.model, model)
             await stop_engine(victim.model, reason=f"evicted_for:{model}")
         return True
 
-    async def wait_for_room(prefer_sleep: bool, busy_msg: str, impossible_msg: str) -> None:
+    async def wait_for_room(prefer_sleep: bool, allow_kill_sleeping: bool, busy_msg: str, impossible_msg: str) -> bool:
+        """Wie evict_one(), aber wartet bei Bedarf in der Warteschlange (siehe
+        Moduldocstring) statt sofort aufzugeben. Gibt False zurück (statt zu
+        warten/zu werfen), wenn NUR noch bereits schlafende Kandidaten übrig
+        sind und allow_kill_sleeping=False - das ist kein Fehler, sondern das
+        Signal an den Aufrufer, dass Phase 1+2 hier nichts mehr beitragen
+        kann und Phase 3 (Live-Check) übernehmen muss."""
         while True:
-            if not others():
+            pool = others()
+            if not pool:
                 raise RuntimeError(impossible_msg)
-            if await evict_one(prefer_sleep):
-                return
+            if await evict_one(prefer_sleep, allow_kill_sleeping):
+                return True
+            if prefer_sleep and not allow_kill_sleeping:
+                unprotected = [e for e in pool if e.model not in protected_models()]
+                if unprotected and all(e.state == "sleeping" for e in unprotected):
+                    return False
             if time.time() > deadline:
                 raise RuntimeError(
                     f"Kein Platz im Hot Pool für '{model}' nach {cfg.queue_timeout_seconds}s Warten in "
@@ -488,12 +501,13 @@ async def _make_room(cfg: Config, model: str, gmu: float) -> None:
                 )
             await asyncio.sleep(1.0)
 
-    # Phase 1+2: Poolgröße (max_concurrent_models) und Config-Schätzung
-    # (gpu_memory_ceiling) gemeinsam - solange die Poolgrenze selbst noch
-    # verletzt ist, MUSS eine Engine wirklich beendet werden (Sleep Mode
-    # gibt keinen Slot/Port frei, nur Speicher); ist nur noch das
-    # Speicherbudget knapp, wird Sleep Mode bevorzugt.
-    while len(others()) >= cfg.max_concurrent_models or total_util() > cfg.gpu_memory_ceiling:
+    # Phase 1+2: Poolgröße (max_concurrent_models) und optimistische Config-
+    # Schätzung (gpu_memory_ceiling) gemeinsam - solange die Poolgrenze
+    # selbst noch verletzt ist, MUSS eine Engine wirklich beendet werden
+    # (Sleep Mode gibt keinen Slot/Port frei, nur Speicher); ist nur noch das
+    # Speicherbudget knapp, wird Sleep Mode bevorzugt - und NIE ein bereits
+    # schlafendes Modell hart beendet (siehe evict_one/wait_for_room oben).
+    while len(others()) >= cfg.max_concurrent_models or total_util_optimistic() > cfg.gpu_memory_ceiling:
         slot_limited = len(others()) >= cfg.max_concurrent_models
         busy = sorted({e.model for e in others() if e.model in protected_models()})
         busy_msg = (
@@ -506,7 +520,17 @@ async def _make_room(cfg: Config, model: str, gmu: float) -> None:
             f"auch mit leerem Hot Pool nicht. gpu_memory_ceiling oder die "
             f"gpu_memory_utilization dieses Modells in config.json anpassen."
         )
-        await wait_for_room(prefer_sleep=not slot_limited, busy_msg=busy_msg, impossible_msg=impossible_msg)
+        made_progress = await wait_for_room(
+            prefer_sleep=not slot_limited, allow_kill_sleeping=slot_limited,
+            busy_msg=busy_msg, impossible_msg=impossible_msg,
+        )
+        if not made_progress:
+            # Nur noch bereits schlafende (unprotected) Kandidaten übrig -
+            # die optimistische Schätzung zählt sie mit 0 und würde hier
+            # endlos weiterdrehen, ohne dass Sleep Mode noch etwas beitragen
+            # kann. Ab hier entscheidet ausschließlich Phase 3 (echte
+            # GPU-Zahlen), ob doch noch hart verdrängt werden muss.
+            break
 
     # Live-Check: siehe Moduldocstring oben / _query_gpu_memory_gib(). Läuft
     # ERST NACH der schnellen Config-Schätzung (kein Overhead im Normalfall),
@@ -536,7 +560,11 @@ async def _make_room(cfg: Config, model: str, gmu: float) -> None:
             f"auf diesem Unified-Memory-System) - bitte manuell Speicher freigeben oder "
             f"gpu_memory_utilization/gpu_memory_ceiling in config.json senken."
         )
-        await wait_for_room(prefer_sleep=True, busy_msg=busy_msg, impossible_msg=impossible_msg)
+        # allow_kill_sleeping=True: hier (und NUR hier) darf ein bereits
+        # schlafendes Modell endgültig beendet werden, wenn die ECHTEN
+        # GPU-Zahlen zeigen, dass Sleep Mode allein nicht genug freigegeben
+        # hat - siehe Moduldocstring (Eskalation aufs älteste Modell).
+        await wait_for_room(prefer_sleep=True, allow_kill_sleeping=True, busy_msg=busy_msg, impossible_msg=impossible_msg)
         # CUDA-Treiber braucht nach Prozessende/Sleep einen kurzen Moment, um
         # den freigegebenen Speicher tatsächlich als frei zu melden.
         await asyncio.sleep(1.0)
