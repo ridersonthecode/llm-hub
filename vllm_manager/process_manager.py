@@ -7,7 +7,16 @@ engine_port, engine_port+1, ...). Ein Wechsel zwischen bereits geladenen
 Modellen ist dann instant statt eines Kaltstarts. Reicht der Speicher (Summe
 der gpu_memory_utilization aller Engines, siehe gpu_memory_ceiling) oder die
 Poolgröße nicht, wird die am längsten ungenutzte Engine verdrängt (LRU) -
-Engines mit gerade aktiven Anfragen werden dabei übersprungen."""
+Engines mit gerade aktiven Anfragen werden dabei übersprungen.
+
+Zusätzlich zur reinen Config-Schätzung (Summe der gpu_memory_utilization-Werte
+gegen gpu_memory_ceiling) prüft _make_room() vor dem Start noch den TATSÄCHLICH
+freien GPU-Speicher (siehe _query_gpu_memory_gib) - die Schätzung sieht nicht,
+was Prozesse AUSSERHALB des Hot Pools belegen (z.B. andere GPU-Anwendungen,
+oder auf Unified-Memory-Systemen wie NVIDIA GB10 schlicht die allgemeine
+System-RAM-Auslastung). Ohne diesen Live-Check startet die Engine trotzdem,
+braucht ca. 10s zum Hochfahren und crasht dann mit "Free memory on device X
+is less than desired Y" - das war lange Zeit die häufigste Absturzursache."""
 from __future__ import annotations
 
 import asyncio
@@ -189,6 +198,37 @@ def _allocate_port(cfg: Config) -> int:
     )
 
 
+_gpu_mem_query_broken = False  # nach dem ersten Fehlschlag nicht bei jedem Modell-Load erneut versuchen
+
+
+def _query_gpu_memory_gib() -> tuple[Optional[float], Optional[float]]:
+    """(frei, gesamt) in GiB über torch.cuda.mem_get_info() - dieselbe
+    CUDA-Treiber-API, die vLLM selbst beim Start prüft (siehe die
+    "Free memory on device"-Fehlermeldung in worker/utils.py). BEWUSST NICHT
+    nvidia-smi/NVML: auf Unified-Memory-Systemen wie NVIDIA GB10 liefert
+    `nvidia-smi --query-gpu=memory.free` dort nur "N/A" (per `nvidia-smi -q -d
+    MEMORY` verifiziert), torch.cuda.mem_get_info() funktioniert dagegen auch
+    dort zuverlässig. Der erste Aufruf initialisiert einen CUDA-Kontext im
+    Manager-Prozess (~300-500MB, einmalig) - danach ist die Abfrage praktisch
+    kostenlos (<1ms), ein Subprozess pro Aufruf wäre hier unnötiger Overhead."""
+    global _gpu_mem_query_broken
+    if _gpu_mem_query_broken:
+        return None, None
+    try:
+        import torch
+        free_bytes, total_bytes = torch.cuda.mem_get_info()
+        return free_bytes / (1024**3), total_bytes / (1024**3)
+    except Exception:
+        logger.warning(
+            "Live-GPU-Speichercheck nicht möglich (torch.cuda.mem_get_info) - "
+            "verlasse mich fortan nur noch auf die konfigurierten "
+            "gpu_memory_utilization-Werte (gpu_memory_ceiling)",
+            exc_info=True,
+        )
+        _gpu_mem_query_broken = True
+        return None, None
+
+
 async def _make_room(cfg: Config, model: str, gmu: float) -> None:
     """Verdrängt bei Bedarf Engines (LRU), damit `model` (mit geschätztem
     Speicherbedarf `gmu`) ins Poolgrößen- und Speicherbudget passt. Engines mit
@@ -197,8 +237,17 @@ async def _make_room(cfg: Config, model: str, gmu: float) -> None:
     Verdrängen einer gerade beschäftigten Engine, schlägt das Laden stattdessen
     mit einer klaren Fehlermeldung fehl (propagiert als HTTP 503/500 zum
     Aufrufer, siehe main.py/ollama_compat.py) - der Nutzer muss dann bewusst
-    manuell ein Modell entladen."""
+    manuell ein Modell entladen. Ebenfalls geschützt: Engines, die gerade
+    selbst noch im Kaltstart stecken (state == "loading") - live beobachtet
+    (2026-08-24): ohne diesen Schutz kann ein GLEICHZEITIGER Request für ein
+    ANDERES Modell so eine frisch gestartete, noch ladende Engine als
+    LRU-Opfer verdrängen, bevor sie überhaupt fertig ist. Die Engine reagiert
+    während der frühen CUDA-Initialisierung oft nicht rechtzeitig auf
+    SIGTERM, wird nach 30s per SIGKILL beendet, und der URSPRÜNGLICHE
+    Aufrufer bekommt einen irreführenden "vLLM-Engine ist unerwartet beendet
+    (exit=-9)"-Fehler, obwohl am Modell selbst nichts kaputt war."""
     protected = {r["model"] for r in telemetry.active_requests.values()}
+    protected |= {e.model for e in engines.values() if e.state == "loading" and e.model != model}
 
     def others() -> list[EngineState]:
         return [e for e in engines.values() if e.model != model]
@@ -223,14 +272,56 @@ async def _make_room(cfg: Config, model: str, gmu: float) -> None:
             busy = sorted({e.model for e in pool if e.model in protected})
             raise RuntimeError(
                 f"Kein Platz im Hot Pool für '{model}': alle {len(pool)} aktuell "
-                f"geladenen Modelle ({', '.join(busy)}) haben gerade eine laufende "
-                f"Anfrage und werden nicht automatisch verdrängt, um sie nicht "
-                f"abzubrechen. Bitte manuell ein Modell entladen (Dashboard-Button "
-                f"oder POST /models/<model>/unload) und die Anfrage erneut senden."
+                f"geladenen Modelle ({', '.join(busy)}) haben gerade eine laufende Anfrage "
+                f"oder stecken selbst noch im Kaltstart und werden nicht automatisch "
+                f"verdrängt, um sie nicht abzubrechen. Bitte manuell ein Modell entladen "
+                f"(Dashboard-Button oder POST /models/<model>/unload) und die Anfrage "
+                f"erneut senden."
             )
         victim = min(candidates, key=lambda e: e.last_used)
         logger.info("Verdränge Modell '%s' aus dem Pool, um Platz für '%s' zu schaffen", victim.model, model)
         await stop_engine(victim.model, reason=f"evicted_for:{model}")
+
+    # Live-Check: siehe Moduldocstring oben / _query_gpu_memory_gib(). Läuft
+    # ERST NACH der schnellen Config-Schätzung (kein Overhead im Normalfall),
+    # verdrängt bei Bedarf aber weitere Engines - auch wenn die Schätzung oben
+    # bereits "passt" sagte, weil z.B. ein fremder Prozess (ComfyUI o.ä.) oder
+    # die allgemeine Systemauslastung (Unified Memory) Speicher belegt, den
+    # gpu_memory_ceiling nicht kennt.
+    while True:
+        free_gib, total_gib = await asyncio.to_thread(_query_gpu_memory_gib)
+        if free_gib is None:
+            return  # torch/CUDA nicht verfügbar - wie bisher nur auf die Config-Schätzung verlassen
+        needed_gib = gmu * total_gib
+        if free_gib >= needed_gib:
+            return
+        pool = others()
+        candidates = [e for e in pool if e.model not in protected]
+        if not candidates:
+            busy_hint = (
+                f"Alle {len(pool)} übrigen geladenen Modelle ({', '.join(sorted({e.model for e in pool}))}) "
+                f"haben gerade eine laufende Anfrage oder stecken selbst noch im Kaltstart und "
+                f"werden nicht automatisch verdrängt."
+                if pool else
+                "Der Hot Pool ist bereits leer."
+            )
+            raise RuntimeError(
+                f"Modell '{model}' passt aktuell nicht in den GPU-Speicher: nur {free_gib:.1f} GiB "
+                f"frei, benötigt werden ca. {needed_gib:.1f} GiB (gpu_memory_utilization={gmu}). "
+                f"{busy_hint} Das Defizit stammt vermutlich von Speicher, den ANDERE Prozesse belegen "
+                f"(nicht vom Hot Pool verwaltet, z.B. ComfyUI/Remote-Desktop, oder allgemeine "
+                f"Systemauslastung auf diesem Unified-Memory-System) - bitte manuell Speicher "
+                f"freigeben oder gpu_memory_utilization/gpu_memory_ceiling in config.json senken."
+            )
+        victim = min(candidates, key=lambda e: e.last_used)
+        logger.info(
+            "Verdränge Modell '%s' aus dem Pool (Live-Speichercheck: nur %.1f/%.1f GiB frei), um Platz für '%s' zu schaffen",
+            victim.model, free_gib, total_gib, model,
+        )
+        await stop_engine(victim.model, reason=f"evicted_for:{model}")
+        # CUDA-Treiber braucht nach Prozessende einen kurzen Moment, um den
+        # Speicher der beendeten Engine tatsächlich als frei zu melden.
+        await asyncio.sleep(1.0)
 
 
 async def stop_engine(model: Optional[str] = None, reason: str = "manual_unload", timeout: float = 30.0) -> None:
