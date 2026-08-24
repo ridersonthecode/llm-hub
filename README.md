@@ -9,6 +9,9 @@ per WebSocket.
 Vollständige Doku (Endpoints, config.json-Referenz, Sicherheit, Modell-Mapping,
 Dashboard, MCP): siehe [Anleitung.md](Anleitung.md).
 
+Frischer Rechner (z.B. ein zweiter DGX Spark)? Schritt-für-Schritt-Checkliste
+von 0 auf laufenden Dienst inkl. RAG/Qdrant: siehe [INSTALL.md](INSTALL.md).
+
 ## Features
 
 - **Auto-Load / Auto-Swap**: `vllm serve <model>` startet automatisch als
