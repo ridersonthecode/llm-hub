@@ -404,15 +404,28 @@ DASHBOARD_HTML = r"""<!doctype html>
 
   .chart-grid { display:grid; grid-template-columns: repeat(auto-fit, minmax(280px,1fr)); gap:14px; }
   .chart-card canvas { width:100%; height:70px; display:block; margin-top:8px; }
-  /* Max. 6 Kacheln pro Zeile: Spaltenbreite ist das Maximum aus 110px (Mindestbreite,
-     greift auf schmalen Bildschirmen) und einem Sechstel der verfügbaren Breite
-     (abzüglich der 5 Lücken zwischen 6 Spalten) - reicht der Platz für mehr als 6,
-     wird trotzdem bei 6 umgebrochen statt in eine 7./8. Spalte zu wachsen. */
-  .cpu-core-grid { display:grid; grid-template-columns: repeat(auto-fill, minmax(max(110px, calc((100% - 5*8px) / 6)), 1fr)); gap:8px; }
+  /* Max. 5 Kacheln pro Zeile: Spaltenbreite ist das Maximum aus 110px (Mindestbreite,
+     greift auf schmalen Bildschirmen) und einem Fünftel der verfügbaren Breite
+     (abzüglich der 4 Lücken zwischen 5 Spalten) - reicht der Platz für mehr als 5,
+     wird trotzdem bei 5 umgebrochen statt in eine 6./7. Spalte zu wachsen. */
+  .cpu-core-grid { display:grid; grid-template-columns: repeat(auto-fill, minmax(max(110px, calc((100% - 4*8px) / 5)), 1fr)); gap:8px; }
   .cpu-core-tile { background:var(--panel); border:1px solid var(--border); border-radius:8px; padding:8px 10px; }
   .cpu-core-tile .core-label { display:flex; justify-content:space-between; align-items:baseline; font-size:11px; color:var(--text-dim); }
   .cpu-core-tile .core-value { font-size:13px; font-weight:600; color:var(--text); }
   .cpu-core-tile canvas { width:100%; height:28px; display:block; margin-top:4px; }
+
+  /* Ein-/ausklappbare Sektionen (native <details>/<summary>, kein JS nötig) -
+     Summary sieht optisch wie die normale section-h2-Überschrift aus, nur
+     mit Chevron + Klick-Cursor. */
+  summary.collapsible-summary {
+    font-size: 14px; color: var(--text-dim); text-transform:uppercase; letter-spacing:.04em;
+    margin: 0 0 10px; cursor: pointer; user-select: none; list-style: none;
+    display: flex; align-items: center; gap: 6px;
+  }
+  summary.collapsible-summary::-webkit-details-marker { display: none; }
+  summary.collapsible-summary::before { content: "▶"; font-size: 10px; color: var(--text-dim); transition: transform .15s; display:inline-block; }
+  details[open] > summary.collapsible-summary::before { transform: rotate(90deg); }
+  details[open] > summary.collapsible-summary { margin-bottom: 10px; }
 
   .model-grid { display:grid; grid-template-columns: 1fr 1fr; gap:10px; }
   @media (max-width: 640px) { .model-grid { grid-template-columns: 1fr; } }
@@ -604,8 +617,10 @@ DASHBOARD_HTML = r"""<!doctype html>
   </section>
 
   <section>
-    <h2 data-i18n="section.cpuPerCore">CPU Usage (per Core)</h2>
-    <div id="cpu-core-grid" class="cpu-core-grid"></div>
+    <details id="cpu-core-details" open>
+      <summary class="collapsible-summary" data-i18n="section.cpuPerCore">CPU Usage (per Core)</summary>
+      <div id="cpu-core-grid" class="cpu-core-grid"></div>
+    </details>
   </section>
 
   <section>
@@ -1566,6 +1581,15 @@ $("theme-toggle").addEventListener("click", () => {
   document.documentElement.setAttribute("data-theme", next);
   localStorage.setItem("vllm_dashboard_theme", next);
   updateToggleIcon(next);
+});
+
+// --- Ein-/ausklappbare Sektionen: Zustand pro <details id="..."> merken ---
+document.querySelectorAll("details[id]").forEach((el) => {
+  const key = "vllm_dashboard_open_" + el.id;
+  const saved = localStorage.getItem(key);
+  if (saved === "0") el.open = false;
+  else if (saved === "1") el.open = true;
+  el.addEventListener("toggle", () => localStorage.setItem(key, el.open ? "1" : "0"));
 });
 
 // --- WebSocket-Verbindung ----------------------------------------------
