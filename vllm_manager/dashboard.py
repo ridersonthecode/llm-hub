@@ -240,6 +240,73 @@ async def dashboard_ws(websocket: WebSocket):
         telemetry.unsubscribe(q)
 
 
+LOG_TAIL_INITIAL_LINES = 300
+LOG_POLL_SECONDS = 1.0
+
+
+@router.websocket("/dashboard/logs/ws")
+async def dashboard_logs_ws(websocket: WebSocket):
+    """Live-Log-Tail für das Log-Modal im Model-Verlauf/Loaded-Models -
+    ein Client pro geöffnetem Modal. Erste Nachricht muss {api_key?, model}
+    enthalten (gleiches Handshake-Muster wie /dashboard/ws). Log-Dateien
+    werden pro Modell einmal angelegt und über alle Ladevorgänge hinweg im
+    Append-Modus beschrieben (siehe process_manager.ensure_loaded), daher
+    reicht simples Datei-Polling auf Größenwachstum für "live" - kein
+    inotify/tail-f nötig."""
+    await websocket.accept()
+    cfg = get_config()
+    try:
+        first = await asyncio.wait_for(websocket.receive_json(), timeout=10)
+    except Exception:
+        await websocket.close(code=4400)
+        return
+
+    if cfg.api_key.enabled:
+        if not cfg.api_key.key or first.get("api_key") != cfg.api_key.key:
+            try:
+                await websocket.send_json({"type": "auth_error"})
+            except Exception:
+                pass
+            await websocket.close(code=4401)
+            return
+
+    model = first.get("model")
+    if not model:
+        await websocket.close(code=4400)
+        return
+
+    # _safe_name() ersetzt jeden "/" - das Ergebnis kann daher keine
+    # Pfadtrenner mehr enthalten und somit auch nicht aus LOG_DIR ausbrechen,
+    # selbst wenn `model` böswillig gewählt wurde (unauthentifizierte
+    # Clients erreichen diesen Endpoint aber ohnehin nicht, siehe api_key
+    # oben).
+    log_path = process_manager.LOG_DIR / f"{process_manager._safe_name(model)}.log"
+
+    try:
+        exists = log_path.exists()
+        await websocket.send_json({
+            "type": "init",
+            "text": process_manager._tail(log_path, LOG_TAIL_INITIAL_LINES) if exists else "",
+            "exists": exists,
+        })
+        offset = log_path.stat().st_size if exists else 0
+        while True:
+            await asyncio.sleep(LOG_POLL_SECONDS)
+            if not log_path.exists():
+                continue
+            size = log_path.stat().st_size
+            if size < offset:
+                offset = 0  # Datei wurde neu angelegt (sollte im Append-Modus nicht vorkommen)
+            if size > offset:
+                with open(log_path, "rb") as f:
+                    f.seek(offset)
+                    chunk = f.read(size - offset)
+                offset = size
+                await websocket.send_json({"type": "append", "text": chunk.decode("utf-8", errors="ignore")})
+    except WebSocketDisconnect:
+        pass
+
+
 @router.get("/dashboard")
 async def dashboard_page():
     return HTMLResponse(DASHBOARD_HTML)
@@ -384,6 +451,22 @@ DASHBOARD_HTML = r"""<!doctype html>
     color:var(--text-dim); font-size:20px; cursor:pointer; line-height:1;
   }
   .modal { position:relative; }
+  .log-modal { max-width:900px; }
+  .log-modal-status { margin:0 0 10px; font-size:12px; color:var(--text-dim); }
+  .log-modal-status.live { color:var(--good); }
+  .log-modal-status.live::before { content:"● "; }
+  .log-modal-status.error { color:var(--bad); }
+  .log-modal-body {
+    background:var(--panel-2); border:1px solid var(--border); border-radius:8px;
+    padding:12px; font-family:var(--mono); font-size:12px; line-height:1.5;
+    white-space:pre-wrap; word-break:break-word; margin:0;
+    max-height:60vh; overflow-y:auto;
+  }
+  .logs-btn {
+    background:none; border:none; color:var(--accent); cursor:pointer;
+    font-size:12px; padding:0; margin-right:10px;
+  }
+  .logs-btn:hover { text-decoration:underline; }
   .help-icon {
     display:inline-flex; align-items:center; justify-content:center;
     width:14px; height:14px; border-radius:50%; background:var(--panel-2);
@@ -555,6 +638,15 @@ DASHBOARD_HTML = r"""<!doctype html>
     </div>
   </div>
 
+  <div class="modal-overlay" id="log-modal-overlay">
+    <div class="modal log-modal">
+      <button class="close-btn" id="log-modal-close">✕</button>
+      <h3 id="log-modal-title">–</h3>
+      <p class="log-modal-status" id="log-modal-status"></p>
+      <pre class="log-modal-body" id="log-modal-body"></pre>
+    </div>
+  </div>
+
   <footer class="app-footer">
     <span>© 2026</span>
     <a href="https://github.com/ridersonthecode" target="_blank" rel="noopener noreferrer" title="ridersonthecode on GitHub">
@@ -714,6 +806,63 @@ $("help-modal-overlay").addEventListener("click", (e) => {
   if (e.target.id === "help-modal-overlay") $("help-modal-overlay").classList.remove("open");
 });
 document.addEventListener("keydown", (e) => { if (e.key === "Escape") $("help-modal-overlay").classList.remove("open"); });
+
+// --- Live-Log-Modal (Loaded Models + Model History) ---------------------
+// Eigener WebSocket pro geöffnetem Modal (statt in den 1s-Heartbeat von
+// connect() eingebettet), damit Logs nur übertragen werden, während das
+// Modal tatsächlich offen ist. Backend pollt die Log-Datei auf Größen-
+// wachstum (siehe /dashboard/logs/ws) - Log-Dateien werden nie gekürzt
+// (Append-Modus über alle Ladevorgänge desselben Modells hinweg), daher
+// zeigt ein Klick auf eine vergangene History-Zeile ggf. auch ältere
+// Sessions desselben Modells mit an.
+let logsSocket = null;
+
+function setLogsStatus(cls, text) {
+  const el = $("log-modal-status");
+  el.className = "log-modal-status" + (cls ? " " + cls : "");
+  el.textContent = text;
+}
+
+function openLogsModal(model) {
+  $("log-modal-title").textContent = modelName(model);
+  $("log-modal-body").textContent = "";
+  setLogsStatus("", t("modal.logsConnecting"));
+  $("log-modal-overlay").classList.add("open");
+
+  if (logsSocket) logsSocket.close();
+  const proto = location.protocol === "https:" ? "wss:" : "ws:";
+  const ws = new WebSocket(proto + "//" + location.host + "/dashboard/logs/ws");
+  logsSocket = ws;
+
+  ws.onopen = () => ws.send(JSON.stringify({ api_key: apiKey, model }));
+
+  ws.onmessage = (ev) => {
+    let msg;
+    try { msg = JSON.parse(ev.data); } catch (e) { return; }
+    if (msg.type === "auth_error") { setLogsStatus("error", t("auth.apiKeyPrompt")); ws.close(); return; }
+    const body = $("log-modal-body");
+    const wasAtBottom = body.scrollTop + body.clientHeight >= body.scrollHeight - 20;
+    if (msg.type === "init") {
+      body.textContent = msg.exists ? msg.text : t("modal.logsNotFound");
+      setLogsStatus(msg.exists ? "live" : "", msg.exists ? t("modal.logsLive") : "");
+    } else if (msg.type === "append") {
+      body.textContent += msg.text;
+    }
+    if (wasAtBottom) body.scrollTop = body.scrollHeight;
+  };
+
+  ws.onclose = () => { if (logsSocket === ws) setLogsStatus("", t("modal.logsDisconnected")); };
+  ws.onerror = () => ws.close();
+}
+
+function closeLogsModal() {
+  $("log-modal-overlay").classList.remove("open");
+  if (logsSocket) { logsSocket.close(); logsSocket = null; }
+}
+$("log-modal-close").addEventListener("click", closeLogsModal);
+$("log-modal-overlay").addEventListener("click", (e) => { if (e.target.id === "log-modal-overlay") closeLogsModal(); });
+document.addEventListener("keydown", (e) => { if (e.key === "Escape") closeLogsModal(); });
+
 function reasonLabel(r) {
   if (r === "ready") return t("reason.ready");
   if (r === "loading") return t("reason.loading");
@@ -783,7 +932,19 @@ function initHistoryTable() {
           return type !== "display" ? (seconds ?? 0) : fmtDuration(seconds);
         },
       },
+      {
+        title: t("th.action"), data: null, orderable: false,
+        render: (h) => `<button class="logs-btn" data-model="${esc(h.model)}">${t("action.viewLogs")}</button>`,
+      },
     ],
+  });
+  // Event-Delegation statt Listener pro Zeile - historyTable baut den Tbody
+  // bei jedem draw() neu auf (siehe updateHistoryTable), direkt gebundene
+  // Listener wären dabei verloren gegangen.
+  historyTable.on("draw", () => {
+    document.querySelectorAll("#history-table .logs-btn").forEach(btn => {
+      btn.addEventListener("click", () => openLogsModal(btn.dataset.model));
+    });
   });
 }
 
@@ -951,7 +1112,10 @@ function render(data) {
           <td class="mono">${fmtMs(m.avg_ttft_ms)}</td>
           <td class="mono">${fmtMs(m.avg_tpot_ms)}</td>
           <td class="mono">${(m.prompt_tokens_total ?? "–") + " / " + (m.generation_tokens_total ?? "–")}</td>
-          <td><button class="unload-btn" data-model="${esc(e.loaded_model)}">${t("action.unload")}</button></td>
+          <td>
+            <button class="logs-btn" data-model="${esc(e.loaded_model)}">${t("action.viewLogs")}</button>
+            <button class="unload-btn" data-model="${esc(e.loaded_model)}">${t("action.unload")}</button>
+          </td>
         </tr>`;
       }).join("") + `</tbody></table>`);
   }
@@ -1153,8 +1317,10 @@ async function deleteModelCache(model, btn) {
 }
 
 $("engines-box").addEventListener("click", (e) => {
-  const btn = e.target.closest(".unload-btn");
-  if (btn) unloadModel(btn.dataset.model, btn);
+  const unloadBtn = e.target.closest(".unload-btn");
+  if (unloadBtn) { unloadModel(unloadBtn.dataset.model, unloadBtn); return; }
+  const logsBtn = e.target.closest(".logs-btn");
+  if (logsBtn) openLogsModal(logsBtn.dataset.model);
 });
 
 // --- Laufenden Download abbrechen ----------------------------------------
