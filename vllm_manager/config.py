@@ -40,6 +40,19 @@ class ModelConfig(BaseModel):
     gpu_memory_utilization: Optional[float] = None
     enable_auto_tool_choice: bool = False
     vision: bool = False
+    # Startet die Engine mit --enforce-eager (deaktiviert CUDA-Graph-Capture
+    # beim Kaltstart, siehe process_manager._build_command). Verkürzt den
+    # Kaltstart spürbar (live gemessen: ~35s von ~290s bei einem 35B-Modell
+    # waren reine Graph-Capture/Kernel-Kompilierung), macht die Engine
+    # dauerhaft aber langsamer (jeder Forward-Pass läuft über den vollen
+    # PyTorch-Eager-Dispatch statt eines vorkompilierten CUDA-Graphs) - echter
+    # Trade-off Kaltstart-Geschwindigkeit vs. Dauer-Durchsatz, kein Freebie.
+    # Lohnt sich vor allem für selten/sporadisch genutzte Modelle, die oft
+    # KOMPLETT kaltstarten (Slot-Verdrängung, volles Idle-Timeout-Entladen) -
+    # bei per Sleep Mode warmgehaltenen Modellen (siehe enable_sleep_mode)
+    # greift die Graph-Capture ohnehin nur beim allerersten Laden, dort
+    # bringt es entsprechend weniger. Default aus.
+    fast_load: bool = False
     # "generate" (normales Chat-/Completion-Modell) oder "embed"
     # (Embedding-Modell für RAG, z.B. Qwen3-Embedding). Steuert, ob vllm serve
     # mit --runner pooling gestartet wird (vLLMs Nachfolger von --task).

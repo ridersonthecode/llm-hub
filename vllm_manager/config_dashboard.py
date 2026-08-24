@@ -776,6 +776,10 @@ function renderModels() {
           <input type="checkbox" class="m-field" data-idx="${i}" data-field="vision" id="m-vision-${i}" ${m.vision ? "checked" : ""}>
           <label for="m-vision-${i}" data-i18n="badge.vision">Vision</label>${helpIcon("cfg_vision")}
         </div>
+        <div class="check-row">
+          <input type="checkbox" class="m-field" data-idx="${i}" data-field="fast_load" id="m-fastload-${i}" ${m.fast_load ? "checked" : ""}>
+          <label for="m-fastload-${i}" data-i18n="cfg.field.fastLoad">Fast load (--enforce-eager)</label>${helpIcon("cfg_fastLoad")}
+        </div>
 
         <div class="row">
           <div>

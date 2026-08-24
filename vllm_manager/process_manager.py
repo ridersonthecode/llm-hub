@@ -364,6 +364,10 @@ def _build_command(cfg: Config, model: str, port: int) -> list[str]:
             cmd += ["--tool-call-parser", mcfg.tool_call_parser]
         if mcfg.reasoning_parser:
             cmd += ["--reasoning-parser", mcfg.reasoning_parser]
+        if mcfg.fast_load:
+            # Siehe ModelConfig.fast_load - deaktiviert CUDA-Graph-Capture,
+            # verkürzt den Kaltstart auf Kosten der Dauer-Inferenzgeschwindigkeit.
+            cmd.append("--enforce-eager")
         cmd += list(mcfg.extra_args or [])
     return cmd
 
