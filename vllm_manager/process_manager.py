@@ -30,6 +30,11 @@ from typing import Optional
 
 import httpx
 
+try:
+    import psutil
+except ImportError:  # pragma: no cover - psutil kommt transitiv über vllm mit
+    psutil = None
+
 from . import telemetry
 from .config import CONFIG_PATH, Config, get_config
 
@@ -324,11 +329,164 @@ async def _make_room(cfg: Config, model: str, gmu: float) -> None:
         await asyncio.sleep(1.0)
 
 
+def _collect_children(pid: int) -> list:
+    """Best-effort Snapshot der (rekursiven) Kindprozesse EINES Engine-Prozesses,
+    VOR dessen Beendigung - psutil.Process.children() liefert nichts mehr,
+    sobald der Elternprozess schon weg ist, deshalb muss das vorher passieren.
+    vLLM startet je nach Konfiguration eigene Multiprocessing-Worker
+    (EngineCore u.ä.) als Kindprozesse von "vllm serve"; die sterben nicht
+    immer zuverlässig mit dem Eltern-SIGTERM mit."""
+    if psutil is None:
+        return []
+    try:
+        return psutil.Process(pid).children(recursive=True)
+    except psutil.NoSuchProcess:
+        return []
+
+
+async def _reap_leftover_children(children: list, timeout: float = 5.0) -> None:
+    """Beendet Kindprozesse, die nach dem Stoppen der eigentlichen Engine noch
+    übrig sind (siehe _collect_children) - das ist die Hauptursache für
+    "unsauberes Unloading": der getrackte "vllm serve"-Prozess ist weg, aber
+    seine eigenen Worker-Subprozesse laufen als Waisen weiter, belegen GPU-
+    Speicher und tauchen im Dashboard nicht mehr auf (kein EngineState mehr
+    dafür)."""
+    if psutil is None or not children:
+        return
+    alive = [c for c in children if c.is_running()]
+    if not alive:
+        return
+    logger.warning(
+        "Räume %d übrig gebliebene(n) Kind-Prozess(e) nach Engine-Stop auf (pids=%s) - "
+        "vLLM hat sie beim eigenen Beenden nicht mitgenommen",
+        len(alive), [c.pid for c in alive],
+    )
+
+    def _do() -> None:
+        for c in alive:
+            try:
+                c.terminate()
+            except psutil.NoSuchProcess:
+                pass
+        _gone, still = psutil.wait_procs(alive, timeout=timeout)
+        for c in still:
+            try:
+                c.kill()
+            except psutil.NoSuchProcess:
+                pass
+
+    await asyncio.to_thread(_do)
+
+
+def _matched_vllm_serve_model(cmdline: list[str], vllm_bin: Optional[str]) -> Optional[str]:
+    """Gibt den Modellnamen zurück, wenn `cmdline` ein "vllm serve <model> ..."-
+    Aufruf DIESER Installation ist (schützt davor, versehentlich einen fremden
+    vLLM-Prozess - z.B. eine andere Installation/venv wie .venv-quantize - zu
+    beenden), sonst None.
+
+    _build_command() übergibt zwar [vllm_bin, "serve", model, ...] an
+    create_subprocess_exec, aber die "vllm"-Datei hat selbst ein
+    "#!/.../python3"-Shebang - der Kernel schreibt argv beim exec deshalb um.
+    Tatsächlich in ps/psutil sichtbar (live verifiziert):
+    ['.../python3', '.../vllm', 'serve', <model>, ...], NICHT wie übergeben.
+    Daher wird hier an Position 0 UND 1 nach dem vllm-Binary gesucht statt nur
+    an Position 0."""
+    for i, arg in enumerate(cmdline[:2]):
+        if os.path.basename(arg) != "vllm":
+            continue
+        if len(cmdline) <= i + 2 or cmdline[i + 1] != "serve":
+            continue
+        if vllm_bin is not None:
+            try:
+                if os.path.realpath(arg) != vllm_bin:
+                    continue
+            except OSError:
+                continue
+        return cmdline[i + 2]
+    return None
+
+
+async def reap_orphan_engines() -> list[dict]:
+    """Findet und beendet vLLM-Engine-Prozesse ("vllm serve ..." dieser
+    Installation), die NICHT im aktuellen `engines`-Dict getrackt sind, samt
+    ihrer Kindprozesse. Das sind Reste eines Absturzes des Manager-Prozesses
+    selbst (der `engines`-Zustand lebt nur im Speicher und ist nach einem
+    Neustart leer, die zuvor gestarteten Kindprozesse überleben aber) oder
+    eines unsauberen Beendens - genau die Prozesse, die "im Dashboard nicht
+    auftauchen" (kein EngineState mehr da), aber weiter GPU-Speicher/Port
+    belegen. Wird beim Start (lifespan) und danach periodisch aufgerufen
+    (siehe main.py)."""
+    if psutil is None:
+        return []
+    cfg = get_config()
+    try:
+        vllm_bin = os.path.realpath(cfg.resolved_vllm_bin())
+    except OSError:
+        vllm_bin = None
+    tracked_pids = {e.process.pid for e in engines.values() if e.process is not None}
+    own_pid = os.getpid()
+
+    def _scan() -> list[tuple]:
+        found = []
+        for proc in psutil.process_iter(["pid", "cmdline"]):
+            try:
+                pid = proc.info["pid"]
+                if pid in tracked_pids or pid == own_pid:
+                    continue
+                cmdline = proc.info["cmdline"] or []
+            except (psutil.NoSuchProcess, psutil.AccessDenied):
+                continue
+            model = _matched_vllm_serve_model(cmdline, vllm_bin)
+            if model is not None:
+                found.append((proc, model))
+        return found
+
+    orphans = await asyncio.to_thread(_scan)
+    killed = []
+    for proc, model in orphans:
+        try:
+            pid = proc.pid
+            created_at = proc.create_time()
+        except psutil.NoSuchProcess:
+            continue
+        logger.warning(
+            "Verwaister vLLM-Engine-Prozess gefunden (pid=%s, Modell=%s, seit %.0fs), "
+            "der zu keinem aktuellen EngineState gehört - vermutlich Rest eines Manager-"
+            "Absturzes oder unsauberen Beendens. Wird beendet.",
+            pid, model, time.time() - created_at,
+        )
+        children = _collect_children(pid)
+        try:
+            proc.terminate()
+        except psutil.NoSuchProcess:
+            pass
+
+        def _wait_and_kill(root=proc, kids=children) -> None:
+            _gone, alive = psutil.wait_procs([root, *kids], timeout=10.0)
+            for p in alive:
+                try:
+                    p.kill()
+                except psutil.NoSuchProcess:
+                    pass
+
+        await asyncio.to_thread(_wait_and_kill)
+        model_history.appendleft({
+            "model": model,
+            "loaded_at": created_at,
+            "unloaded_at": time.time(),
+            "duration_seconds": round(time.time() - created_at, 1),
+            "reason": "orphan_reaped",
+            "error": f"Verwaister Prozess (pid={pid}) ohne Tracking im aktuellen Manager gefunden und beendet.",
+        })
+        killed.append({"pid": pid, "model": model})
+    return killed
+
+
 async def stop_engine(model: Optional[str] = None, reason: str = "manual_unload", timeout: float = 30.0) -> None:
     """Beendet eine laufende Engine und schreibt einen Verlaufseintrag.
     Ohne `model` werden ALLE laufenden Engines beendet (z.B. beim Dienst-
     Shutdown). `reason` z.B. "manual_unload", "idle_timeout", "crashed",
-    "timeout", "shutdown" oder "evicted_for:<neues_modell>"."""
+    "timeout", "shutdown", "orphan_reaped" oder "evicted_for:<neues_modell>"."""
     if model is None:
         for m in list(engines.keys()):
             await stop_engine(m, reason=reason, timeout=timeout)
@@ -351,6 +509,9 @@ async def stop_engine(model: Optional[str] = None, reason: str = "manual_unload"
     proc = eng.process
     if proc is not None and proc.returncode is None:
         logger.info("Beende Engine-Prozess für Modell %s (pid=%s, Port=%s, Grund: %s)", eng.model, proc.pid, eng.port, reason)
+        # VOR dem Beenden einsammeln (siehe _collect_children) - danach ist der
+        # Elternprozess weg und psutil kann seine Kinder nicht mehr auflisten.
+        children = _collect_children(proc.pid)
         proc.terminate()
         try:
             await asyncio.wait_for(proc.wait(), timeout=timeout)
@@ -358,6 +519,10 @@ async def stop_engine(model: Optional[str] = None, reason: str = "manual_unload"
             logger.warning("Engine reagiert nicht auf SIGTERM, sende SIGKILL")
             proc.kill()
             await proc.wait()
+        # Fängt vLLM-Versionen ab, die ihre eigenen Worker-Subprozesse beim
+        # Beenden nicht zuverlässig mitnehmen (siehe _reap_leftover_children) -
+        # sonst genau die Waisenprozesse, die "unsauberes Unloading" verursachen.
+        await _reap_leftover_children(children)
     engines.pop(model, None)
 
 

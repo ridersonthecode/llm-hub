@@ -116,6 +116,7 @@
   "reason.replacedBy": "ersetzt durch {model}",
   "reason.evictedFor": "verdrängt (Pool voll) für {model}",
   "reason.failedToStart": "Start fehlgeschlagen",
+  "reason.orphanReaped": "verwaister Prozess beendet",
   "job.queued": "wartend",
   "job.resolving": "wird aufgelöst",
   "job.downloading": "lädt herunter",

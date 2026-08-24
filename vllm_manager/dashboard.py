@@ -873,6 +873,7 @@ function reasonLabel(r) {
   if (r === "shutdown") return t("reason.shutdown");
   if (r === "restart") return t("reason.restart");
   if (r === "failed_to_start") return t("reason.failedToStart");
+  if (r === "orphan_reaped") return t("reason.orphanReaped");
   if (r && r.startsWith("replaced_by:")) return t("reason.replacedBy", { model: esc(modelName(r.slice(13))) });
   if (r && r.startsWith("evicted_for:")) return t("reason.evictedFor", { model: esc(modelName(r.slice(12))) });
   return esc(r || "–");
@@ -880,7 +881,7 @@ function reasonLabel(r) {
 function reasonBadgeClass(r) {
   if (r === "ready") return "ok";
   if (r === "loading") return "loading";
-  if (r === "crashed" || r === "timeout" || r === "failed_to_start") return "error";
+  if (r === "crashed" || r === "timeout" || r === "failed_to_start" || r === "orphan_reaped") return "error";
   if (r && r.startsWith("evicted_for:")) return "running";
   return "idle";
 }

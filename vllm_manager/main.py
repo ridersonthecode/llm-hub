@@ -33,6 +33,7 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name
 logger = logging.getLogger("vllm_manager")
 
 IDLE_CHECK_INTERVAL = 30
+ORPHAN_CHECK_INTERVAL = 300  # 5 Minuten - Prozess-Scan ist billig, muss nicht so oft wie der Idle-Check laufen
 
 
 async def _idle_watchdog() -> None:
@@ -46,6 +47,39 @@ async def _idle_watchdog() -> None:
             if now - eng.last_used > cfg.idle_timeout_seconds:
                 logger.info("Idle-Timeout (%ss) erreicht, entlade %s", cfg.idle_timeout_seconds, eng.model)
                 await process_manager.stop_engine(eng.model, reason="idle_timeout")
+
+
+async def _reconcile_dead_engines() -> None:
+    """Ergänzt reap_orphan_engines() (verwaiste, UNGETRACKTE Prozesse) um den
+    umgekehrten Fall: ein getrackter EngineState, dessen Prozess von selbst
+    gestorben ist (z.B. OOM-Kill durch den Kernel), OHNE dass stop_engine()
+    dafür aufgerufen wurde. Ohne diesen Check bliebe das Dashboard bei
+    state="ready" hängen, obwohl die Engine längst tot ist."""
+    for eng in list(process_manager.engines.values()):
+        if eng.process is not None and eng.process.returncode is not None:
+            logger.warning(
+                "Engine für '%s' ist unbemerkt beendet (exit=%s) - räume EngineState auf",
+                eng.model, eng.process.returncode,
+            )
+            eng.last_error = f"Engine unerwartet beendet (exit={eng.process.returncode})."
+            await process_manager.stop_engine(eng.model, reason="crashed")
+
+
+async def _orphan_watchdog() -> None:
+    """Periodischer Scan auf verwaiste vLLM-Engine-Prozesse (siehe
+    process_manager.reap_orphan_engines) - fängt Fälle ab, die der Scan beim
+    Dienststart nicht sieht, z.B. wenn während der Laufzeit manuell ein
+    zusätzlicher, ungetrackter "vllm serve"-Prozess dieser Installation
+    auftaucht."""
+    while True:
+        await asyncio.sleep(ORPHAN_CHECK_INTERVAL)
+        try:
+            await _reconcile_dead_engines()
+            killed = await process_manager.reap_orphan_engines()
+            if killed:
+                logger.warning("Periodischer Scan: %d verwaiste(n) Engine-Prozess(e) beendet: %s", len(killed), killed)
+        except Exception:
+            logger.exception("Periodischer Scan nach verwaisten Engine-Prozessen fehlgeschlagen")
 
 
 async def _auto_reload_last_model() -> None:
@@ -79,11 +113,23 @@ async def _auto_reload_last_model() -> None:
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
     config_editor.load_config_with_fallback()
+    # Vor allem anderen: verwaiste Engine-Prozesse aus einem vorherigen Absturz
+    # dieses Manager-Prozesses beenden (siehe process_manager.reap_orphan_engines) -
+    # sonst startet z.B. der Auto-Reload unten in denselben Engine-Port hinein,
+    # den ein Zombie-Prozess von vorhin noch belegt.
+    try:
+        killed = await process_manager.reap_orphan_engines()
+        if killed:
+            logger.warning("Beim Start: %d verwaiste(n) Engine-Prozess(e) aus vorherigem Lauf beendet: %s", len(killed), killed)
+    except Exception:
+        logger.exception("Aufräumen verwaister Engine-Prozesse beim Start fehlgeschlagen")
     watchdog = asyncio.create_task(_idle_watchdog())
+    orphan_watchdog = asyncio.create_task(_orphan_watchdog())
     auto_reload = asyncio.create_task(_auto_reload_last_model())
     async with mcp.session_manager.run():
         yield
     watchdog.cancel()
+    orphan_watchdog.cancel()
     auto_reload.cancel()
     await process_manager.stop_engine(reason="shutdown")
 

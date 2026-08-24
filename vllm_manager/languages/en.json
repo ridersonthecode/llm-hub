@@ -116,6 +116,7 @@
   "reason.replacedBy": "replaced by {model}",
   "reason.evictedFor": "evicted (pool full) for {model}",
   "reason.failedToStart": "failed to start",
+  "reason.orphanReaped": "orphan process killed",
   "job.queued": "queued",
   "job.resolving": "resolving",
   "job.downloading": "downloading",
