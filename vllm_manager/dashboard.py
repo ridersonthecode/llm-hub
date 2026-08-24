@@ -512,7 +512,7 @@ DASHBOARD_HTML = r"""<!doctype html>
 
   <section>
     <h2 data-i18n="section.recentRequests">Recent Requests</h2>
-    <div id="recent-box" class="table-scroll"></div>
+    <table id="recent-table" class="display" style="width:100%"></table>
   </section>
 
   <section>
@@ -634,6 +634,7 @@ $("lang-select").addEventListener("change", (e) => {
   localStorage.setItem("vllm_dashboard_lang", currentLang);
   applyStaticI18n();
   initHistoryTable();
+  initRecentTable();
   if (latestSnapshot) render(latestSnapshot);
 });
 
@@ -793,6 +794,62 @@ function updateHistoryTable(hist) {
   historyTable.clear();
   historyTable.rows.add(hist);
   historyTable.draw(false);
+}
+
+// --- Recent Requests (DataTables, siehe /static/vendor/datatables/README.md)
+// Rollierendes Log (telemetry.MAX_RECENT=30) - wächst laufend weiter, daher
+// paginiert statt als eine lange Liste. Spaltentitel hängen von der Sprache
+// ab -> bei Sprachwechsel komplett neu aufgebaut (siehe lang-select-Handler
+// unten).
+let recentTable = null;
+let recentFingerprint = null;
+
+function initRecentTable() {
+  if (recentTable) { recentTable.destroy(); $("recent-table").innerHTML = ""; }
+  recentFingerprint = null;
+  recentTable = new DataTable("#recent-table", {
+    data: [],
+    order: [],
+    pageLength: 10,
+    layout: { bottomEnd: "inputPaging" },
+    language: { emptyTable: t("empty.noRecentRequests") },
+    columns: [
+      { title: t("th.time"), data: null, render: (r, type) => type !== "display" ? r.started_at : new Date(r.started_at * 1000).toLocaleTimeString(localeFor(currentLang)) },
+      { title: t("th.model"), data: null, render: (r, type) => type === "display" ? esc(modelName(r.model)) : (modelName(r.model) || "") },
+      { title: t("th.app"), data: null, orderable: false, render: (r) => appCell(r.user_agent) },
+      { title: t("th.rag"), data: null, orderable: false, render: (r) => ragCell(r) },
+      { title: t("th.status"), data: null, render: (r, type) => type !== "display" ? (r.status || "") : statusCell(r) },
+      { title: t("th.loadTime"), data: null, render: (r, type) => type !== "display" ? (r.queued_ms ?? 0) : (r.queued_ms ? fmtMs(r.queued_ms) : "–") },
+      { title: t("th.duration"), data: null, render: (r, type) => type !== "display" ? (r.duration_ms ?? 0) : fmtMs(r.duration_ms) },
+      { title: t("th.ttft"), data: null, render: (r, type) => type !== "display" ? (r.ttft_ms ?? 0) : fmtMs(r.ttft_ms) },
+      { title: t("th.promptTokens"), data: null, render: (r, type) => type !== "display" ? (r.prompt_tokens ?? -1) : (r.prompt_tokens ?? "–") },
+      { title: t("th.complTokens"), data: null, render: (r, type) => type !== "display" ? (r.completion_tokens ?? -1) : (r.completion_tokens ?? "–") },
+      {
+        title: t("th.throughput"), data: null,
+        render: (r, type) => {
+          // Gleiche Formel wie bei Active Requests: Tokens pro Sekunde SEIT
+          // Modell bereit war (duration_ms abzüglich queued_ms = Warten auf
+          // Kaltstart/Modellwechsel) - nicht ab Request-Beginn, sonst würde
+          // ein langsam ladendes Modell die Generierungsgeschwindigkeit
+          // künstlich schlecht aussehen lassen.
+          const genElapsedSec = r.duration_ms != null ? Math.max(0, (r.duration_ms - (r.queued_ms || 0)) / 1000) : null;
+          const tps = (r.completion_tokens > 0 && genElapsedSec > 0.05) ? r.completion_tokens / genElapsedSec : null;
+          if (type !== "display") return tps ?? -1;
+          return tps !== null ? tps.toFixed(1) + " tok/s" : "–";
+        },
+      },
+      { title: t("th.cost"), data: null, render: (r, type) => type !== "display" ? (r.cost_usd ?? -1) : (fmtUsd(r.cost_usd) ?? "–") },
+    ],
+  });
+}
+
+function updateRecentTable(recent) {
+  const fp = JSON.stringify(recent);
+  if (fp === recentFingerprint) return;
+  recentFingerprint = fp;
+  recentTable.clear();
+  recentTable.rows.add(recent);
+  recentTable.draw(false);
 }
 
 // Status einer abgeschlossenen Anfrage (Letzte Anfragen) - "aborted_loop"
@@ -983,38 +1040,7 @@ function render(data) {
       }).join("") + `</tbody></table>`);
   }
 
-  const recent = data.recent_requests || [];
-  if (recent.length === 0) {
-    safeSetHTML($("recent-box"), `<div class="empty">${t("empty.noRecentRequests")}</div>`);
-  } else {
-    safeSetHTML($("recent-box"), `<table><thead><tr>
-      <th>${t("th.time")}</th><th>${t("th.model")}</th><th>${t("th.app")}</th><th>${t("th.rag")}${helpIcon("rag")}</th><th>${t("th.status")}</th><th>${t("th.loadTime")}${helpIcon("loadTime")}</th><th>${t("th.duration")}</th><th>${t("th.ttft")}${helpIcon("ttft")}</th><th>${t("th.promptTokens")}${helpIcon("requestTokens")}</th><th>${t("th.complTokens")}${helpIcon("requestTokens")}</th><th>${t("th.throughput")}${helpIcon("avgThroughput")}</th><th>${t("th.cost")}${helpIcon("cost")}</th>
-      </tr></thead><tbody>` + recent.map(r => {
-        // Gleiche Formel wie bei Active Requests (siehe "throughput" oben):
-        // Tokens pro Sekunde SEIT Modell bereit war (duration_ms abzüglich
-        // queued_ms = Warten auf Kaltstart/Modellwechsel) - nicht ab
-        // Request-Beginn, sonst würde ein langsam ladendes Modell die
-        // Generierungsgeschwindigkeit künstlich schlecht aussehen lassen.
-        const genElapsedSec = r.duration_ms != null ? Math.max(0, (r.duration_ms - (r.queued_ms || 0)) / 1000) : null;
-        const avgThroughput = (r.completion_tokens > 0 && genElapsedSec > 0.05)
-          ? (r.completion_tokens / genElapsedSec).toFixed(1) + " tok/s"
-          : "–";
-        return `<tr>
-        <td class="mono">${new Date(r.started_at*1000).toLocaleTimeString(localeFor(currentLang))}</td>
-        <td>${esc(modelName(r.model))}</td>
-        <td class="mono">${appCell(r.user_agent)}</td>
-        <td>${ragCell(r)}</td>
-        <td>${statusCell(r)}</td>
-        <td class="mono">${r.queued_ms ? fmtMs(r.queued_ms) : "–"}</td>
-        <td class="mono">${fmtMs(r.duration_ms)}</td>
-        <td class="mono">${fmtMs(r.ttft_ms)}</td>
-        <td class="mono">${r.prompt_tokens ?? "–"}</td>
-        <td class="mono">${r.completion_tokens ?? "–"}</td>
-        <td class="mono">${avgThroughput}</td>
-        <td class="mono">${fmtUsd(r.cost_usd) ?? "–"}</td>
-      </tr>`;
-      }).join("") + `</tbody></table>`);
-  }
+  updateRecentTable(data.recent_requests || []);
 
   latestCatalog = data.models_catalog || [];
   const catalog = latestCatalog;
@@ -1333,6 +1359,7 @@ function connect() {
 populateLangSelect();
 applyStaticI18n();
 initHistoryTable();
+initRecentTable();
 connect();
 </script>
 </body>
