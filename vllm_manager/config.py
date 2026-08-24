@@ -150,6 +150,27 @@ class Config(BaseModel):
     auto_reload_last_model: bool = True
     default_model: Optional[str] = None
     startup_timeout_seconds: int = 1800
+    # vLLMs eingebauter Sleep Mode (siehe process_manager.py sleep_engine/
+    # wake_engine): bei Verdrängung wird eine Engine bevorzugt schlafen gelegt
+    # statt beendet - der Prozess bleibt am Leben (kein Kaltstart, kein
+    # Re-JIT der Kernel, kein erneuter CUDA-Graph-Capture beim nächsten
+    # Aufwecken nötig), nur die Gewichte werden aus dem GPU-Speicher entfernt.
+    # Live getestet auf NVIDIA GB10 (Unified Memory): Aufwecken eines 35B-
+    # Modells dauerte ~2s statt ~290s Kaltstart. Setzt voraus, dass die
+    # installierte vLLM-Version --enable-sleep-mode unterstützt (ab ca. 0.7) -
+    # bei Problemen (z.B. "Sleep mode is not supported on current platform")
+    # hier auf false setzen, dann verhält sich der Pool wie zuvor (nur
+    # hartes Verdrängen).
+    enable_sleep_mode: bool = True
+    # Wie lange eine Anfrage für ein NOCH NICHT geladenes Modell in der
+    # Warteschlange wartet, falls gerade kein Platz im Hot Pool ist (alle
+    # anderen Engines sind entweder selbst im Kaltstart oder bearbeiten
+    # gerade eine Anfrage und werden deshalb nicht verdrängt) - siehe
+    # process_manager._make_room(). Statt die Anfrage sofort mit einem
+    # Fehler abzulehnen, wird gewartet, bis eine Engine frei wird. Anfragen
+    # an ein bereits geladenes/ladendes Modell warten NIE in dieser
+    # Warteschlange, nur echte Modellwechsel.
+    queue_timeout_seconds: int = 1800
     default_serve_args: dict = Field(default_factory=dict)
     models: dict[str, ModelConfig] = Field(default_factory=dict)
     rag: RagConfig = Field(default_factory=RagConfig)
