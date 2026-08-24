@@ -9,6 +9,7 @@
     "enabled": false,
     "key": ""
   },
+  "idle_sleep_seconds": 300,
   "idle_timeout_seconds": null,
   "max_concurrent_models": 3,
   "gpu_memory_ceiling": 0.75,

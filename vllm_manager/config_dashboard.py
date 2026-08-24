@@ -307,9 +307,15 @@ CONFIG_DASHBOARD_HTML = r"""<!doctype html>
       </div>
       <div class="row">
         <div>
+          <label><span data-i18n="cfg.field.idleSleep">Idle sleep (seconds, empty = off)</span><span class="help-icon" data-help="cfg_idleSleep" data-i18n-title="help.clickForInfo" title="Click for more info">?</span></label>
+          <input type="number" id="f-idle_sleep_seconds" min="1">
+        </div>
+        <div>
           <label><span data-i18n="cfg.field.idleTimeout">Idle timeout (seconds)</span><span class="help-icon" data-help="cfg_idleTimeout" data-i18n-title="help.clickForInfo" title="Click for more info">?</span></label>
           <input type="number" id="f-idle_timeout_seconds" min="0">
         </div>
+      </div>
+      <div class="row">
         <div>
           <label><span data-i18n="cfg.field.startupTimeout">Startup timeout (seconds)</span><span class="help-icon" data-help="cfg_startupTimeout" data-i18n-title="help.clickForInfo" title="Click for more info">?</span></label>
           <input type="number" id="f-startup_timeout_seconds" min="1">
@@ -624,6 +630,7 @@ function renderForm() {
 
   $("f-max_concurrent_models").value = state.max_concurrent_models ?? 1;
   $("f-gpu_memory_ceiling").value = state.gpu_memory_ceiling ?? 0.9;
+  $("f-idle_sleep_seconds").value = state.idle_sleep_seconds ?? "";
   $("f-idle_timeout_seconds").value = state.idle_timeout_seconds ?? "";
   $("f-startup_timeout_seconds").value = state.startup_timeout_seconds ?? 900;
   $("f-enable_sleep_mode").checked = state.enable_sleep_mode !== false;
@@ -656,7 +663,7 @@ function renderForm() {
 
   document.querySelectorAll("#f-host,#f-port,#f-engine_host,#f-engine_port,#f-hf_home,#f-vllm_bin,"
     + "#f-api_key_enabled,#f-api_key_key,#f-max_concurrent_models,#f-gpu_memory_ceiling,"
-    + "#f-idle_timeout_seconds,#f-startup_timeout_seconds,#f-auto_reload_last_model,"
+    + "#f-idle_sleep_seconds,#f-idle_timeout_seconds,#f-startup_timeout_seconds,#f-auto_reload_last_model,"
     + "#f-enable_sleep_mode,#f-queue_timeout_seconds,"
     + "#f-dsa_gpu_memory_utilization,#f-dsa_max_model_len,"
     + "#f-pricing_input_per_mtok,#f-pricing_output_per_mtok,"
@@ -1113,6 +1120,7 @@ function buildPayload() {
     hf_home: $("f-hf_home").value,
     vllm_bin: $("f-vllm_bin").value || null,
     api_key: { enabled: $("f-api_key_enabled").checked, key: $("f-api_key_key").value },
+    idle_sleep_seconds: num("f-idle_sleep_seconds"),
     idle_timeout_seconds: num("f-idle_timeout_seconds"),
     max_concurrent_models: parseInt($("f-max_concurrent_models").value, 10),
     gpu_memory_ceiling: parseFloat($("f-gpu_memory_ceiling").value),

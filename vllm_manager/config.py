@@ -140,6 +140,24 @@ class Config(BaseModel):
     vllm_bin: Optional[str] = None
     api_key: ApiKeyConfig = Field(default_factory=ApiKeyConfig)
     idle_timeout_seconds: Optional[int] = None
+    # Proaktives Einschläfern (siehe process_manager.sleep_engine) unbenutzter
+    # Engines, BEVOR ein anderes Modell überhaupt Platz braucht - anders als
+    # idle_timeout_seconds (komplettes Entladen, Kaltstart beim nächsten
+    # Gebrauch) bleibt der Prozess erhalten und wacht in Sekunden statt
+    # Minuten wieder auf (live gemessen: ~2-8s je nach Modellgröße). None
+    # (Default) = deaktiviert, wie idle_timeout_seconds.
+    #
+    # BEWUSST NICHT im Sekundenbereich empfohlen, auch wenn "ein paar
+    # Sekunden" naheliegend klingt: jede normale Gesprächspause (eine lange
+    # Antwort lesen, kurz nachdenken) würde sonst bei JEDER folgenden Anfrage
+    # einen vollen Sleep+Wake-Zyklus auslösen und spürbar Latenz addieren -
+    # ohne jeden Nutzen, wenn gerade kein anderes Modell den Speicher
+    # überhaupt braucht. Ein Wert im Minutenbereich (z.B. 300 = 5 Minuten)
+    # ist ein vernünftiger Startpunkt: kurz genug, um Speicher bei echten
+    # Pausen zeitnah freizugeben, lang genug, um normale Chat-Pausen nicht
+    # anzufassen. Bei knappem Speicher eher niedriger, bei Latenz-
+    # empfindlichkeit eher höher oder ganz aus.
+    idle_sleep_seconds: Optional[int] = None
     # Anzahl gleichzeitig laufender vLLM-Engine-Prozesse ("Hot Pool"). Bei 1
     # (Default) verhält sich der Manager wie zuvor: exklusiv, jeder Wechsel ist
     # ein Kaltstart. Bei >1 belegt jede Engine einen eigenen Port
