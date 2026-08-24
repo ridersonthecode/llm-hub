@@ -156,6 +156,18 @@ class EngineState:
         # (Momentaufnahme von config.enable_sleep_mode beim Start - eine
         # spätere Config-Änderung wirkt erst auf neu gestartete Engines).
         self.sleep_capable: bool = False
+        # Schützt den gesamten Sleep-/Wake-Übergang (siehe sleep_engine() /
+        # wake_engine()) - WICHTIG: state bleibt während eines laufenden
+        # sleep_engine()-Aufrufs bis zu confirm_timeout (30s) lang auf "ready"
+        # stehen (erst am Ende bestätigt, siehe dortiger Docstring). Ohne
+        # dieses Lock konnte ein GLEICHZEITIG eintreffender Request in genau
+        # diesem Fenster is_ready()==True sehen, direkt an den Port
+        # weitergereicht werden, und dort auf eine Engine treffen, die gerade
+        # mitten im Entladen der GPU-Gewichte steckt - der Request hing dann
+        # (live gemeldet: 2026-08-25). ensure_loaded() wartet jetzt vor jeder
+        # State-Entscheidung kurz auf dieses Lock, damit eine laufende
+        # Transition immer erst zu Ende läuft, bevor geroutet wird.
+        self.transition_lock: asyncio.Lock = asyncio.Lock()
 
     def status(self) -> dict:
         running = self.process is not None and self.process.returncode is None
@@ -272,42 +284,49 @@ async def sleep_engine(model: str, reason: str = "evicted", confirm_timeout: flo
         return False
     if eng.state == "sleeping":
         return True
-    cfg = get_config()
-    logger.info("Schicke Engine für Modell '%s' in Sleep Mode (Port %s, Grund: %s)", model, eng.port, reason)
-    free_before, _ = await asyncio.to_thread(_query_gpu_memory_gib)
-    ok = await _sleep_call(cfg, eng.port)
-    if not ok:
-        logger.warning("Sleep Mode für '%s' fehlgeschlagen - beende Engine stattdessen hart", model)
-        await stop_engine(model, reason="sleep_failed")
-        return False
+    async with eng.transition_lock:
+        # Erneut prüfen statt dem Stand von vor dem Warten aufs Lock zu
+        # vertrauen - während wir warteten, könnte eine andere Anfrage die
+        # Engine bereits wieder aufgeweckt (oder ein anderer Aufrufer sie
+        # schon eingeschläfert) haben.
+        if eng.state != "ready":
+            return eng.state == "sleeping"
+        cfg = get_config()
+        logger.info("Schicke Engine für Modell '%s' in Sleep Mode (Port %s, Grund: %s)", model, eng.port, reason)
+        free_before, _ = await asyncio.to_thread(_query_gpu_memory_gib)
+        ok = await _sleep_call(cfg, eng.port)
+        if not ok:
+            logger.warning("Sleep Mode für '%s' fehlgeschlagen - beende Engine stattdessen hart", model)
+            await stop_engine(model, reason="sleep_failed")
+            return False
 
-    deadline = time.time() + confirm_timeout
-    confirmed = False
-    while time.time() < deadline:
-        still_sleeping = await _is_sleeping_call(cfg, eng.port)
-        if still_sleeping is True:
-            confirmed = True
-            break
-        await asyncio.sleep(0.5)
-    if confirmed and free_before is not None:
-        free_after, total_gib = await asyncio.to_thread(_query_gpu_memory_gib)
-        if free_after is not None:
-            configured_gib = cfg.serve_args_for(model)[0] * (total_gib or 0)
-            logger.info(
-                "Sleep Mode für '%s' bestätigt - GPU frei: %.1f -> %.1f GiB (+%.1f GiB zurückgewonnen, "
-                "konfigurierte gpu_memory_utilization entspräche %.1f GiB)",
-                model, free_before, free_after, free_after - free_before, configured_gib,
+        deadline = time.time() + confirm_timeout
+        confirmed = False
+        while time.time() < deadline:
+            still_sleeping = await _is_sleeping_call(cfg, eng.port)
+            if still_sleeping is True:
+                confirmed = True
+                break
+            await asyncio.sleep(0.5)
+        if confirmed and free_before is not None:
+            free_after, total_gib = await asyncio.to_thread(_query_gpu_memory_gib)
+            if free_after is not None:
+                configured_gib = cfg.serve_args_for(model)[0] * (total_gib or 0)
+                logger.info(
+                    "Sleep Mode für '%s' bestätigt - GPU frei: %.1f -> %.1f GiB (+%.1f GiB zurückgewonnen, "
+                    "konfigurierte gpu_memory_utilization entspräche %.1f GiB)",
+                    model, free_before, free_after, free_after - free_before, configured_gib,
+                )
+        if not confirmed:
+            logger.warning(
+                "Sleep Mode für '%s' hat nach %ss nicht bestätigt (POST /sleep kam zwar durch, "
+                "/is_sleeping meldet aber weiter false/nicht erreichbar) - beende Engine stattdessen hart",
+                model, confirm_timeout,
             )
-    if not confirmed:
-        logger.warning(
-            "Sleep Mode für '%s' hat nach %ss nicht bestätigt (POST /sleep kam zwar durch, "
-            "/is_sleeping meldet aber weiter false/nicht erreichbar) - beende Engine stattdessen hart",
-            model, confirm_timeout,
-        )
-        await stop_engine(model, reason="sleep_failed")
-        return False
-    eng.state = "sleeping"
-    return True
+            await stop_engine(model, reason="sleep_failed")
+            return False
+        eng.state = "sleeping"
+        return True
 
 
 async def wake_engine(model: str, wake_timeout: float = 120.0) -> dict:
@@ -321,22 +340,35 @@ async def wake_engine(model: str, wake_timeout: float = 120.0) -> dict:
     eng = engines.get(model)
     if eng is None:
         raise RuntimeError(f"Kein EngineState für '{model}' zum Aufwecken vorhanden.")
-    cfg = get_config()
-    logger.info("Wecke Engine für Modell '%s' auf (Port %s)", model, eng.port)
-    ok = await _wake_call(cfg, eng.port)
-    if ok:
-        deadline = time.time() + wake_timeout
-        while time.time() < deadline:
-            still_sleeping = await _is_sleeping_call(cfg, eng.port)
-            if still_sleeping is False and await _health_ok(cfg, eng.port):
-                eng.state = "ready"
-                eng.last_used = time.time()
-                _persist_last_active(model)
-                return eng.status()
-            await asyncio.sleep(0.5)
-        logger.warning("Aufwecken von '%s' hat nach %ss nicht abgeschlossen", model, wake_timeout)
-    logger.warning("Aufwecken von '%s' fehlgeschlagen - starte Engine komplett neu", model)
-    await stop_engine(model, reason="wake_failed")
+    async with eng.transition_lock:
+        # Erneut prüfen - während wir aufs Lock warteten, könnte ein
+        # paralleler Aufrufer (z.B. zwei fast gleichzeitige Requests fürs
+        # gleiche schlafende Modell) die Engine schon aufgeweckt haben.
+        if eng.state == "ready":
+            eng.last_used = time.time()
+            _persist_last_active(model)
+            return eng.status()
+        cfg = get_config()
+        logger.info("Wecke Engine für Modell '%s' auf (Port %s)", model, eng.port)
+        ok = await _wake_call(cfg, eng.port)
+        if ok:
+            deadline = time.time() + wake_timeout
+            while time.time() < deadline:
+                still_sleeping = await _is_sleeping_call(cfg, eng.port)
+                if still_sleeping is False and await _health_ok(cfg, eng.port):
+                    eng.state = "ready"
+                    eng.last_used = time.time()
+                    _persist_last_active(model)
+                    return eng.status()
+                await asyncio.sleep(0.5)
+            logger.warning("Aufwecken von '%s' hat nach %ss nicht abgeschlossen", model, wake_timeout)
+        logger.warning("Aufwecken von '%s' fehlgeschlagen - starte Engine komplett neu", model)
+        await stop_engine(model, reason="wake_failed")
+    # stop_engine()/der komplette Neustart unten laufen bewusst AUSSERHALB des
+    # obigen "with" - ensure_loaded() fasst für ein NEUES EngineState (die
+    # Engine wurde ja gerade beendet) ohnehin die normale Start-Logik samt
+    # eigenem Locking an, ein Festhalten des (jetzt verwaisten) alten Locks
+    # brächte hier nichts mehr.
     return await ensure_loaded(model, wait=True)
 
 
@@ -1031,6 +1063,22 @@ async def _ensure_loaded_once(model: str, wait: bool = True) -> dict:
     ok, reason = is_model_enabled(cfg, model)
     if not ok:
         raise RuntimeError(reason)
+
+    # Eine evtl. GERADE LAUFENDE Sleep-/Wake-Transition zuerst abwarten (siehe
+    # EngineState.transition_lock) - sonst könnte dieser Aufruf state=="ready"
+    # sehen, obwohl im Hintergrund schon sleep_engine() dabei ist, die GPU-
+    # Gewichte zu entladen (state wird dort erst NACH der Bestätigung auf
+    # "sleeping" gesetzt, das kann bis zu 30s dauern) - ein in diesem Fenster
+    # direkt an den Port weitergereichter Request landet dann auf einer
+    # Engine, die gerade unter ihm wegschläft, und hängt (live gemeldet:
+    # 2026-08-25). Bewusst AUSSERHALB von _pool_lock: eine Transition kann
+    # mehrere Sekunden dauern, _pool_lock ist global über ALLE Modelle und
+    # darf so lange nicht blockiert sein (derselbe Grund wie beim Warten auf
+    # einen Kaltstart weiter unten).
+    existing_before = engines.get(model)
+    if existing_before is not None:
+        async with existing_before.transition_lock:
+            pass  # nichts zu tun - nur warten, bis eine laufende Transition fertig ist
 
     async with _pool_lock:
         existing = engines.get(model)
