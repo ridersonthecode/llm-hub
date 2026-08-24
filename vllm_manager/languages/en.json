@@ -12,6 +12,7 @@
   "card.requests.hint": "Sum across all loaded engines",
   "card.poolBudget.label": "Pool Memory Budget (GPU)",
   "poolBudget.value": "{used}% of {ceiling}%",
+  "ram.extra": "{used} GB used · {free} GB free of {total} GB",
   "section.loadedModels": "Loaded Models",
   "section.activeRequest": "Active Request",
   "section.systemUsage": "System Usage",

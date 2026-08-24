@@ -377,6 +377,10 @@ DASHBOARD_HTML = r"""<!doctype html>
   .card .label { color:var(--text-dim); font-size:12px; text-transform:uppercase; letter-spacing:.04em; margin-bottom:8px; }
   .card .value { font-size:22px; font-weight:600; }
   .card .value.small { font-size:15px; font-family:var(--mono); }
+  .card .value.warn { color: var(--warn); }
+  .card .value.bad { color: var(--bad); }
+  .card .hint.warn { color: var(--warn); }
+  .card .hint.bad { color: var(--bad); font-weight:600; }
   .card .hint { color:var(--text-dim); font-size:12px; margin-top:6px; }
   .badge { display:inline-block; padding:2px 8px; border-radius:20px; font-size:11px; font-weight:600; }
   .badge.ok { background: var(--good-bg); color: var(--good); }
@@ -1049,6 +1053,18 @@ function pushHistory(arr, val) {
   if (arr.length > MAX_POINTS) arr.shift();
 }
 function cssVar(name) { return getComputedStyle(document.documentElement).getPropertyValue(name).trim(); }
+// Schwellwerte fürs Einfärben der RAM-Karte nach tatsächlich freiem Speicher -
+// bewusst nicht rein prozentual (auf großen Unified-Memory-Systemen wirken
+// 85% erstmal harmlos, auch wenn nur noch wenige GB frei sind, was für einen
+// Modell-Kaltstart bereits knapp werden kann).
+const RAM_FREE_BAD_GB = 8;
+const RAM_FREE_WARN_GB = 20;
+function ramSeverity(freeGb) {
+  if (freeGb == null) return "accent";
+  if (freeGb < RAM_FREE_BAD_GB) return "bad";
+  if (freeGb < RAM_FREE_WARN_GB) return "warn";
+  return "good";
+}
 function drawChart(canvas, history, varName) {
   const ctx = canvas.getContext("2d");
   const w = canvas.width, h = canvas.height;
@@ -1143,10 +1159,15 @@ function render(data) {
   pushHistory(gpuHistory, sys.gpu_percent);
   drawChart($("gpu-chart"), gpuHistory, "--accent");
 
+  const ramSev = ramSeverity(sys.ram_free_gb);
   $("ram-percent").textContent = fmtPct(sys.ram_percent);
-  $("ram-extra").textContent = sys.ram_used_gb != null ? `${sys.ram_used_gb} / ${sys.ram_total_gb} GB` : "";
+  $("ram-percent").className = "value" + (ramSev === "warn" || ramSev === "bad" ? " " + ramSev : "");
+  $("ram-extra").textContent = sys.ram_used_gb != null
+    ? t("ram.extra", { used: sys.ram_used_gb, free: sys.ram_free_gb, total: sys.ram_total_gb })
+    : "";
+  $("ram-extra").className = "hint" + (ramSev === "warn" || ramSev === "bad" ? " " + ramSev : "");
   pushHistory(ramHistory, sys.ram_percent);
-  drawChart($("ram-chart"), ramHistory, "--good");
+  drawChart($("ram-chart"), ramHistory, "--" + ramSev);
 
   const active = data.active_requests || [];
   if (active.length === 0) {

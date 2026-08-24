@@ -41,10 +41,14 @@ def _read_ram() -> dict:
     except OSError:
         total_kb = avail_kb = None
     if not total_kb or avail_kb is None:
-        return {"ram_used_gb": None, "ram_total_gb": None, "ram_percent": None}
+        return {"ram_used_gb": None, "ram_free_gb": None, "ram_total_gb": None, "ram_percent": None}
     used_kb = total_kb - avail_kb
     return {
         "ram_used_gb": round(used_kb / 1_048_576, 2),
+        # MemAvailable statt MemFree: berücksichtigt reclaimbaren Cache/Buffer,
+        # ist also die realistische Zahl für "ohne Swappen tatsächlich noch
+        # nutzbar" - genau das, was fürs Einschätzen von Kaltstarts zählt.
+        "ram_free_gb": round(avail_kb / 1_048_576, 2),
         "ram_total_gb": round(total_kb / 1_048_576, 2),
         "ram_percent": round(used_kb / total_kb, 4),
     }
