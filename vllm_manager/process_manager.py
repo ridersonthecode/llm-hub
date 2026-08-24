@@ -66,6 +66,14 @@ logger = logging.getLogger("vllm_manager.engine")
 LOG_DIR = Path(__file__).resolve().parent.parent / "logs"
 LOG_DIR.mkdir(exist_ok=True)
 
+# Live gemessen (2026-08-24, 35B-Modell): Sleep Mode gibt NICHT den gesamten
+# reservierten Speicher zurück (KV-Cache/Aktivierungs-Puffer bleiben teils
+# belegt) - nur ~21 von ~43 GiB. Fließt konservativ in die schnelle Config-
+# Schätzung (_make_room.total_util) ein, damit die NICHT bei jedem
+# schlafenden Modell optimistisch "0" annimmt - der Live-GPU-Check bleibt
+# trotzdem die eigentliche Absicherung.
+SLEEPING_ENGINE_RETAINED_FRACTION = 0.5
+
 MAX_HISTORY = 50
 # Verlauf abgeschlossener Modell-Sessions (neueste zuerst) - wie "ollama ps",
 # nur historisch statt nur der aktuelle Zustand. Überlebt keinen Dienst-Neustart.
@@ -243,7 +251,7 @@ async def _is_sleeping_call(cfg: Config, port: int) -> Optional[bool]:
     return None
 
 
-async def sleep_engine(model: str, reason: str = "evicted") -> bool:
+async def sleep_engine(model: str, reason: str = "evicted", confirm_timeout: float = 30.0) -> bool:
     """Versetzt eine laufende Engine in den Sleep Mode (siehe Moduldocstring)
     statt sie zu beenden - die GPU-Gewichte werden freigegeben, der Prozess
     (samt CUDA-Kontext/JIT-Kernel-Cache) bleibt aber am Leben, siehe
@@ -251,7 +259,21 @@ async def sleep_engine(model: str, reason: str = "evicted") -> bool:
     Fehlschlag (z.B. Engine reagiert nicht, oder unterstützt Sleep Mode aus
     irgendeinem Grund doch nicht) wird stattdessen hart beendet (stop_engine)
     - eine Engine, die weder schläft noch sauber erreichbar ist, darf nicht
-    als Zombie im Pool hängen bleiben."""
+    als Zombie im Pool hängen bleiben.
+
+    WICHTIG (live beobachtet, 2026-08-24 - RAM lief bei Modellwechseln aus
+    dem Ruder): vLLMs eigener Code kommentiert das selbst als FIXME
+    (vllm/entrypoints/serve/dev/sleep/api_router.py): "in v0 with frontend
+    multiprocessing, the sleep command is sent but does not finish yet when
+    we return a response." Der POST /sleep-Call kann also mit 200 OK
+    zurückkommen, BEVOR der EngineCore-Prozess die GPU-Gewichte tatsächlich
+    freigegeben hat. Ohne Bestätigung hier hielt _make_room() das Modell
+    schon für "schläft (0 Speicherbedarf)" und ließ das NÄCHSTE Modell direkt
+    lostarten, während das alte im Hintergrund noch am Freigeben war - beide
+    beanspruchten kurz gleichzeitig vollen Speicher. Deshalb wird hier aktiv
+    per /is_sleeping nachgefragt, bis der Sleep WIRKLICH abgeschlossen ist,
+    bevor True zurückgegeben wird (und die Engine anderswo als "0 Speicher"
+    gerechnet werden darf)."""
     eng = engines.get(model)
     if eng is None:
         return False
@@ -262,6 +284,23 @@ async def sleep_engine(model: str, reason: str = "evicted") -> bool:
     ok = await _sleep_call(cfg, eng.port)
     if not ok:
         logger.warning("Sleep Mode für '%s' fehlgeschlagen - beende Engine stattdessen hart", model)
+        await stop_engine(model, reason="sleep_failed")
+        return False
+
+    deadline = time.time() + confirm_timeout
+    confirmed = False
+    while time.time() < deadline:
+        still_sleeping = await _is_sleeping_call(cfg, eng.port)
+        if still_sleeping is True:
+            confirmed = True
+            break
+        await asyncio.sleep(0.5)
+    if not confirmed:
+        logger.warning(
+            "Sleep Mode für '%s' hat nach %ss nicht bestätigt (POST /sleep kam zwar durch, "
+            "/is_sleeping meldet aber weiter false/nicht erreichbar) - beende Engine stattdessen hart",
+            model, confirm_timeout,
+        )
         await stop_engine(model, reason="sleep_failed")
         return False
     eng.state = "sleeping"
@@ -404,11 +443,13 @@ async def _make_room(cfg: Config, model: str, gmu: float) -> None:
         )
 
     def total_util() -> float:
-        # Schlafende Engines optimistisch mit 0 werten (siehe sleep_engine im
-        # Moduldocstring) - der Live-GPU-Check unten ist die eigentliche
-        # Absicherung, falls das im Einzelfall zu optimistisch war.
+        # Schlafende Engines zählen mit SLEEPING_ENGINE_RETAINED_FRACTION statt
+        # 0 - Sleep Mode gibt live gemessen nur ~50% des reservierten Speichers
+        # zurück, nicht alles (siehe Konstante oben). Der Live-GPU-Check unten
+        # bleibt die eigentliche Absicherung, falls auch das noch zu
+        # optimistisch war.
         return sum(
-            0.0 if e.state == "sleeping" else cfg.serve_args_for(e.model)[0]
+            cfg.serve_args_for(e.model)[0] * (SLEEPING_ENGINE_RETAINED_FRACTION if e.state == "sleeping" else 1.0)
             for e in others()
         ) + gmu
 
