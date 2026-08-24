@@ -404,7 +404,11 @@ DASHBOARD_HTML = r"""<!doctype html>
 
   .chart-grid { display:grid; grid-template-columns: repeat(auto-fit, minmax(280px,1fr)); gap:14px; }
   .chart-card canvas { width:100%; height:70px; display:block; margin-top:8px; }
-  .cpu-core-grid { display:grid; grid-template-columns: repeat(auto-fill, minmax(110px,1fr)); gap:8px; }
+  /* Max. 6 Kacheln pro Zeile: Spaltenbreite ist das Maximum aus 110px (Mindestbreite,
+     greift auf schmalen Bildschirmen) und einem Sechstel der verfügbaren Breite
+     (abzüglich der 5 Lücken zwischen 6 Spalten) - reicht der Platz für mehr als 6,
+     wird trotzdem bei 6 umgebrochen statt in eine 7./8. Spalte zu wachsen. */
+  .cpu-core-grid { display:grid; grid-template-columns: repeat(auto-fill, minmax(max(110px, calc((100% - 5*8px) / 6)), 1fr)); gap:8px; }
   .cpu-core-tile { background:var(--panel); border:1px solid var(--border); border-radius:8px; padding:8px 10px; }
   .cpu-core-tile .core-label { display:flex; justify-content:space-between; align-items:baseline; font-size:11px; color:var(--text-dim); }
   .cpu-core-tile .core-value { font-size:13px; font-weight:600; color:var(--text); }
