@@ -273,6 +273,7 @@ async def sleep_engine(model: str, reason: str = "evicted", confirm_timeout: flo
         return True
     cfg = get_config()
     logger.info("Schicke Engine für Modell '%s' in Sleep Mode (Port %s, Grund: %s)", model, eng.port, reason)
+    free_before, _ = await asyncio.to_thread(_query_gpu_memory_gib)
     ok = await _sleep_call(cfg, eng.port)
     if not ok:
         logger.warning("Sleep Mode für '%s' fehlgeschlagen - beende Engine stattdessen hart", model)
@@ -287,6 +288,15 @@ async def sleep_engine(model: str, reason: str = "evicted", confirm_timeout: flo
             confirmed = True
             break
         await asyncio.sleep(0.5)
+    if confirmed and free_before is not None:
+        free_after, total_gib = await asyncio.to_thread(_query_gpu_memory_gib)
+        if free_after is not None:
+            configured_gib = cfg.serve_args_for(model)[0] * (total_gib or 0)
+            logger.info(
+                "Sleep Mode für '%s' bestätigt - GPU frei: %.1f -> %.1f GiB (+%.1f GiB zurückgewonnen, "
+                "konfigurierte gpu_memory_utilization entspräche %.1f GiB)",
+                model, free_before, free_after, free_after - free_before, configured_gib,
+            )
     if not confirmed:
         logger.warning(
             "Sleep Mode für '%s' hat nach %ss nicht bestätigt (POST /sleep kam zwar durch, "
@@ -373,8 +383,22 @@ def _allocate_port(cfg: Config) -> int:
 _gpu_mem_query_broken = False  # nach dem ersten Fehlschlag nicht bei jedem Modell-Load erneut versuchen
 
 
+def _read_mem_available_gib() -> Optional[float]:
+    """MemAvailable aus /proc/meminfo in GiB - berücksichtigt (anders als
+    MemFree) reclaimbaren Page-Cache/Buffer als tatsächlich verfügbar. Siehe
+    _query_gpu_memory_gib() für den Grund, warum das hier gebraucht wird."""
+    try:
+        with open("/proc/meminfo") as f:
+            for line in f:
+                if line.startswith("MemAvailable:"):
+                    return int(line.split()[1]) / 1_048_576  # kB -> GiB
+    except (OSError, ValueError, IndexError):
+        pass
+    return None
+
+
 def _query_gpu_memory_gib() -> tuple[Optional[float], Optional[float]]:
-    """(frei, gesamt) in GiB über torch.cuda.mem_get_info() - dieselbe
+    """(frei, gesamt) in GiB. Basis ist torch.cuda.mem_get_info() - dieselbe
     CUDA-Treiber-API, die vLLM selbst beim Start prüft (siehe die
     "Free memory on device"-Fehlermeldung in worker/utils.py). BEWUSST NICHT
     nvidia-smi/NVML: auf Unified-Memory-Systemen wie NVIDIA GB10 liefert
@@ -382,14 +406,35 @@ def _query_gpu_memory_gib() -> tuple[Optional[float], Optional[float]]:
     MEMORY` verifiziert), torch.cuda.mem_get_info() funktioniert dagegen auch
     dort zuverlässig. Der erste Aufruf initialisiert einen CUDA-Kontext im
     Manager-Prozess (~300-500MB, einmalig) - danach ist die Abfrage praktisch
-    kostenlos (<1ms), ein Subprozess pro Aufruf wäre hier unnötiger Overhead."""
+    kostenlos (<1ms), ein Subprozess pro Aufruf wäre hier unnötiger Overhead.
+
+    WICHTIG (live beobachtet, 2026-08-24 - Sleep Mode "half nie", Modelle
+    gingen bei jedem Wechsel in den Kaltstart): torch.cuda.mem_get_info()
+    liefert auf diesem Unified-Memory-System (GB10) einen "frei"-Wert, der
+    praktisch exakt /proc/meminfo's MemFree entspricht - NICHT MemAvailable.
+    Der Unterschied war live ~47 GiB reclaimbarer Page-Cache, den die CUDA-
+    Abfrage fälschlich als "belegt" zählte (genau dasselbe MemFree-vs-
+    MemAvailable-Problem, das system_metrics._read_ram() fürs RAM-Dashboard
+    schon lösen musste - nur hier in der Verdrängungslogik). Die Folge:
+    _make_room() hielt selbst bei reichlich echtem Spielraum ständig zu wenig
+    frei für nötig und eskalierte bis zum harten Beenden schlafender Engines,
+    obwohl das gar nicht nötig gewesen wäre. Fix: das Maximum aus dem reinen
+    CUDA-Wert und MemAvailable verwenden - nie SCHLECHTER als die reine
+    CUDA-Zahl (falls /proc/meminfo mal nicht lesbar ist oder dieses konkrete
+    Deployment doch auf einer klassischen dGPU statt Unified Memory läuft),
+    aber korrigiert das Unterschätzen auf genau diesem Hardware-Typ."""
     global _gpu_mem_query_broken
     if _gpu_mem_query_broken:
         return None, None
     try:
         import torch
         free_bytes, total_bytes = torch.cuda.mem_get_info()
-        return free_bytes / (1024**3), total_bytes / (1024**3)
+        free_gib = free_bytes / (1024**3)
+        total_gib = total_bytes / (1024**3)
+        mem_available_gib = _read_mem_available_gib()
+        if mem_available_gib is not None:
+            free_gib = min(max(free_gib, mem_available_gib), total_gib)
+        return free_gib, total_gib
     except Exception:
         logger.warning(
             "Live-GPU-Speichercheck nicht möglich (torch.cuda.mem_get_info) - "
@@ -546,6 +591,11 @@ async def _make_room(cfg: Config, model: str, gmu: float) -> None:
         if free_gib >= needed_gib:
             return
         pool = others()
+        logger.info(
+            "Live-Speicherprüfung für '%s': nur %.1f/%.1f GiB frei (Defizit %.1f GiB) - Pool: %s",
+            model, free_gib, needed_gib, needed_gib - free_gib,
+            [(e.model, e.state, round(cfg.serve_args_for(e.model)[0], 2)) for e in pool],
+        )
         busy_msg = (
             f"nur {free_gib:.1f}/{needed_gib:.1f} GiB GPU-Speicher frei, alle {len(pool)} übrigen "
             f"geladenen Modelle ({', '.join(sorted({e.model for e in pool}))}) haben durchgehend "
