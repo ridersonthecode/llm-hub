@@ -46,6 +46,7 @@ import asyncio
 import json
 import logging
 import os
+import re
 import time
 from collections import deque
 from pathlib import Path
@@ -831,7 +832,141 @@ def is_model_enabled(cfg: Config, model: str) -> tuple[bool, Optional[str]]:
     return True, None
 
 
+_KV_CACHE_DEFICIT_RE = re.compile(
+    r"([\d.]+)\s*GiB KV cache is needed, which is larger than the available "
+    r"KV cache memory \(([\d.]+)\s*GiB\)"
+)
+# Fallback-Muster: manchmal liefert vLLM nur die generische Meldung "No
+# available memory for the cache blocks" OHNE die obigen Zahlen (live
+# beobachtet, 2026-08-24) - der eigentliche Fehlbetrag steht dann einige
+# Zeilen VORHER als negativer Zwischenwert ("Available KV cache memory:
+# -8.67 GiB"), den vLLM beim Speicher-Profiling loggt, bevor es überhaupt
+# zum eigentlichen Fehler kommt.
+_KV_CACHE_NEGATIVE_RE = re.compile(r"Available KV cache memory:\s*(-[\d.]+)\s*GiB")
+
+
+def _parse_kv_cache_deficit_gib(text: str) -> Optional[float]:
+    """Extrahiert aus vLLMs eigenen Logzeilen beim Start das KV-Cache-Defizit
+    in GiB - None, falls keines der beiden bekannten Muster gefunden wird
+    (andere Fehlerursache, siehe Aufrufer). Zwei Formen, siehe Kommentare an
+    den Regexes oben: die präzise "X GiB needed vs. Y GiB available"-Meldung,
+    oder ersatzweise der negative Zwischenwert aus dem Speicher-Profiling."""
+    m = _KV_CACHE_DEFICIT_RE.search(text)
+    if m:
+        needed, available = float(m.group(1)), float(m.group(2))
+        deficit = needed - available
+        if deficit > 0:
+            return deficit
+    m2 = _KV_CACHE_NEGATIVE_RE.search(text)
+    if m2:
+        return abs(float(m2.group(1)))
+    return None
+
+
+async def _autocorrect_kv_cache_deficit(model: str, error_message: str) -> bool:
+    """Statt gpu_memory_utilization im Voraus zu erraten (fehleranfällig -
+    hängt von Layer-Anzahl, KV-Head-Zahl, dtype, Hybrid-Architekturen wie
+    Mamba/GatedDeltaNet-Mischungen ab, siehe capability_detector), lässt sich
+    das erste Fehlschlagen einfach vLLM selbst überlassen: dessen eigene
+    Fehlermeldung beim Start nennt den exakt fehlenden KV-Cache-Speicher in
+    GiB (siehe _parse_kv_cache_deficit_gib) - autoritativer als jede eigene
+    Schätzung, weil vLLM zu diesem Zeitpunkt bereits die echte Modell-
+    Architektur geladen hat.
+
+    Korrigiert IMMER, wenn dieses eindeutige Fehlermuster erkannt wird - auch
+    wenn der aktuelle Wert vom Nutzer manuell gesetzt war (anders als z.B.
+    register_model_if_missing, das nie einen bestehenden Wert anfasst): dort
+    ist es reine Vorsorge ohne jeden Beweis, hier liegt ein ECHTER,
+    reproduzierbarer Absturz vor - ein manuell gesetzter, nachweislich zu
+    knapper Wert lässt das Modell sonst dauerhaft unladbar bleiben, bis
+    jemand von Hand nachbessert. Schreibt den korrigierten Wert (Defizit +
+    15% Sicherheitsaufschlag, gedeckelt auf 0.95) direkt in config.json.
+    Gibt True zurück, wenn korrigiert wurde (der Aufrufer soll dann einen
+    erneuten Versuch starten)."""
+    cfg = get_config()
+    deficit_gib = _parse_kv_cache_deficit_gib(error_message)
+    if deficit_gib is None:
+        # error_message enthält nur den kurzen 40-Zeilen-Tail (siehe _tail()
+        # in _ensure_loaded_once) - der negative Zwischenwert aus dem
+        # Speicher-Profiling kann weiter zurückliegen und dort schon
+        # rausgefallen sein. Bei Bedarf gezielt einen größeren Ausschnitt
+        # direkt aus der Logdatei nachlesen (derselbe Pfad wie beim Start).
+        log_path = LOG_DIR / f"{_safe_name(model)}.log"
+        wider_tail = await asyncio.to_thread(_tail, log_path, 200)
+        deficit_gib = _parse_kv_cache_deficit_gib(wider_tail)
+    if deficit_gib is None:
+        return False
+
+    _free_gib, total_gib = await asyncio.to_thread(_query_gpu_memory_gib)
+    if not total_gib:
+        return False
+
+    current_gmu, _ = cfg.serve_args_for(model)
+    # +35% statt nur des reinen Defizits: vLLMs CUDA-Graph-Speicherprofiling
+    # frisst einen Teil jeder gpu_memory_utilization-Erhöhung selbst wieder
+    # auf (live beobachtet - eine Erhöhung um genau das gemeldete Defizit
+    # ließ beim erneuten Versuch fast dasselbe Restdefizit übrig), ohne
+    # großzügigeren Aufschlag bräuchte es öfter mehrere Korrekturrunden
+    # (siehe MAX_KV_CACHE_AUTOCORRECT_ATTEMPTS in ensure_loaded - die fängt
+    # das zwar ab, aber jeder Fehlversuch kostet bei großen Modellen
+    # mehrere Minuten Kaltstart-Zeit für nichts).
+    new_gmu = min(0.95, round(current_gmu + (deficit_gib * 1.35) / total_gib, 3))
+    if new_gmu <= current_gmu:
+        return False
+
+    logger.warning(
+        "Modell '%s': gpu_memory_utilization=%.3f reichte nicht für den konfigurierten "
+        "max_model_len (KV-Cache-Defizit laut vLLM: %.2f GiB) - korrigiere automatisch "
+        "auf %.3f, trage das in config.json ein und versuche erneut zu laden.",
+        model, current_gmu, deficit_gib, new_gmu,
+    )
+    dump = cfg.model_dump()
+    entry = dump["models"].setdefault(model, {})
+    entry["gpu_memory_utilization"] = new_gmu
+    old_notes = (entry.get("notes") or "").strip()
+    correction_note = (
+        f"gpu_memory_utilization automatisch von {current_gmu} auf {new_gmu} korrigiert "
+        f"(KV-Cache-Defizit {deficit_gib:.2f} GiB laut vLLM-Fehlermeldung beim Start)."
+    )
+    entry["notes"] = f"{old_notes}\n{correction_note}".strip() if old_notes else correction_note
+    try:
+        await asyncio.to_thread(config_editor.save_config, dump)
+    except Exception:
+        logger.exception("Konnte automatisch korrigiertes gpu_memory_utilization für '%s' nicht speichern", model)
+        return False
+    return True
+
+
+MAX_KV_CACHE_AUTOCORRECT_ATTEMPTS = 3
+
+
 async def ensure_loaded(model: str, wait: bool = True) -> dict:
+    """Dünner Wrapper um _ensure_loaded_once() mit automatischer Selbst-
+    korrektur: schlägt der Kaltstart speziell an einem zu knappen KV-Cache-
+    Speicherbudget fehl (siehe _autocorrect_kv_cache_deficit), wird
+    gpu_memory_utilization korrigiert und erneut versucht - bis zu
+    MAX_KV_CACHE_AUTOCORRECT_ATTEMPTS mal, NICHT nur einmal: live beobachtet
+    (2026-08-24), dass EINE Korrektur manchmal nicht reicht, weil vLLMs
+    CUDA-Graph-Speicherprofiling einen Teil jeder Erhöhung selbst mit
+    aufbraucht (nichtlinearer Effekt, siehe dessen eigener Hinweis "CUDA
+    graph memory profiling..." im Log) - das Restdefizit wird dadurch mit
+    jedem Versuch kleiner, aber nicht notwendigerweise beim ersten Mal schon
+    Null. _autocorrect_kv_cache_deficit() bricht selbst ab (gibt False
+    zurück), sobald keine Verbesserung mehr möglich ist (0.95-Deckel erreicht
+    oder kein positives Defizit mehr erkennbar), das begrenzt die Schleife
+    zusätzlich zum harten Attempt-Limit hier. Jeder andere Fehler (Modell
+    nicht gefunden, Timeout, ...) propagiert unverändert nach dem ersten
+    Versuch."""
+    for attempt in range(1, MAX_KV_CACHE_AUTOCORRECT_ATTEMPTS + 1):
+        try:
+            return await _ensure_loaded_once(model, wait)
+        except RuntimeError as e:
+            if attempt >= MAX_KV_CACHE_AUTOCORRECT_ATTEMPTS or not await _autocorrect_kv_cache_deficit(model, str(e)):
+                raise
+    raise AssertionError("unreachable")  # for-Schleife kehrt immer per return/raise zurück
+
+
+async def _ensure_loaded_once(model: str, wait: bool = True) -> dict:
     """Lädt `model`, falls nötig, und wartet (falls `wait`) bis es bereit ist.
 
     WICHTIG (war lange ein Bug): der Pool-Lock (`_pool_lock`) darf NUR die

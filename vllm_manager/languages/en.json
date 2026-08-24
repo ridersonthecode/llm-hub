@@ -416,7 +416,7 @@
   "help.cfg_maxModelLen.title": "Max model length",
   "help.cfg_maxModelLen.body": "The context window size in tokens for this model (passed to vLLM as --max-model-len). Larger values need more GPU memory for the KV cache.",
   "help.cfg_gpuMemUtil.title": "GPU memory utilization",
-  "help.cfg_gpuMemUtil.body": "Fraction of GPU memory (0-1) this specific model's engine is allowed to reserve for itself. Empty = fall back to the Default Serve Args value above.",
+  "help.cfg_gpuMemUtil.body": "Fraction of GPU memory (0-1) this specific model's engine is allowed to reserve for itself. Empty = fall back to the Default Serve Args value above. Usually doesn't need manual tuning: if startup fails because the KV cache for the configured max_model_len doesn't fit in the reserved memory, the manager recognizes vLLM's own error message, automatically corrects this value upward, and retries once - regardless of whether the current value was set manually.",
   "help.cfg_maxTokens.title": "Max output tokens",
   "help.cfg_maxTokens.body": "Caps generation length only when the client itself doesn't request a max_tokens value - protects against runaway or repeating generations without limiting normal replies that set their own limit.",
   "help.cfg_ragCollection.title": "Auto-RAG collection",

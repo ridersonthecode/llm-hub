@@ -416,7 +416,7 @@
   "help.cfg_maxModelLen.title": "Max. Modelllänge",
   "help.cfg_maxModelLen.body": "Die Kontextfenster-Größe in Tokens für dieses Modell (wird als --max-model-len an vLLM übergeben). Größere Werte brauchen mehr GPU-Speicher für den KV-Cache.",
   "help.cfg_gpuMemUtil.title": "GPU memory utilization",
-  "help.cfg_gpuMemUtil.body": "Anteil des GPU-Speichers (0-1), den die Engine dieses Modells für sich reservieren darf. Leer = Fallback auf den Default-Serve-Args-Wert oben.",
+  "help.cfg_gpuMemUtil.body": "Anteil des GPU-Speichers (0-1), den die Engine dieses Modells für sich reservieren darf. Leer = Fallback auf den Default-Serve-Args-Wert oben. Muss meist nicht von Hand gepflegt werden: schlägt der Start fehl, weil der KV-Cache für den konfigurierten max_model_len nicht in den reservierten Speicher passt, erkennt der Manager das an vLLMs eigener Fehlermeldung, korrigiert diesen Wert automatisch nach oben und versucht es einmal erneut - unabhängig davon, ob der aktuelle Wert manuell gesetzt war.",
   "help.cfg_maxTokens.title": "Max. Ausgabe-Tokens",
   "help.cfg_maxTokens.body": "Begrenzt die Generierungslänge nur, wenn der Client selbst keinen max_tokens-Wert anfragt - schützt vor ausufernden/wiederholenden Generierungen, ohne normale Antworten mit eigenem Limit einzuschränken.",
   "help.cfg_ragCollection.title": "Auto-RAG-Collection",
