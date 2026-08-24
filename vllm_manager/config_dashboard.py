@@ -306,6 +306,12 @@ CONFIG_DASHBOARD_HTML = r"""<!doctype html>
         <input type="checkbox" id="f-auto_reload_last_model">
         <label for="f-auto_reload_last_model" data-i18n="cfg.field.autoReloadLastModel">Auto-reload last used model on service restart</label><span class="help-icon" data-help="cfg_autoReloadLastModel" data-i18n-title="help.clickForInfo" title="Click for more info">?</span>
       </div>
+      <div class="check-row">
+        <input type="checkbox" id="f-enable_sleep_mode">
+        <label for="f-enable_sleep_mode" data-i18n="cfg.field.enableSleepMode">Sleep mode (put evicted models to sleep instead of stopping them)</label><span class="help-icon" data-help="cfg_enableSleepMode" data-i18n-title="help.clickForInfo" title="Click for more info">?</span>
+      </div>
+      <label><span data-i18n="cfg.field.queueTimeout">Queue timeout (seconds)</span><span class="help-icon" data-help="cfg_queueTimeout" data-i18n-title="help.clickForInfo" title="Click for more info">?</span></label>
+      <input type="number" id="f-queue_timeout_seconds" min="1">
     </div>
   </section>
 
@@ -595,6 +601,8 @@ function renderForm() {
   $("f-gpu_memory_ceiling").value = state.gpu_memory_ceiling ?? 0.9;
   $("f-idle_timeout_seconds").value = state.idle_timeout_seconds ?? "";
   $("f-startup_timeout_seconds").value = state.startup_timeout_seconds ?? 900;
+  $("f-enable_sleep_mode").checked = state.enable_sleep_mode !== false;
+  $("f-queue_timeout_seconds").value = state.queue_timeout_seconds ?? 1800;
 
   const dsa = state.default_serve_args || {};
   $("f-dsa_gpu_memory_utilization").value = dsa.gpu_memory_utilization ?? "";
@@ -624,6 +632,7 @@ function renderForm() {
   document.querySelectorAll("#f-host,#f-port,#f-engine_host,#f-engine_port,#f-hf_home,#f-vllm_bin,"
     + "#f-api_key_enabled,#f-api_key_key,#f-max_concurrent_models,#f-gpu_memory_ceiling,"
     + "#f-idle_timeout_seconds,#f-startup_timeout_seconds,#f-auto_reload_last_model,"
+    + "#f-enable_sleep_mode,#f-queue_timeout_seconds,"
     + "#f-dsa_gpu_memory_utilization,#f-dsa_max_model_len,"
     + "#f-pricing_input_per_mtok,#f-pricing_output_per_mtok,"
     + "#f-rag_enabled,#f-rag_qdrant_host,#f-rag_qdrant_port,#f-rag_default_collection,"
@@ -1012,6 +1021,8 @@ function buildPayload() {
     default_model: $("f-default_model").value || null,
     auto_reload_last_model: $("f-auto_reload_last_model").checked,
     startup_timeout_seconds: parseInt($("f-startup_timeout_seconds").value, 10),
+    enable_sleep_mode: $("f-enable_sleep_mode").checked,
+    queue_timeout_seconds: parseInt($("f-queue_timeout_seconds").value, 10),
     default_serve_args: dsa,
     default_pricing: {
       input_per_mtok: parseFloat($("f-pricing_input_per_mtok").value),
