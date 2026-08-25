@@ -52,7 +52,9 @@ CONFIG_DASHBOARD_HTML = r"""<!doctype html>
     --accent-bg:rgba(122,168,255,.15); --good-bg:rgba(74,222,128,.15); --bad-bg:rgba(248,113,113,.15);
   }
   * { box-sizing: border-box; }
+  html { scroll-behavior: smooth; }
   body { margin:0; background:var(--bg); color:var(--text); font-family: -apple-system, "Segoe UI", Roboto, sans-serif; padding: 24px; }
+  .container { max-width: 1180px; margin: 0 auto; }
   h1 { font-size: 18px; margin: 0 0 4px; }
   a { color: var(--accent); }
   .topbar { display:flex; align-items:flex-start; justify-content:space-between; margin-bottom: 4px; }
@@ -67,9 +69,33 @@ CONFIG_DASHBOARD_HTML = r"""<!doctype html>
   .btn:disabled { opacity:.5; cursor:default; }
   .btn.danger:hover { border-color: var(--bad); color: var(--bad); }
   .btn.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
-  section { margin-bottom: 26px; }
+  section { margin-bottom: 26px; scroll-margin-top: 78px; }
   section h2 { font-size: 14px; color: var(--text-dim); text-transform:uppercase; letter-spacing:.04em; margin: 0 0 10px; }
   .card { background:var(--panel); border:1px solid var(--border); border-radius:10px; padding:16px; }
+
+  /* Bootstrap-artiges 12-Spalten-Grid, nur die paar Klassen, die diese Seite
+     tatsächlich braucht - kein Fremd-Framework nachgeladen, alles inline.
+     Kollabiert unter 860px auf eine einzelne Spalte (siehe Media Query
+     unten), damit die Seite auch schmal/mobil nutzbar bleibt. */
+  .grid { display:grid; grid-template-columns: repeat(12, 1fr); gap:20px; align-items:start; margin-bottom: 26px; }
+  .grid > .col-5 { grid-column: span 5; min-width: 0; }
+  .grid > .col-6 { grid-column: span 6; min-width: 0; }
+  .grid > .col-7 { grid-column: span 7; min-width: 0; }
+  .grid > .col-12 { grid-column: span 12; min-width: 0; }
+  .grid > div > section:last-child { margin-bottom: 0; }
+  @media (max-width: 860px) {
+    .grid > [class*="col-"] { grid-column: 1 / -1; }
+  }
+
+  /* Sprungnavigation zu den Sektionen weiter unten - reine Bequemlichkeit
+     auf dieser inzwischen recht langen Seite, kein eigener State/Routing. */
+  .section-nav { display:flex; gap:6px; flex-wrap:wrap; margin: 0 0 22px; }
+  .section-nav a {
+    background:var(--panel); border:1px solid var(--border); color:var(--text-dim);
+    border-radius:20px; padding:5px 12px; font-size:12px; text-decoration:none;
+    white-space:nowrap;
+  }
+  .section-nav a:hover { background:var(--panel-2); color:var(--text); border-color:var(--accent); }
   table { width:100%; border-collapse: collapse; background:var(--panel); border:1px solid var(--border); border-radius:10px; overflow:hidden; }
   .table-scroll { overflow-x:auto; }
   th, td { text-align:left; padding:9px 12px; font-size:13px; border-bottom:1px solid var(--border); vertical-align: top; }
@@ -211,6 +237,7 @@ CONFIG_DASHBOARD_HTML = r"""<!doctype html>
 </style>
 </head>
 <body>
+<div class="container">
   <div class="topbar">
     <div>
       <h1 data-i18n="cfg.title">Configuration</h1>
@@ -244,92 +271,140 @@ CONFIG_DASHBOARD_HTML = r"""<!doctype html>
     <span class="status-msg" id="save-status"></span>
   </div>
 
-  <section>
-    <h2 data-i18n="cfg.section.server">Server</h2>
-    <div class="card">
-      <div class="row">
-        <div>
-          <label><span data-i18n="cfg.field.host">Host</span><span class="restart-badge" data-i18n="cfg.restartBadge">🔁 restart</span><span class="help-icon" data-help="cfg_host" data-i18n-title="help.clickForInfo" title="Click for more info">?</span></label>
-          <input type="text" id="f-host">
+  <nav class="section-nav">
+    <a href="#sec-server" data-i18n="cfg.section.server">Server</a>
+    <a href="#sec-apikey" data-i18n="cfg.section.apiKey">API Key</a>
+    <a href="#sec-hotpool" data-i18n="cfg.section.hotPool">Hot Pool &amp; Limits</a>
+    <a href="#sec-priority" data-i18n="cfg.section.priority">Model priority (eviction risk)</a>
+    <a href="#sec-serveargs" data-i18n="cfg.section.defaultServeArgs">Default Serve Args</a>
+    <a href="#sec-pricing" data-i18n="cfg.section.pricing">Cost Tracking</a>
+    <a href="#sec-rag" data-i18n="cfg.section.rag">RAG</a>
+    <a href="#sec-models" data-i18n="cfg.section.models">Models</a>
+    <a href="#sec-backups" data-i18n="cfg.section.backups">Backups</a>
+  </nav>
+
+  <div class="grid">
+    <div class="col-7">
+      <section id="sec-server">
+        <h2 data-i18n="cfg.section.server">Server</h2>
+        <div class="card">
+          <div class="row">
+            <div>
+              <label><span data-i18n="cfg.field.host">Host</span><span class="restart-badge" data-i18n="cfg.restartBadge">🔁 restart</span><span class="help-icon" data-help="cfg_host" data-i18n-title="help.clickForInfo" title="Click for more info">?</span></label>
+              <input type="text" id="f-host">
+            </div>
+            <div>
+              <label><span data-i18n="cfg.field.port">Port</span><span class="restart-badge" data-i18n="cfg.restartBadge">🔁 restart</span><span class="help-icon" data-help="cfg_port" data-i18n-title="help.clickForInfo" title="Click for more info">?</span></label>
+              <input type="number" id="f-port" min="1" max="65535">
+            </div>
+          </div>
+          <div class="row">
+            <div>
+              <label><span data-i18n="cfg.field.engineHost">Engine Host</span><span class="help-icon" data-help="cfg_engineHost" data-i18n-title="help.clickForInfo" title="Click for more info">?</span></label>
+              <input type="text" id="f-engine_host">
+            </div>
+            <div>
+              <label><span data-i18n="cfg.field.enginePort">Engine Base Port</span><span class="help-icon" data-help="cfg_enginePort" data-i18n-title="help.clickForInfo" title="Click for more info">?</span></label>
+              <input type="number" id="f-engine_port" min="1" max="65535">
+            </div>
+          </div>
+          <div class="row">
+            <div>
+              <label><span data-i18n="cfg.field.hfHome">HF Home (model cache dir)</span><span class="help-icon" data-help="cfg_hfHome" data-i18n-title="help.clickForInfo" title="Click for more info">?</span></label>
+              <input type="text" id="f-hf_home">
+            </div>
+            <div>
+              <label><span data-i18n="cfg.field.vllmBin">vLLM Binary (empty = auto)</span><span class="help-icon" data-help="cfg_vllmBin" data-i18n-title="help.clickForInfo" title="Click for more info">?</span></label>
+              <input type="text" id="f-vllm_bin" placeholder="auto">
+            </div>
+          </div>
         </div>
-        <div>
-          <label><span data-i18n="cfg.field.port">Port</span><span class="restart-badge" data-i18n="cfg.restartBadge">🔁 restart</span><span class="help-icon" data-help="cfg_port" data-i18n-title="help.clickForInfo" title="Click for more info">?</span></label>
-          <input type="number" id="f-port" min="1" max="65535">
+      </section>
+
+      <section id="sec-hotpool">
+        <h2 data-i18n="cfg.section.hotPool">Hot Pool &amp; Limits</h2>
+        <div class="card">
+          <div class="row">
+            <div>
+              <label><span data-i18n="cfg.field.maxConcurrentModels">Max concurrent models (hot pool size)</span><span class="help-icon" data-help="cfg_maxConcurrentModels" data-i18n-title="help.clickForInfo" title="Click for more info">?</span></label>
+              <input type="number" id="f-max_concurrent_models" min="1" max="16">
+            </div>
+            <div>
+              <label><span data-i18n="cfg.field.gpuMemoryCeiling">GPU memory ceiling (sum of all engines)</span><span class="help-icon" data-help="cfg_gpuMemoryCeiling" data-i18n-title="help.clickForInfo" title="Click for more info">?</span></label>
+              <input type="number" id="f-gpu_memory_ceiling" min="0" max="1" step="0.01">
+            </div>
+          </div>
+          <div class="row">
+            <div>
+              <label><span data-i18n="cfg.field.idleTimeout">Idle timeout (seconds)</span><span class="help-icon" data-help="cfg_idleTimeout" data-i18n-title="help.clickForInfo" title="Click for more info">?</span></label>
+              <input type="number" id="f-idle_timeout_seconds" min="0">
+            </div>
+            <div>
+              <label><span data-i18n="cfg.field.startupTimeout">Startup timeout (seconds)</span><span class="help-icon" data-help="cfg_startupTimeout" data-i18n-title="help.clickForInfo" title="Click for more info">?</span></label>
+              <input type="number" id="f-startup_timeout_seconds" min="1">
+            </div>
+          </div>
+          <label><span data-i18n="cfg.field.defaultModel">Default model (used when a request has no "model")</span><span class="help-icon" data-help="cfg_defaultModel" data-i18n-title="help.clickForInfo" title="Click for more info">?</span></label>
+          <select id="f-default_model"></select>
+
+          <div class="check-row">
+            <input type="checkbox" id="f-auto_reload_last_model">
+            <label for="f-auto_reload_last_model" data-i18n="cfg.field.autoReloadLastModel">Auto-reload last used model on service restart</label><span class="help-icon" data-help="cfg_autoReloadLastModel" data-i18n-title="help.clickForInfo" title="Click for more info">?</span>
+          </div>
+          <label><span data-i18n="cfg.field.queueTimeout">Queue timeout (seconds)</span><span class="help-icon" data-help="cfg_queueTimeout" data-i18n-title="help.clickForInfo" title="Click for more info">?</span></label>
+          <input type="number" id="f-queue_timeout_seconds" min="1">
         </div>
-      </div>
-      <div class="row">
-        <div>
-          <label><span data-i18n="cfg.field.engineHost">Engine Host</span><span class="help-icon" data-help="cfg_engineHost" data-i18n-title="help.clickForInfo" title="Click for more info">?</span></label>
-          <input type="text" id="f-engine_host">
-        </div>
-        <div>
-          <label><span data-i18n="cfg.field.enginePort">Engine Base Port</span><span class="help-icon" data-help="cfg_enginePort" data-i18n-title="help.clickForInfo" title="Click for more info">?</span></label>
-          <input type="number" id="f-engine_port" min="1" max="65535">
-        </div>
-      </div>
-      <div class="row">
-        <div>
-          <label><span data-i18n="cfg.field.hfHome">HF Home (model cache dir)</span><span class="help-icon" data-help="cfg_hfHome" data-i18n-title="help.clickForInfo" title="Click for more info">?</span></label>
-          <input type="text" id="f-hf_home">
-        </div>
-        <div>
-          <label><span data-i18n="cfg.field.vllmBin">vLLM Binary (empty = auto)</span><span class="help-icon" data-help="cfg_vllmBin" data-i18n-title="help.clickForInfo" title="Click for more info">?</span></label>
-          <input type="text" id="f-vllm_bin" placeholder="auto">
-        </div>
-      </div>
+      </section>
     </div>
-  </section>
 
-  <section>
-    <h2 data-i18n="cfg.section.apiKey">API Key</h2>
-    <div class="card">
-      <div class="check-row">
-        <input type="checkbox" id="f-api_key_enabled">
-        <label for="f-api_key_enabled" data-i18n="cfg.field.apiKeyEnabled">Require API key</label><span class="help-icon" data-help="cfg_apiKeyEnabled" data-i18n-title="help.clickForInfo" title="Click for more info">?</span>
-      </div>
-      <label><span data-i18n="cfg.field.apiKeyKey">Key</span><span class="help-icon" data-help="cfg_apiKeyKey" data-i18n-title="help.clickForInfo" title="Click for more info">?</span></label>
-      <input type="text" id="f-api_key_key" autocomplete="off">
+    <div class="col-5">
+      <section id="sec-apikey">
+        <h2 data-i18n="cfg.section.apiKey">API Key</h2>
+        <div class="card">
+          <div class="check-row">
+            <input type="checkbox" id="f-api_key_enabled">
+            <label for="f-api_key_enabled" data-i18n="cfg.field.apiKeyEnabled">Require API key</label><span class="help-icon" data-help="cfg_apiKeyEnabled" data-i18n-title="help.clickForInfo" title="Click for more info">?</span>
+          </div>
+          <label><span data-i18n="cfg.field.apiKeyKey">Key</span><span class="help-icon" data-help="cfg_apiKeyKey" data-i18n-title="help.clickForInfo" title="Click for more info">?</span></label>
+          <input type="text" id="f-api_key_key" autocomplete="off">
+        </div>
+      </section>
+
+      <section id="sec-serveargs">
+        <h2><span data-i18n="cfg.section.defaultServeArgs">Default Serve Args</span><span class="help-icon" data-help="cfg_defaultServeArgs" data-i18n-title="help.clickForInfo" title="Click for more info">?</span></h2>
+        <div class="card">
+          <div class="row">
+            <div>
+              <label><span data-i18n="cfg.field.defaultGpuMemUtil">GPU memory utilization</span><span class="help-icon" data-help="cfg_defaultGpuMemUtil" data-i18n-title="help.clickForInfo" title="Click for more info">?</span></label>
+              <input type="number" id="f-dsa_gpu_memory_utilization" min="0" max="1" step="0.01">
+            </div>
+            <div>
+              <label><span data-i18n="cfg.field.defaultMaxModelLen">Max model length</span><span class="help-icon" data-help="cfg_defaultMaxModelLen" data-i18n-title="help.clickForInfo" title="Click for more info">?</span></label>
+              <input type="number" id="f-dsa_max_model_len" min="1">
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <section id="sec-pricing">
+        <h2><span data-i18n="cfg.section.pricing">Cost Tracking</span><span class="help-icon" data-help="cfg_pricing" data-i18n-title="help.clickForInfo" title="Click for more info">?</span></h2>
+        <div class="card">
+          <div class="row">
+            <div>
+              <label><span data-i18n="cfg.field.pricingInput">Input $ / MTok</span><span class="help-icon" data-help="cfg_pricingInput" data-i18n-title="help.clickForInfo" title="Click for more info">?</span></label>
+              <input type="number" id="f-pricing_input_per_mtok" min="0" step="0.01">
+            </div>
+            <div>
+              <label><span data-i18n="cfg.field.pricingOutput">Output $ / MTok</span><span class="help-icon" data-help="cfg_pricingOutput" data-i18n-title="help.clickForInfo" title="Click for more info">?</span></label>
+              <input type="number" id="f-pricing_output_per_mtok" min="0" step="0.01">
+            </div>
+          </div>
+        </div>
+      </section>
     </div>
-  </section>
+  </div>
 
-  <section>
-    <h2 data-i18n="cfg.section.hotPool">Hot Pool &amp; Limits</h2>
-    <div class="card">
-      <div class="row">
-        <div>
-          <label><span data-i18n="cfg.field.maxConcurrentModels">Max concurrent models (hot pool size)</span><span class="help-icon" data-help="cfg_maxConcurrentModels" data-i18n-title="help.clickForInfo" title="Click for more info">?</span></label>
-          <input type="number" id="f-max_concurrent_models" min="1" max="16">
-        </div>
-        <div>
-          <label><span data-i18n="cfg.field.gpuMemoryCeiling">GPU memory ceiling (sum of all engines)</span><span class="help-icon" data-help="cfg_gpuMemoryCeiling" data-i18n-title="help.clickForInfo" title="Click for more info">?</span></label>
-          <input type="number" id="f-gpu_memory_ceiling" min="0" max="1" step="0.01">
-        </div>
-      </div>
-      <div class="row">
-        <div>
-          <label><span data-i18n="cfg.field.idleTimeout">Idle timeout (seconds)</span><span class="help-icon" data-help="cfg_idleTimeout" data-i18n-title="help.clickForInfo" title="Click for more info">?</span></label>
-          <input type="number" id="f-idle_timeout_seconds" min="0">
-        </div>
-      </div>
-      <div class="row">
-        <div>
-          <label><span data-i18n="cfg.field.startupTimeout">Startup timeout (seconds)</span><span class="help-icon" data-help="cfg_startupTimeout" data-i18n-title="help.clickForInfo" title="Click for more info">?</span></label>
-          <input type="number" id="f-startup_timeout_seconds" min="1">
-        </div>
-      </div>
-      <label><span data-i18n="cfg.field.defaultModel">Default model (used when a request has no "model")</span><span class="help-icon" data-help="cfg_defaultModel" data-i18n-title="help.clickForInfo" title="Click for more info">?</span></label>
-      <select id="f-default_model"></select>
-
-      <div class="check-row">
-        <input type="checkbox" id="f-auto_reload_last_model">
-        <label for="f-auto_reload_last_model" data-i18n="cfg.field.autoReloadLastModel">Auto-reload last used model on service restart</label><span class="help-icon" data-help="cfg_autoReloadLastModel" data-i18n-title="help.clickForInfo" title="Click for more info">?</span>
-      </div>
-      <label><span data-i18n="cfg.field.queueTimeout">Queue timeout (seconds)</span><span class="help-icon" data-help="cfg_queueTimeout" data-i18n-title="help.clickForInfo" title="Click for more info">?</span></label>
-      <input type="number" id="f-queue_timeout_seconds" min="1">
-    </div>
-  </section>
-
-  <section>
+  <section id="sec-priority">
     <h2><span data-i18n="cfg.section.priority">Model priority (eviction risk)</span><span class="help-icon" data-help="cfg_priority" data-i18n-title="help.clickForInfo" title="Click for more info">?</span></h2>
     <div class="card">
       <p class="hint" data-i18n="cfg.priority.hint">Drag to reorder. Models higher in this list are evicted later (kept warm longest) when the pool needs room - ties are still broken by least-recently-used, as before. Only enabled models are shown.</p>
@@ -337,39 +412,7 @@ CONFIG_DASHBOARD_HTML = r"""<!doctype html>
     </div>
   </section>
 
-  <section>
-    <h2><span data-i18n="cfg.section.defaultServeArgs">Default Serve Args</span><span class="help-icon" data-help="cfg_defaultServeArgs" data-i18n-title="help.clickForInfo" title="Click for more info">?</span></h2>
-    <div class="card">
-      <div class="row">
-        <div>
-          <label><span data-i18n="cfg.field.defaultGpuMemUtil">GPU memory utilization</span><span class="help-icon" data-help="cfg_defaultGpuMemUtil" data-i18n-title="help.clickForInfo" title="Click for more info">?</span></label>
-          <input type="number" id="f-dsa_gpu_memory_utilization" min="0" max="1" step="0.01">
-        </div>
-        <div>
-          <label><span data-i18n="cfg.field.defaultMaxModelLen">Max model length</span><span class="help-icon" data-help="cfg_defaultMaxModelLen" data-i18n-title="help.clickForInfo" title="Click for more info">?</span></label>
-          <input type="number" id="f-dsa_max_model_len" min="1">
-        </div>
-      </div>
-    </div>
-  </section>
-
-  <section>
-    <h2><span data-i18n="cfg.section.pricing">Cost Tracking</span><span class="help-icon" data-help="cfg_pricing" data-i18n-title="help.clickForInfo" title="Click for more info">?</span></h2>
-    <div class="card">
-      <div class="row">
-        <div>
-          <label><span data-i18n="cfg.field.pricingInput">Input $ / MTok</span><span class="help-icon" data-help="cfg_pricingInput" data-i18n-title="help.clickForInfo" title="Click for more info">?</span></label>
-          <input type="number" id="f-pricing_input_per_mtok" min="0" step="0.01">
-        </div>
-        <div>
-          <label><span data-i18n="cfg.field.pricingOutput">Output $ / MTok</span><span class="help-icon" data-help="cfg_pricingOutput" data-i18n-title="help.clickForInfo" title="Click for more info">?</span></label>
-          <input type="number" id="f-pricing_output_per_mtok" min="0" step="0.01">
-        </div>
-      </div>
-    </div>
-  </section>
-
-  <section>
+  <section id="sec-rag">
     <h2 data-i18n="cfg.section.rag">RAG</h2>
     <div class="card">
       <div class="check-row">
@@ -427,7 +470,7 @@ CONFIG_DASHBOARD_HTML = r"""<!doctype html>
     </div>
   </section>
 
-  <section>
+  <section id="sec-models">
     <h2 data-i18n="cfg.section.models">Models</h2>
     <div id="models-box"></div>
     <div style="margin-top:10px;">
@@ -435,7 +478,7 @@ CONFIG_DASHBOARD_HTML = r"""<!doctype html>
     </div>
   </section>
 
-  <section>
+  <section id="sec-backups">
     <h2 data-i18n="cfg.section.backups">Backups</h2>
     <table id="backups-table" class="display" style="width:100%"></table>
   </section>
@@ -452,6 +495,7 @@ CONFIG_DASHBOARD_HTML = r"""<!doctype html>
       Entwickelt mit Claude Code
     </span>
   </footer>
+</div>
 
 <script src="/static/vendor/datatables/dataTables.min.js"></script>
 <script src="/static/vendor/datatables/dataTables.dataTables.min.js"></script>
