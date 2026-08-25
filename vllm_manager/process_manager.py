@@ -18,17 +18,13 @@ System-RAM-Auslastung). Ohne diesen Live-Check startet die Engine trotzdem,
 braucht ca. 10s zum Hochfahren und crasht dann mit "Free memory on device X
 is less than desired Y" - das war lange Zeit die häufigste Absturzursache.
 
-Sleep statt Kill (siehe sleep_engine/wake_engine, config.enable_sleep_mode):
-wird eine Engine NUR wegen des Speicherbudgets verdrängt (nicht wegen der
-Poolgrößen-Grenze max_concurrent_models - dafür muss ein Slot/Port wirklich
-frei werden, Sleep Mode hilft da nicht), wird sie bevorzugt schlafen gelegt
-statt beendet: vLLMs --enable-sleep-mode gibt die GPU-Gewichte frei, der
-Prozess (samt initialisiertem CUDA-Kontext/JIT-Kernel-Cache) bleibt aber am
-Leben. Ein späteres Aufwecken ist dadurch um ein Vielfaches schneller als ein
-Kaltstart (live gemessen: ~2s statt ~290s bei einem 35B-Modell). Da eine
-schlafende Engine nicht den GESAMTEN reservierten Speicher zurückgibt, wird
-bei fortbestehendem Speichermangel als letzte Eskalationsstufe die
-ÄLTESTE (LRU) Engine - auch eine bereits schlafende - endgültig beendet.
+Verdrängung: reicht Speicherbudget oder Poolgröße nicht, wird die Engine mit
+der niedrigsten Priorität (siehe ModelConfig.priority, Gleichstand per LRU)
+hart beendet (stop_engine) - ein Neustart braucht dann wieder einen vollen
+Kaltstart. (Frühere Versionen boten hier zusätzlich vLLMs Sleep Mode als
+schnelleren Mittelweg an - wieder entfernt, siehe Git-Historie: brachte in
+der Praxis mehr Ärger als Nutzen, u.a. ein RAM-Vollauf-Absturz, live
+beobachtet 2026-08-25.)
 
 Anfrage-Warteschlange (_room_queue_lock): Statt eine Anfrage für ein noch
 nicht geladenes Modell sofort mit einem Fehler abzulehnen, wenn gerade kein
@@ -147,27 +143,9 @@ class EngineState:
         self.started_at: Optional[float] = None
         self.log_path: Optional[Path] = None
         self.last_used: float = time.time()
-        # "loading" (Kaltstart läuft) | "ready" (bereit für Requests) |
-        # "sleeping" (Prozess lebt, Gewichte via Sleep Mode aus dem GPU-
-        # Speicher entfernt - siehe sleep_engine/wake_engine)
+        # "loading" (Kaltstart läuft) | "ready" (bereit für Requests)
         self.state: str = "loading"
         self.last_error: Optional[str] = None
-        # Ob DIESE Engine-Instanz mit --enable-sleep-mode gestartet wurde
-        # (Momentaufnahme von config.enable_sleep_mode beim Start - eine
-        # spätere Config-Änderung wirkt erst auf neu gestartete Engines).
-        self.sleep_capable: bool = False
-        # Schützt den gesamten Sleep-/Wake-Übergang (siehe sleep_engine() /
-        # wake_engine()) - WICHTIG: state bleibt während eines laufenden
-        # sleep_engine()-Aufrufs bis zu confirm_timeout (30s) lang auf "ready"
-        # stehen (erst am Ende bestätigt, siehe dortiger Docstring). Ohne
-        # dieses Lock konnte ein GLEICHZEITIG eintreffender Request in genau
-        # diesem Fenster is_ready()==True sehen, direkt an den Port
-        # weitergereicht werden, und dort auf eine Engine treffen, die gerade
-        # mitten im Entladen der GPU-Gewichte steckt - der Request hing dann
-        # (live gemeldet: 2026-08-25). ensure_loaded() wartet jetzt vor jeder
-        # State-Entscheidung kurz auf dieses Lock, damit eine laufende
-        # Transition immer erst zu Ende läuft, bevor geroutet wird.
-        self.transition_lock: asyncio.Lock = asyncio.Lock()
 
     def status(self) -> dict:
         running = self.process is not None and self.process.returncode is None
@@ -180,7 +158,6 @@ class EngineState:
             "uptime_seconds": (time.time() - self.started_at) if self.started_at and running else None,
             "log_file": str(self.log_path) if self.log_path else None,
             "last_error": self.last_error,
-            "sleep_capable": self.sleep_capable,
         }
 
 
@@ -207,11 +184,6 @@ def is_ready(model: str) -> bool:
     return e is not None and e.state == "ready" and e.process is not None and e.process.returncode is None
 
 
-def is_sleeping(model: str) -> bool:
-    e = engines.get(model)
-    return e is not None and e.state == "sleeping"
-
-
 async def _health_ok(cfg: Config, port: int) -> bool:
     url = f"http://{cfg.engine_host}:{port}/health"
     try:
@@ -220,156 +192,6 @@ async def _health_ok(cfg: Config, port: int) -> bool:
             return r.status_code == 200
     except Exception:
         return False
-
-
-async def _sleep_call(cfg: Config, port: int, level: int = 1) -> bool:
-    url = f"http://{cfg.engine_host}:{port}/sleep"
-    try:
-        async with httpx.AsyncClient(timeout=30) as client:
-            r = await client.post(url, params={"level": level})
-            return r.status_code == 200
-    except Exception:
-        logger.warning("POST /sleep für Port %s fehlgeschlagen", port, exc_info=True)
-        return False
-
-
-async def _wake_call(cfg: Config, port: int) -> bool:
-    url = f"http://{cfg.engine_host}:{port}/wake_up"
-    try:
-        async with httpx.AsyncClient(timeout=60) as client:
-            r = await client.post(url)
-            return r.status_code == 200
-    except Exception:
-        logger.warning("POST /wake_up für Port %s fehlgeschlagen", port, exc_info=True)
-        return False
-
-
-async def _is_sleeping_call(cfg: Config, port: int) -> Optional[bool]:
-    url = f"http://{cfg.engine_host}:{port}/is_sleeping"
-    try:
-        async with httpx.AsyncClient(timeout=5) as client:
-            r = await client.get(url)
-            if r.status_code == 200:
-                return bool(r.json().get("is_sleeping"))
-    except Exception:
-        pass
-    return None
-
-
-async def sleep_engine(model: str, reason: str = "evicted", confirm_timeout: float = 30.0) -> bool:
-    """Versetzt eine laufende Engine in den Sleep Mode (siehe Moduldocstring)
-    statt sie zu beenden - die GPU-Gewichte werden freigegeben, der Prozess
-    (samt CUDA-Kontext/JIT-Kernel-Cache) bleibt aber am Leben, siehe
-    wake_engine() fürs spätere Aufwecken. Gibt True bei Erfolg zurück. Bei
-    Fehlschlag (z.B. Engine reagiert nicht, oder unterstützt Sleep Mode aus
-    irgendeinem Grund doch nicht) wird stattdessen hart beendet (stop_engine)
-    - eine Engine, die weder schläft noch sauber erreichbar ist, darf nicht
-    als Zombie im Pool hängen bleiben.
-
-    WICHTIG (live beobachtet, 2026-08-24 - RAM lief bei Modellwechseln aus
-    dem Ruder): vLLMs eigener Code kommentiert das selbst als FIXME
-    (vllm/entrypoints/serve/dev/sleep/api_router.py): "in v0 with frontend
-    multiprocessing, the sleep command is sent but does not finish yet when
-    we return a response." Der POST /sleep-Call kann also mit 200 OK
-    zurückkommen, BEVOR der EngineCore-Prozess die GPU-Gewichte tatsächlich
-    freigegeben hat. Ohne Bestätigung hier hielt _make_room() das Modell
-    schon für "schläft (0 Speicherbedarf)" und ließ das NÄCHSTE Modell direkt
-    lostarten, während das alte im Hintergrund noch am Freigeben war - beide
-    beanspruchten kurz gleichzeitig vollen Speicher. Deshalb wird hier aktiv
-    per /is_sleeping nachgefragt, bis der Sleep WIRKLICH abgeschlossen ist,
-    bevor True zurückgegeben wird (und die Engine anderswo als "0 Speicher"
-    gerechnet werden darf)."""
-    eng = engines.get(model)
-    if eng is None:
-        return False
-    if eng.state == "sleeping":
-        return True
-    async with eng.transition_lock:
-        # Erneut prüfen statt dem Stand von vor dem Warten aufs Lock zu
-        # vertrauen - während wir warteten, könnte eine andere Anfrage die
-        # Engine bereits wieder aufgeweckt (oder ein anderer Aufrufer sie
-        # schon eingeschläfert) haben.
-        if eng.state != "ready":
-            return eng.state == "sleeping"
-        cfg = get_config()
-        logger.info("Schicke Engine für Modell '%s' in Sleep Mode (Port %s, Grund: %s)", model, eng.port, reason)
-        free_before, _ = await asyncio.to_thread(_query_gpu_memory_gib)
-        ok = await _sleep_call(cfg, eng.port)
-        if not ok:
-            logger.warning("Sleep Mode für '%s' fehlgeschlagen - beende Engine stattdessen hart", model)
-            await stop_engine(model, reason="sleep_failed")
-            return False
-
-        deadline = time.time() + confirm_timeout
-        confirmed = False
-        while time.time() < deadline:
-            still_sleeping = await _is_sleeping_call(cfg, eng.port)
-            if still_sleeping is True:
-                confirmed = True
-                break
-            await asyncio.sleep(0.5)
-        if confirmed and free_before is not None:
-            free_after, total_gib = await asyncio.to_thread(_query_gpu_memory_gib)
-            if free_after is not None:
-                configured_gib = cfg.serve_args_for(model)[0] * (total_gib or 0)
-                logger.info(
-                    "Sleep Mode für '%s' bestätigt - GPU frei: %.1f -> %.1f GiB (+%.1f GiB zurückgewonnen, "
-                    "konfigurierte gpu_memory_utilization entspräche %.1f GiB)",
-                    model, free_before, free_after, free_after - free_before, configured_gib,
-                )
-        if not confirmed:
-            logger.warning(
-                "Sleep Mode für '%s' hat nach %ss nicht bestätigt (POST /sleep kam zwar durch, "
-                "/is_sleeping meldet aber weiter false/nicht erreichbar) - beende Engine stattdessen hart",
-                model, confirm_timeout,
-            )
-            await stop_engine(model, reason="sleep_failed")
-            return False
-        eng.state = "sleeping"
-        return True
-
-
-async def wake_engine(model: str, wake_timeout: float = 120.0) -> dict:
-    """Weckt eine schlafende Engine wieder auf (siehe sleep_engine) - deutlich
-    schneller als ein Kaltstart, weil Prozess/CUDA-Kontext/JIT-Kernel-Cache
-    schon initialisiert sind, nur die Gewichte müssen zurück auf die GPU
-    (live gemessen: ~2s bei einem 35B-Modell statt ~290s Kaltstart). Bei
-    Fehlschlag oder Timeout: Engine komplett neu starten (self-healing, wie
-    überall sonst in diesem Modul) statt den Aufrufer mit einer schlafenden
-    Zombie-Engine hängen zu lassen."""
-    eng = engines.get(model)
-    if eng is None:
-        raise RuntimeError(f"Kein EngineState für '{model}' zum Aufwecken vorhanden.")
-    async with eng.transition_lock:
-        # Erneut prüfen - während wir aufs Lock warteten, könnte ein
-        # paralleler Aufrufer (z.B. zwei fast gleichzeitige Requests fürs
-        # gleiche schlafende Modell) die Engine schon aufgeweckt haben.
-        if eng.state == "ready":
-            eng.last_used = time.time()
-            _persist_last_active(model)
-            return eng.status()
-        cfg = get_config()
-        logger.info("Wecke Engine für Modell '%s' auf (Port %s)", model, eng.port)
-        ok = await _wake_call(cfg, eng.port)
-        if ok:
-            deadline = time.time() + wake_timeout
-            while time.time() < deadline:
-                still_sleeping = await _is_sleeping_call(cfg, eng.port)
-                if still_sleeping is False and await _health_ok(cfg, eng.port):
-                    eng.state = "ready"
-                    eng.last_used = time.time()
-                    _persist_last_active(model)
-                    return eng.status()
-                await asyncio.sleep(0.5)
-            logger.warning("Aufwecken von '%s' hat nach %ss nicht abgeschlossen", model, wake_timeout)
-        logger.warning("Aufwecken von '%s' fehlgeschlagen - starte Engine komplett neu", model)
-        await stop_engine(model, reason="wake_failed")
-    # stop_engine()/der komplette Neustart unten laufen bewusst AUSSERHALB des
-    # obigen "with" - ensure_loaded() fasst für ein NEUES EngineState (die
-    # Engine wurde ja gerade beendet) ohnehin die normale Start-Logik samt
-    # eigenem Locking an, ein Festhalten des (jetzt verwaisten) alten Locks
-    # brächte hier nichts mehr.
-    return await ensure_loaded(model, wait=True)
 
 
 def _parse_cudagraph_sizes(raw: str) -> list[int]:
@@ -399,11 +221,6 @@ def _build_command(cfg: Config, model: str, port: int) -> list[str]:
         "--gpu-memory-utilization", str(gmu),
         "--max-model-len", str(mml),
     ]
-    if cfg.enable_sleep_mode:
-        # Zugehöriges VLLM_SERVER_DEV_MODE=1 (schaltet die /sleep, /wake_up,
-        # /is_sleeping-Endpunkte frei) wird im Environment in ensure_loaded()
-        # gesetzt, nicht hier - siehe dort.
-        cmd.append("--enable-sleep-mode")
     if mcfg:
         if mcfg.task == "embed":
             # vLLM >=0.26 hat das alte "--task" durch "--runner" ersetzt.
@@ -469,8 +286,8 @@ def _query_gpu_memory_gib() -> tuple[Optional[float], Optional[float]]:
     Manager-Prozess (~300-500MB, einmalig) - danach ist die Abfrage praktisch
     kostenlos (<1ms), ein Subprozess pro Aufruf wäre hier unnötiger Overhead.
 
-    WICHTIG (live beobachtet, 2026-08-24 - Sleep Mode "half nie", Modelle
-    gingen bei jedem Wechsel in den Kaltstart): torch.cuda.mem_get_info()
+    WICHTIG (live beobachtet, 2026-08-24 - Modelle gingen bei jedem Wechsel
+    unnötig in den Kaltstart): torch.cuda.mem_get_info()
     liefert auf diesem Unified-Memory-System (GB10) einen "frei"-Wert, der
     praktisch exakt /proc/meminfo's MemFree entspricht - NICHT MemAvailable.
     Der Unterschied war live ~47 GiB reclaimbarer Page-Cache, den die CUDA-
@@ -528,7 +345,14 @@ async def _make_room(cfg: Config, model: str, gmu: float) -> None:
     Warteschlange) und versucht es währenddessen alle 1s erneut - nur wenn
     das Modell selbst mit leerem Pool nicht passt (Budget-Problem, keine
     Frage der Wartezeit), oder der Timeout ohne Erfolg abläuft, wird
-    tatsächlich ein RuntimeError geworfen."""
+    tatsächlich ein RuntimeError geworfen.
+
+    Verdrängung bedeutet hier immer: Engine komplett beenden (stop_engine) -
+    ein späterer erneuter Bedarf braucht dann wieder einen vollen Kaltstart.
+    (Frühere Versionen boten hier zusätzlich vLLMs Sleep Mode als schnelleren
+    Mittelweg an - wieder entfernt, siehe Git-Historie: brachte in der Praxis
+    mehr Ärger als Nutzen, u.a. einen RAM-Vollauf-Absturz, live beobachtet
+    2026-08-25.)"""
     deadline = time.time() + cfg.queue_timeout_seconds
 
     def others() -> list[EngineState]:
@@ -540,68 +364,33 @@ async def _make_room(cfg: Config, model: str, gmu: float) -> None:
             | {e.model for e in engines.values() if e.state == "loading" and e.model != model}
         )
 
-    def total_util_optimistic() -> float:
-        # NUR für die Frage "sollte Phase 1+2 überhaupt noch etwas
-        # einschläfern" - schlafende Engines zählen hier optimistisch mit 0.
-        # Das ist bewusst NICHT die autoritative Zahl (die liefert erst der
-        # Live-GPU-Check in Phase 3 unten) - eine konservativere Schätzung
-        # hier hatte live einen Bug verursacht: sie ließ Phase 1+2 nach EINEM
-        # Sleep glauben, das reiche nicht, und dieselbe (jetzt schlafende)
-        # Engine wurde im nächsten Durchlauf sofort hart beendet - Sleep
-        # Mode brachte dadurch nie etwas. Phase 1+2 darf ein bereits
-        # schlafendes Modell deshalb NIE hart beenden (siehe evict_one
-        # allow_kill_sleeping) - das entscheidet einzig Phase 3 anhand
-        # ECHTER Zahlen.
-        return sum(
-            0.0 if e.state == "sleeping" else cfg.serve_args_for(e.model)[0]
-            for e in others()
-        ) + gmu
+    def total_util() -> float:
+        return sum(cfg.serve_args_for(e.model)[0] for e in others()) + gmu
 
-    async def evict_one(prefer_sleep: bool, allow_kill_sleeping: bool) -> bool:
+    async def evict_one() -> bool:
         """Verdrängt EINE Engine per Priorität+LRU. True bei Erfolg, False
         wenn gerade nichts Verdrängbares da ist (alle übrigen Engines sind
-        geschützt, oder - bei prefer_sleep ohne allow_kill_sleeping - bereits
-        am Schlafen und deshalb tabu für diese Phase)."""
+        geschützt)."""
         candidates = [e for e in others() if e.model not in protected_models()]
-        if prefer_sleep and not allow_kill_sleeping:
-            candidates = [e for e in candidates if e.state != "sleeping"]
         if not candidates:
             return False
         # Niedrigste Priorität zuerst (siehe ModelConfig.priority - höhere
         # Zahl = wird später verdrängt), bei Gleichstand wie bisher LRU
         # (am längsten ungenutzt zuerst).
         victim = min(candidates, key=lambda e: (cfg.priority_for(e.model), e.last_used))
-        if prefer_sleep and victim.sleep_capable and victim.state != "sleeping":
-            logger.info("Schicke Modell '%s' in Sleep Mode, um Platz für '%s' zu schaffen", victim.model, model)
-            await sleep_engine(victim.model, reason=f"evicted_for:{model}")
-        else:
-            if victim.state == "sleeping":
-                logger.info(
-                    "Beende schlafendes Modell '%s' endgültig (Sleep Mode allein reicht nicht aus, "
-                    "laut Live-Speicherprüfung), um Platz für '%s' zu schaffen", victim.model, model,
-                )
-            else:
-                logger.info("Verdränge Modell '%s' aus dem Pool, um Platz für '%s' zu schaffen", victim.model, model)
-            await stop_engine(victim.model, reason=f"evicted_for:{model}")
+        logger.info("Verdränge Modell '%s' aus dem Pool, um Platz für '%s' zu schaffen", victim.model, model)
+        await stop_engine(victim.model, reason=f"evicted_for:{model}")
         return True
 
-    async def wait_for_room(prefer_sleep: bool, allow_kill_sleeping: bool, busy_msg: str, impossible_msg: str) -> bool:
+    async def wait_for_room(busy_msg: str, impossible_msg: str) -> None:
         """Wie evict_one(), aber wartet bei Bedarf in der Warteschlange (siehe
-        Moduldocstring) statt sofort aufzugeben. Gibt False zurück (statt zu
-        warten/zu werfen), wenn NUR noch bereits schlafende Kandidaten übrig
-        sind und allow_kill_sleeping=False - das ist kein Fehler, sondern das
-        Signal an den Aufrufer, dass Phase 1+2 hier nichts mehr beitragen
-        kann und Phase 3 (Live-Check) übernehmen muss."""
+        Moduldocstring) statt sofort aufzugeben."""
         while True:
             pool = others()
             if not pool:
                 raise RuntimeError(impossible_msg)
-            if await evict_one(prefer_sleep, allow_kill_sleeping):
-                return True
-            if prefer_sleep and not allow_kill_sleeping:
-                unprotected = [e for e in pool if e.model not in protected_models()]
-                if unprotected and all(e.state == "sleeping" for e in unprotected):
-                    return False
+            if await evict_one():
+                return
             if time.time() > deadline:
                 raise RuntimeError(
                     f"Kein Platz im Hot Pool für '{model}' nach {cfg.queue_timeout_seconds}s Warten in "
@@ -610,14 +399,9 @@ async def _make_room(cfg: Config, model: str, gmu: float) -> None:
                 )
             await asyncio.sleep(1.0)
 
-    # Phase 1+2: Poolgröße (max_concurrent_models) und optimistische Config-
-    # Schätzung (gpu_memory_ceiling) gemeinsam - solange die Poolgrenze
-    # selbst noch verletzt ist, MUSS eine Engine wirklich beendet werden
-    # (Sleep Mode gibt keinen Slot/Port frei, nur Speicher); ist nur noch das
-    # Speicherbudget knapp, wird Sleep Mode bevorzugt - und NIE ein bereits
-    # schlafendes Modell hart beendet (siehe evict_one/wait_for_room oben).
-    while len(others()) >= cfg.max_concurrent_models or total_util_optimistic() > cfg.gpu_memory_ceiling:
-        slot_limited = len(others()) >= cfg.max_concurrent_models
+    # Phase 1: Poolgröße (max_concurrent_models) und Config-Schätzung
+    # (gpu_memory_ceiling) - billig, kein GPU-Zugriff pro Anfrage nötig.
+    while len(others()) >= cfg.max_concurrent_models or total_util() > cfg.gpu_memory_ceiling:
         busy = sorted({e.model for e in others() if e.model in protected_models()})
         busy_msg = (
             f"alle {len(others())} aktuell geladenen Modelle ({', '.join(busy)}) haben durchgehend "
@@ -629,17 +413,7 @@ async def _make_room(cfg: Config, model: str, gmu: float) -> None:
             f"auch mit leerem Hot Pool nicht. gpu_memory_ceiling oder die "
             f"gpu_memory_utilization dieses Modells in config.json anpassen."
         )
-        made_progress = await wait_for_room(
-            prefer_sleep=not slot_limited, allow_kill_sleeping=slot_limited,
-            busy_msg=busy_msg, impossible_msg=impossible_msg,
-        )
-        if not made_progress:
-            # Nur noch bereits schlafende (unprotected) Kandidaten übrig -
-            # die optimistische Schätzung zählt sie mit 0 und würde hier
-            # endlos weiterdrehen, ohne dass Sleep Mode noch etwas beitragen
-            # kann. Ab hier entscheidet ausschließlich Phase 3 (echte
-            # GPU-Zahlen), ob doch noch hart verdrängt werden muss.
-            break
+        await wait_for_room(busy_msg, impossible_msg)
 
     # Live-Check: siehe Moduldocstring oben / _query_gpu_memory_gib(). Läuft
     # ERST NACH der schnellen Config-Schätzung (kein Overhead im Normalfall),
@@ -674,13 +448,9 @@ async def _make_room(cfg: Config, model: str, gmu: float) -> None:
             f"auf diesem Unified-Memory-System) - bitte manuell Speicher freigeben oder "
             f"gpu_memory_utilization/gpu_memory_ceiling in config.json senken."
         )
-        # allow_kill_sleeping=True: hier (und NUR hier) darf ein bereits
-        # schlafendes Modell endgültig beendet werden, wenn die ECHTEN
-        # GPU-Zahlen zeigen, dass Sleep Mode allein nicht genug freigegeben
-        # hat - siehe Moduldocstring (Eskalation aufs älteste Modell).
-        await wait_for_room(prefer_sleep=True, allow_kill_sleeping=True, busy_msg=busy_msg, impossible_msg=impossible_msg)
-        # CUDA-Treiber braucht nach Prozessende/Sleep einen kurzen Moment, um
-        # den freigegebenen Speicher tatsächlich als frei zu melden.
+        await wait_for_room(busy_msg, impossible_msg)
+        # CUDA-Treiber braucht nach Prozessende einen kurzen Moment, um den
+        # freigegebenen Speicher tatsächlich als frei zu melden.
         await asyncio.sleep(1.0)
 
 
@@ -1056,29 +826,12 @@ async def _ensure_loaded_once(model: str, wait: bool = True) -> dict:
 
     Anfrage-Warteschlange (siehe Moduldocstring): Nur der Zweig, der eine
     WIRKLICH NEUE Engine braucht, fasst `_room_queue_lock` an - Aufrufer für
-    ein bereits geladenes, ladendes oder schlafendes Modell überspringen ihn
-    komplett und werden von einem parallel wartenden Modellwechsel nicht
-    ausgebremst."""
+    ein bereits geladenes oder ladendes Modell überspringen ihn komplett und
+    werden von einem parallel wartenden Modellwechsel nicht ausgebremst."""
     cfg = get_config()
     ok, reason = is_model_enabled(cfg, model)
     if not ok:
         raise RuntimeError(reason)
-
-    # Eine evtl. GERADE LAUFENDE Sleep-/Wake-Transition zuerst abwarten (siehe
-    # EngineState.transition_lock) - sonst könnte dieser Aufruf state=="ready"
-    # sehen, obwohl im Hintergrund schon sleep_engine() dabei ist, die GPU-
-    # Gewichte zu entladen (state wird dort erst NACH der Bestätigung auf
-    # "sleeping" gesetzt, das kann bis zu 30s dauern) - ein in diesem Fenster
-    # direkt an den Port weitergereichter Request landet dann auf einer
-    # Engine, die gerade unter ihm wegschläft, und hängt (live gemeldet:
-    # 2026-08-25). Bewusst AUSSERHALB von _pool_lock: eine Transition kann
-    # mehrere Sekunden dauern, _pool_lock ist global über ALLE Modelle und
-    # darf so lange nicht blockiert sein (derselbe Grund wie beim Warten auf
-    # einen Kaltstart weiter unten).
-    existing_before = engines.get(model)
-    if existing_before is not None:
-        async with existing_before.transition_lock:
-            pass  # nichts zu tun - nur warten, bis eine laufende Transition fertig ist
 
     async with _pool_lock:
         existing = engines.get(model)
@@ -1086,11 +839,10 @@ async def _ensure_loaded_once(model: str, wait: bool = True) -> dict:
             existing.last_used = time.time()
             _persist_last_active(model)
             return existing.status()
-        if existing is not None and existing.state in ("loading", "sleeping"):
-            # Ein anderer Aufruf lädt/schläft dieses Modell bereits (z.B. zwei
-            # fast gleichzeitige Chat-Requests) - nicht doppelt anfassen,
-            # sondern weiter unten (außerhalb des Locks) denselben
-            # Kaltstart/Aufweckvorgang abwarten.
+        if existing is not None and existing.state == "loading":
+            # Ein anderer Aufruf lädt dieses Modell bereits (z.B. zwei fast
+            # gleichzeitige Chat-Requests) - nicht doppelt anfassen, sondern
+            # weiter unten (außerhalb des Locks) denselben Kaltstart abwarten.
             eng = existing
         else:
             eng = None
@@ -1119,7 +871,7 @@ async def _ensure_loaded_once(model: str, wait: bool = True) -> dict:
                     existing.last_used = time.time()
                     _persist_last_active(model)
                     return existing.status()
-                if existing is not None and existing.state in ("loading", "sleeping"):
+                if existing is not None and existing.state == "loading":
                     eng = existing
                 else:
                     if existing is not None:
@@ -1134,7 +886,6 @@ async def _ensure_loaded_once(model: str, wait: bool = True) -> dict:
                 async with _pool_lock:
                     port = _allocate_port(cfg)
                     eng = EngineState(model, port)
-                    eng.sleep_capable = cfg.enable_sleep_mode
                     engines[model] = eng
                     log_path = LOG_DIR / f"{_safe_name(model)}.log"
                     eng.log_path = log_path
@@ -1146,13 +897,6 @@ async def _ensure_loaded_once(model: str, wait: bool = True) -> dict:
                     # würden sonst nicht über PATH gefunden (-> Engine-Crash exit=1).
                     venv_bin = str(Path(cfg.resolved_vllm_bin()).parent)
                     env["PATH"] = venv_bin + os.pathsep + env.get("PATH", "")
-                    if cfg.enable_sleep_mode:
-                        # Schaltet vLLMs /sleep, /wake_up, /is_sleeping-Endpunkte frei
-                        # (siehe sleep_engine/wake_engine) - vLLM warnt dabei selbst
-                        # "Development endpoints are enabled", unkritisch hier: die
-                        # Engine hört nur auf engine_host (127.0.0.1), niemand außer
-                        # diesem Manager spricht sie direkt an.
-                        env["VLLM_SERVER_DEV_MODE"] = "1"
                     mcfg = cfg.models.get(model)
                     if mcfg and mcfg.hf_token:
                         env["HF_TOKEN"] = mcfg.hf_token
@@ -1169,12 +913,6 @@ async def _ensure_loaded_once(model: str, wait: bool = True) -> dict:
                     eng.started_at = time.time()
         # _room_queue_lock ab hier freigegeben - der nächste wartende
         # Modellwechsel darf jetzt versuchen, seinen Platz zu sichern.
-
-    if eng.state == "sleeping":
-        if not wait:
-            asyncio.create_task(wake_engine(model))
-            return eng.status()
-        return await wake_engine(model)
 
     if not wait:
         return eng.status()

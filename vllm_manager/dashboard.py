@@ -388,7 +388,6 @@ DASHBOARD_HTML = r"""<!doctype html>
   .badge.running { background: var(--accent-bg); color: var(--accent); }
   .badge.idle { background: var(--panel-2); color: var(--text-dim); }
   .badge.loading { background: var(--warn-bg); color: var(--warn); animation: pulse 1.4s ease-in-out infinite; }
-  .badge.sleeping { background: var(--accent-bg); color: var(--accent); }
   @keyframes pulse { 0%,100% { opacity:1; } 50% { opacity:.5; } }
   section { margin-bottom: 26px; }
   section h2 { font-size: 14px; color: var(--text-dim); text-transform:uppercase; letter-spacing:.04em; margin: 0 0 10px; }
@@ -914,8 +913,6 @@ function reasonLabel(r) {
   if (r === "restart") return t("reason.restart");
   if (r === "failed_to_start") return t("reason.failedToStart");
   if (r === "orphan_reaped") return t("reason.orphanReaped");
-  if (r === "sleep_failed") return t("reason.sleepFailed");
-  if (r === "wake_failed") return t("reason.wakeFailed");
   if (r && r.startsWith("replaced_by:")) return t("reason.replacedBy", { model: esc(modelName(r.slice(13))) });
   if (r && r.startsWith("evicted_for:")) return t("reason.evictedFor", { model: esc(modelName(r.slice(12))) });
   return esc(r || "–");
@@ -923,7 +920,7 @@ function reasonLabel(r) {
 function reasonBadgeClass(r) {
   if (r === "ready") return "ok";
   if (r === "loading") return "loading";
-  if (r === "crashed" || r === "timeout" || r === "failed_to_start" || r === "orphan_reaped" || r === "sleep_failed" || r === "wake_failed") return "error";
+  if (r === "crashed" || r === "timeout" || r === "failed_to_start" || r === "orphan_reaped") return "error";
   if (r && r.startsWith("evicted_for:")) return "running";
   return "idle";
 }
@@ -1175,12 +1172,9 @@ function render(data) {
         const m = e.metrics || {};
         let badge;
         if (e.state === "loading") badge = `<span class="badge loading">${t("badge.coldStart")}</span>`;
-        else if (e.state === "sleeping") badge = `<span class="badge sleeping">${t("badge.sleeping")}</span>`;
         else if (e.state === "ready") badge = `<span class="badge ok">${t("badge.ready")}</span>`;
         else badge = `<span class="badge idle">${t("badge.idle")}</span>`;
-        const sinceKey = e.state === "loading" ? "engine.loadingSince"
-          : e.state === "sleeping" ? "engine.sleepingSince"
-          : "engine.runningSince";
+        const sinceKey = e.state === "loading" ? "engine.loadingSince" : "engine.runningSince";
         const since = e.running
           ? t(sinceKey, { duration: fmtDuration(e.uptime_seconds) })
           : (e.last_error ? t("engine.error", { msg: esc(e.last_error.split("\n")[0]) }) : "–");

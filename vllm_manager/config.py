@@ -48,10 +48,8 @@ class ModelConfig(BaseModel):
     # PyTorch-Eager-Dispatch statt eines vorkompilierten CUDA-Graphs) - echter
     # Trade-off Kaltstart-Geschwindigkeit vs. Dauer-Durchsatz, kein Freebie.
     # Lohnt sich vor allem für selten/sporadisch genutzte Modelle, die oft
-    # KOMPLETT kaltstarten (Slot-Verdrängung, volles Idle-Timeout-Entladen) -
-    # bei per Sleep Mode warmgehaltenen Modellen (siehe enable_sleep_mode)
-    # greift die Graph-Capture ohnehin nur beim allerersten Laden, dort
-    # bringt es entsprechend weniger. Default aus.
+    # KOMPLETT kaltstarten (Slot-Verdrängung, volles Idle-Timeout-Entladen).
+    # Default aus.
     fast_load: bool = False
     # Begrenzt, für welche Batch-Größen vLLM beim Kaltstart CUDA-Graphen
     # aufzeichnet (siehe process_manager._build_command, Flag
@@ -171,24 +169,6 @@ class Config(BaseModel):
     vllm_bin: Optional[str] = None
     api_key: ApiKeyConfig = Field(default_factory=ApiKeyConfig)
     idle_timeout_seconds: Optional[int] = None
-    # Proaktives Einschläfern (siehe process_manager.sleep_engine) unbenutzter
-    # Engines, BEVOR ein anderes Modell überhaupt Platz braucht - anders als
-    # idle_timeout_seconds (komplettes Entladen, Kaltstart beim nächsten
-    # Gebrauch) bleibt der Prozess erhalten und wacht in Sekunden statt
-    # Minuten wieder auf (live gemessen: ~2-8s je nach Modellgröße). None
-    # (Default) = deaktiviert, wie idle_timeout_seconds.
-    #
-    # BEWUSST NICHT im Sekundenbereich empfohlen, auch wenn "ein paar
-    # Sekunden" naheliegend klingt: jede normale Gesprächspause (eine lange
-    # Antwort lesen, kurz nachdenken) würde sonst bei JEDER folgenden Anfrage
-    # einen vollen Sleep+Wake-Zyklus auslösen und spürbar Latenz addieren -
-    # ohne jeden Nutzen, wenn gerade kein anderes Modell den Speicher
-    # überhaupt braucht. Ein Wert im Minutenbereich (z.B. 300 = 5 Minuten)
-    # ist ein vernünftiger Startpunkt: kurz genug, um Speicher bei echten
-    # Pausen zeitnah freizugeben, lang genug, um normale Chat-Pausen nicht
-    # anzufassen. Bei knappem Speicher eher niedriger, bei Latenz-
-    # empfindlichkeit eher höher oder ganz aus.
-    idle_sleep_seconds: Optional[int] = None
     # Anzahl gleichzeitig laufender vLLM-Engine-Prozesse ("Hot Pool"). Bei 1
     # (Default) verhält sich der Manager wie zuvor: exklusiv, jeder Wechsel ist
     # ein Kaltstart. Bei >1 belegt jede Engine einen eigenen Port
@@ -208,18 +188,6 @@ class Config(BaseModel):
     auto_reload_last_model: bool = True
     default_model: Optional[str] = None
     startup_timeout_seconds: int = 1800
-    # vLLMs eingebauter Sleep Mode (siehe process_manager.py sleep_engine/
-    # wake_engine): bei Verdrängung wird eine Engine bevorzugt schlafen gelegt
-    # statt beendet - der Prozess bleibt am Leben (kein Kaltstart, kein
-    # Re-JIT der Kernel, kein erneuter CUDA-Graph-Capture beim nächsten
-    # Aufwecken nötig), nur die Gewichte werden aus dem GPU-Speicher entfernt.
-    # Live getestet auf NVIDIA GB10 (Unified Memory): Aufwecken eines 35B-
-    # Modells dauerte ~2s statt ~290s Kaltstart. Setzt voraus, dass die
-    # installierte vLLM-Version --enable-sleep-mode unterstützt (ab ca. 0.7) -
-    # bei Problemen (z.B. "Sleep mode is not supported on current platform")
-    # hier auf false setzen, dann verhält sich der Pool wie zuvor (nur
-    # hartes Verdrängen).
-    enable_sleep_mode: bool = True
     # Wie lange eine Anfrage für ein NOCH NICHT geladenes Modell in der
     # Warteschlange wartet, falls gerade kein Platz im Hot Pool ist (alle
     # anderen Engines sind entweder selbst im Kaltstart oder bearbeiten

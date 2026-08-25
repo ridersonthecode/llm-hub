@@ -41,24 +41,6 @@ async def _idle_check_once() -> None:
     damit er isoliert (ohne die Endlosschleife/den 30s-Sleep) testbar ist."""
     cfg = get_config()
     now = time.time()
-    busy_models = {r["model"] for r in telemetry.active_requests.values()}
-
-    # Proaktives Einschläfern (siehe config.idle_sleep_seconds) - läuft VOR
-    # dem harten idle_timeout unten, damit eine Engine erst schläft und erst
-    # danach (falls konfiguriert, üblicherweise deutlich später) ganz beendet
-    # wird. Nur "ready" + unbenutzte + gerade nicht beschäftigte Engines -
-    # eine bereits schlafende überspringt sich selbst (sleep_engine() ist
-    # idempotent), eine ladende/beschäftigte wird nie angefasst.
-    if cfg.idle_sleep_seconds:
-        for eng in list(process_manager.engines.values()):
-            if (
-                eng.state == "ready"
-                and eng.sleep_capable
-                and eng.model not in busy_models
-                and now - eng.last_used > cfg.idle_sleep_seconds
-            ):
-                logger.info("Idle-Sleep (%ss) erreicht, lege %s schlafen", cfg.idle_sleep_seconds, eng.model)
-                await process_manager.sleep_engine(eng.model, reason="idle_sleep")
 
     if not cfg.idle_timeout_seconds:
         return
