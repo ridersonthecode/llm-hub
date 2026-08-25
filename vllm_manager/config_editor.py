@@ -348,6 +348,52 @@ async def register_model_if_missing(model: str, note: str) -> bool:
     return registered
 
 
+async def sync_detected_capabilities(model: str, caps: dict) -> bool:
+    """Spiegelt task/vision/tool_calling/reasoning_parser für `model` in
+    config.json - aufgerufen von process_manager._build_command() bei JEDEM
+    Engine-Start mit dem dort bereits berechneten Erkennungsergebnis (kein
+    zweiter Aufruf von capability_detector nötig). Anders als register_model_
+    if_missing oben geht es hier NICHT ums erstmalige Anlegen, sondern ums
+    stetige Aktuellhalten: diese vier Felder gelten seit 2026-08-25 als reine
+    Fakten des Modells (siehe ModelConfig-Docstring), keine Nutzer-Einstellung
+    mehr - der eigentliche Engine-Start nutzt `caps` direkt und liest NICHT
+    mehr aus config.json, dieser Schreibvorgang dient ausschließlich der
+    Dashboard-Anzeige und dem RAG-Embedding-Filter (task=="embed"). Best-
+    effort, blockiert/verzögert den eigentlichen Start nie (fire-and-forget-
+    Aufruf) und wird nie propagiert. Gibt True zurück, wenn tatsächlich
+    geschrieben wurde (False bei bereits identischem Stand - kein unnötiger
+    Backup-Churn bei jedem einzelnen Start)."""
+    if not caps.get("found"):
+        return False
+
+    new_vals = {
+        "task": caps["task"]["suggested"],
+        "vision": bool(caps["vision"]["detected"]),
+        "enable_auto_tool_choice": bool(
+            caps["tool_calling"]["detected"] and caps["tool_calling"]["suggested_parser"]
+        ),
+        "tool_call_parser": (
+            caps["tool_calling"]["suggested_parser"] if caps["tool_calling"]["detected"] else None
+        ),
+        "reasoning_parser": (
+            caps["reasoning"]["suggested_parser"] if caps["reasoning"]["detected"] else None
+        ),
+    }
+
+    def _mutate(dump: dict):
+        entry = dump["models"].setdefault(model, {})
+        if all(entry.get(k) == v for k, v in new_vals.items()):
+            return False  # unverändert - nichts zu tun
+        entry.update(new_vals)
+
+    try:
+        result = await asyncio.to_thread(patch_config, _mutate)
+    except Exception:
+        logger.exception("Konnte erkannte Fähigkeiten für '%s' nicht in config.json spiegeln", model)
+        return False
+    return result is not None
+
+
 def restore_backup(filename: str) -> tuple[Config, Optional[str]]:
     """Lädt eine Datei aus config_backups/ und aktiviert sie wie save_config()
     (inkl. eigenem Backup der aktuell aktiven Config davor)."""

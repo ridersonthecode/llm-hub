@@ -725,11 +725,17 @@ function renderModels() {
           <div class="detect-results" id="detect-results-${i}" style="display:none;"></div>
         </div>
 
-        <label><span data-i18n="cfg.field.task">Task</span>${helpIcon("cfg_task")}</label>
-        <select class="m-field" data-idx="${i}" data-field="task">
-          <option value="generate" ${m.task !== "embed" ? "selected" : ""}>generate</option>
-          <option value="embed" ${m.task === "embed" ? "selected" : ""}>embed</option>
-        </select>
+        <div class="card">
+          <div class="hint" data-i18n="cfg.hint.autoManaged">🔒 Automatically determined from the model itself at every engine start - not editable here, any manual value would be overwritten on the next start anyway.</div>
+          <div class="row" style="margin-top:6px;">
+            <div><span data-i18n="cfg.field.task">Task</span>: <span class="mono">${m.task === "embed" ? "embed" : "generate"}</span></div>
+            <div><span data-i18n="badge.vision">Vision</span>: <span class="mono">${m.vision ? "✅" : "–"}</span></div>
+          </div>
+          <div class="row">
+            <div><span data-i18n="badge.toolCalling">Tool Calling</span>: <span class="mono">${m.enable_auto_tool_choice && m.tool_call_parser ? esc(m.tool_call_parser) : "–"}</span></div>
+            <div><span data-i18n="badge.reasoning">Reasoning</span>: <span class="mono">${m.reasoning_parser ? esc(m.reasoning_parser) : "–"}</span></div>
+          </div>
+        </div>
 
         <div class="row">
           <div>
@@ -756,25 +762,6 @@ function renderModels() {
           <label for="m-repdet-${i}" data-i18n="cfg.field.repetitionDetection">Detect and abort repetition loops (streamed requests)</label>${helpIcon("cfg_repetitionDetection")}
         </div>
 
-        <div class="row">
-          <div>
-            <label><span data-i18n="cfg.field.toolCallParser">Tool call parser</span>${helpIcon("cfg_toolCallParser")}</label>
-            <input type="text" class="m-field" data-idx="${i}" data-field="tool_call_parser" list="tool-parser-options" value="${esc(m.tool_call_parser ?? "")}">
-          </div>
-          <div>
-            <label><span data-i18n="cfg.field.reasoningParser">Reasoning parser</span>${helpIcon("cfg_reasoningParser")}</label>
-            <input type="text" class="m-field" data-idx="${i}" data-field="reasoning_parser" list="reasoning-parser-options" value="${esc(m.reasoning_parser ?? "")}">
-          </div>
-        </div>
-
-        <div class="check-row">
-          <input type="checkbox" class="m-field" data-idx="${i}" data-field="enable_auto_tool_choice" id="m-tool-${i}" ${m.enable_auto_tool_choice ? "checked" : ""}>
-          <label for="m-tool-${i}" data-i18n="cfg.field.autoToolChoice">Enable auto tool choice</label>${helpIcon("cfg_autoToolChoice")}
-        </div>
-        <div class="check-row">
-          <input type="checkbox" class="m-field" data-idx="${i}" data-field="vision" id="m-vision-${i}" ${m.vision ? "checked" : ""}>
-          <label for="m-vision-${i}" data-i18n="badge.vision">Vision</label>${helpIcon("cfg_vision")}
-        </div>
         <div class="check-row">
           <input type="checkbox" class="m-field" data-idx="${i}" data-field="fast_load" id="m-fastload-${i}" ${m.fast_load ? "checked" : ""}>
           <label for="m-fastload-${i}" data-i18n="cfg.field.fastLoad">Fast load (--enforce-eager)</label>${helpIcon("cfg_fastLoad")}
@@ -811,16 +798,6 @@ function renderModels() {
       </div>
     </div>`;
   }).join("") + `
-    <datalist id="tool-parser-options">
-      <option value="hermes"><option value="qwen3_xml"><option value="qwen3_coder">
-      <option value="openai"><option value="llama3_json"><option value="mistral">
-      <option value="granite">
-    </datalist>
-    <datalist id="reasoning-parser-options">
-      <option value="qwen3"><option value="deepseek_r1"><option value="deepseek_v3">
-      <option value="granite"><option value="mistral"><option value="openai_gptoss">
-      <option value="hunyuan_a13b"><option value="glm45"><option value="glm47">
-    </datalist>
     <datalist id="rag-collection-options">${ragCollectionNames.map(n => `<option value="${esc(n)}">`).join("")}</datalist>`;
 
   document.querySelectorAll(".accordion-header").forEach(el => {
@@ -1056,7 +1033,7 @@ function renderDetectResults(idx, data) {
         </tr>`).join("")}
       </tbody></table>
       <div class="actions-row" style="margin-top:10px;">
-        <span class="hint">${t("cfg.hint.detectDisclaimer")}</span>
+        <span class="hint">${t("cfg.hint.detectDisclaimerScoped")}</span>
         <div class="spacer"></div>
         <button class="btn primary apply-detect-btn" data-idx="${idx}">${t("cfg.action.applyDetected")}</button>
       </div>
@@ -1065,12 +1042,12 @@ function renderDetectResults(idx, data) {
 }
 
 function applyDetected(idx, data) {
+  // task/vision/tool_calling/reasoning werden hier NICHT mehr übernommen -
+  // die sind seit 2026-08-25 keine Nutzer-Einstellung mehr, sondern werden
+  // bei jedem Engine-Start ohnehin frisch erkannt (siehe process_manager.
+  // _build_command). Nur max_model_len/gpu_memory_utilization bleiben echte
+  // Abwägungen, die sich lohnt hier als Startwert zu übernehmen.
   const m = modelsList[idx];
-  m.vision = !!data.vision.detected;
-  m.enable_auto_tool_choice = !!data.tool_calling.detected;
-  m.tool_call_parser = data.tool_calling.detected ? (data.tool_calling.suggested_parser || m.tool_call_parser) : null;
-  m.reasoning_parser = data.reasoning.detected ? (data.reasoning.suggested_parser || m.reasoning_parser) : null;
-  m.task = data.task.suggested;
   if (data.max_model_len.suggested != null) m.max_model_len = data.max_model_len.suggested;
   if (data.gpu_memory_utilization.suggested != null) m.gpu_memory_utilization = data.gpu_memory_utilization.suggested;
   markDirty();

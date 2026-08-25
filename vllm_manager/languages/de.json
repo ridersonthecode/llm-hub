@@ -267,6 +267,8 @@
   "cfg.detect.confHigh": "wahrscheinlich",
   "cfg.detect.confLow": "unsicher",
   "cfg.hint.detectDisclaimer": "Bestmögliche Schätzung aus dem eigenen Chat-Template des Modells - vor Verlass unbedingt selbst prüfen.",
+  "cfg.hint.detectDisclaimerScoped": "Task/Vision/Tool-Calling/Reasoning werden bei jedem Start automatisch neu erkannt (siehe oben) - \"Übernehmen\" wirkt nur noch auf max_model_len/gpu_memory_utilization.",
+  "cfg.hint.autoManaged": "🔒 Wird bei jedem Engine-Start automatisch aus dem Modell selbst ermittelt - hier nicht änderbar, ein manuell gesetzter Wert würde beim nächsten Start ohnehin überschrieben.",
   "cfg.action.restore": "Wiederherstellen",
   "cfg.status.unsavedChanges": "Nicht gespeicherte Änderungen",
   "cfg.status.saved": "Gespeichert. Backup: {backup}",

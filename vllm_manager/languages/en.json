@@ -267,6 +267,8 @@
   "cfg.detect.confHigh": "likely",
   "cfg.detect.confLow": "uncertain",
   "cfg.hint.detectDisclaimer": "Best-effort guess from the model's own chat template - always double-check before relying on it.",
+  "cfg.hint.detectDisclaimerScoped": "Task/vision/tool-calling/reasoning are re-detected automatically on every start (see above) - \"Apply\" now only affects max_model_len/gpu_memory_utilization.",
+  "cfg.hint.autoManaged": "🔒 Automatically determined from the model itself on every engine start - not editable here, any manually set value would be overwritten on the next start anyway.",
   "cfg.action.restore": "Restore",
   "cfg.status.unsavedChanges": "Unsaved changes",
   "cfg.status.saved": "Saved. Backup: {backup}",

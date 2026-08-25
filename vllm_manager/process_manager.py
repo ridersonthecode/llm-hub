@@ -55,7 +55,7 @@ try:
 except ImportError:  # pragma: no cover - psutil kommt transitiv über vllm mit
     psutil = None
 
-from . import config_editor, telemetry
+from . import capability_detector, config_editor, telemetry
 from .config import CONFIG_PATH, Config, get_config
 
 logger = logging.getLogger("vllm_manager.engine")
@@ -212,8 +212,51 @@ def _parse_cudagraph_sizes(raw: str) -> list[int]:
 
 
 def _build_command(cfg: Config, model: str, port: int) -> list[str]:
+    """Baut das vllm-serve-Kommando. task/vision/tool_calling/reasoning_parser
+    kommen NICHT mehr aus mcfg (ModelConfig hat diese Felder seit 2026-08-25
+    nicht mehr) - das sind Fakten des Modells selbst, keine Nutzer-Einstellung
+    (siehe Nutzer-Feedback: "es ergibt keinen Sinn, Werte anzupassen, die
+    feststehen"). Stattdessen wird bei JEDEM Start frisch per
+    capability_detector erkannt (dieselbe Heuristik wie der frühere "Auto-
+    detect"-Button im Config-Editor, nur jetzt auf jeden Start statt nur auf
+    Knopfdruck angewandt) - eine manuelle Änderung an diesen Werten in
+    config.json (z.B. von Hand editiert) hätte also ohnehin keine Wirkung
+    mehr auf den tatsächlichen Start. Das Ergebnis wird zusätzlich (fire-and-
+    forget, blockiert den Start nicht) für die Dashboard-Anzeige/RAG-Task-
+    Filter in config.json gespiegelt, siehe config_editor.
+    sync_detected_capabilities().
+
+    max_model_len bleibt dagegen ein echter Nutzer-Wert (kleinerer Kontext =
+    weniger KV-Cache-Speicherbedarf, eine legitime Abwägung) - wird hier aber
+    hart auf die architektonische Obergrenze des Modells (max_position_
+    embeddings) gedeckelt, falls die config.json einen höheren Wert enthält
+    (z.B. weil das Modell zwischenzeitlich gewechselt oder von Hand
+    überschrieben wurde) - höher geht schlicht nicht, unabhängig von der
+    Konfiguration."""
     mcfg = cfg.models.get(model)
     gmu, mml = cfg.serve_args_for(model)
+
+    try:
+        caps = capability_detector.detect_capabilities(model, cfg.hf_home)
+    except Exception:
+        logger.exception("Capability-Erkennung für '%s' fehlgeschlagen - starte ohne automatische Flags", model)
+        caps = {"found": False}
+
+    if caps.get("found"):
+        ceiling = caps["max_model_len"]["suggested"]
+        if ceiling and mml > ceiling:
+            logger.warning(
+                "max_model_len=%d für '%s' liegt über der architektonischen Obergrenze des Modells "
+                "(max_position_embeddings=%d) - für diesen Start auf %d gedeckelt.",
+                mml, model, ceiling, ceiling,
+            )
+            mml = ceiling
+        # Fire-and-forget: spiegelt die frisch erkannten Werte in config.json,
+        # rein für Anzeige/Filter (z.B. RAG-Embedding-Modell-Auswahl nach
+        # task=="embed") - beeinflusst NICHT mehr den gerade laufenden Start,
+        # der nutzt ausschließlich `caps` direkt (siehe unten).
+        asyncio.create_task(config_editor.sync_detected_capabilities(model, caps))
+
     cmd = [
         cfg.resolved_vllm_bin(), "serve", model,
         "--host", cfg.engine_host,
@@ -221,16 +264,15 @@ def _build_command(cfg: Config, model: str, port: int) -> list[str]:
         "--gpu-memory-utilization", str(gmu),
         "--max-model-len", str(mml),
     ]
-    if mcfg:
-        if mcfg.task == "embed":
+    if caps.get("found"):
+        if caps["task"]["suggested"] == "embed":
             # vLLM >=0.26 hat das alte "--task" durch "--runner" ersetzt.
             cmd += ["--runner", "pooling"]
-        if mcfg.enable_auto_tool_choice:
-            cmd.append("--enable-auto-tool-choice")
-        if mcfg.tool_call_parser:
-            cmd += ["--tool-call-parser", mcfg.tool_call_parser]
-        if mcfg.reasoning_parser:
-            cmd += ["--reasoning-parser", mcfg.reasoning_parser]
+        if caps["tool_calling"]["detected"] and caps["tool_calling"]["suggested_parser"]:
+            cmd += ["--enable-auto-tool-choice", "--tool-call-parser", caps["tool_calling"]["suggested_parser"]]
+        if caps["reasoning"]["detected"] and caps["reasoning"]["suggested_parser"]:
+            cmd += ["--reasoning-parser", caps["reasoning"]["suggested_parser"]]
+    if mcfg:
         if mcfg.fast_load:
             # Siehe ModelConfig.fast_load - deaktiviert CUDA-Graph-Capture,
             # verkürzt den Kaltstart auf Kosten der Dauer-Inferenzgeschwindigkeit.

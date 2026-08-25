@@ -28,13 +28,21 @@ class Pricing(BaseModel):
 
 
 class ModelConfig(BaseModel):
+    # tool_call_parser, reasoning_parser, enable_auto_tool_choice, vision und
+    # task (weiter unten) sind seit 2026-08-25 KEINE Nutzer-Einstellungen mehr,
+    # auch wenn sie hier weiter als Felder existieren: es sind Fakten der
+    # Modell-Architektur selbst (aus chat_template.jinja/config.json erkannt,
+    # siehe capability_detector.py), keine Abwägung wie z.B. gpu_memory_
+    # utilization. process_manager._build_command() erkennt sie bei JEDEM
+    # Engine-Start frisch und ignoriert dabei komplett, was hier steht -
+    # dieselbe Heuristik, die früher der "Auto-detect"-Button im Config-Editor
+    # anzeigte, läuft jetzt automatisch bei jedem Start. Die Werte hier werden
+    # nur noch als Kopie fürs Dashboard/RAG-Filter (task=="embed") mitgeführt
+    # (siehe config_editor.sync_detected_capabilities) - im Config-Editor
+    # deshalb nicht mehr editierbar, nur noch als "erkannt"-Anzeige zu sehen.
+    # Nutzer-Feedback dazu: "es ergibt keinen Sinn, Werte anzupassen, die
+    # feststehen."
     tool_call_parser: Optional[str] = None
-    # Trennt vLLMs Antwort in "reasoning_content" (Denkprozess) und "content"
-    # (eigentliche Antwort), analog zu DeepSeek-R1s API. Ohne das landet bei
-    # Thinking-Modellen (z.B. Qwen3) der komplette <think>...</think>-Block
-    # als normaler Text im Chat, statt in der einklappbaren Reasoning-Box.
-    # Gültige Werte: vllm serve --help=all | grep -A2 reasoning-parser, z.B.
-    # "qwen3", "deepseek_r1", "granite", "mistral", ...
     reasoning_parser: Optional[str] = None
     max_model_len: Optional[int] = None
     gpu_memory_utilization: Optional[float] = None
@@ -71,7 +79,8 @@ class ModelConfig(BaseModel):
     cudagraph_capture_sizes: Optional[str] = None
     # "generate" (normales Chat-/Completion-Modell) oder "embed"
     # (Embedding-Modell für RAG, z.B. Qwen3-Embedding). Steuert, ob vllm serve
-    # mit --runner pooling gestartet wird (vLLMs Nachfolger von --task).
+    # mit --runner pooling gestartet wird (vLLMs Nachfolger von --task). Wie
+    # oben beschrieben: kein Nutzer-Wert mehr, wird bei jedem Start neu erkannt.
     task: str = "generate"
     extra_args: list[str] = Field(default_factory=list)
     hf_token: Optional[str] = None
