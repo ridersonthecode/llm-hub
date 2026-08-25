@@ -135,3 +135,30 @@ die Mamba-Layer weniger präzise ist als AWQs Smoothing, und/oder dass llama.cpp
 Q4_K_M-Kernel für diese Hardware feiner optimiert sind als vLLMs generischer
 AWQ-Pfad. Für die volle vLLM-Integration (Hot Pool, OpenAI-API, Tool-Calling, MCP,
 RAG) ist 74% von Ollamas Tempo trotzdem ein guter Kompromiss.
+
+## Nachtrag (2026-08-25): weitere Optimierungen nach der Quantisierung
+
+Drei zusätzliche, rein config-seitige Hebel (kein erneutes Quantisieren nötig)
+live getestet, jeweils vorher/nachher über vLLMs eigene Prometheus-Metrik
+gemessen (`vllm:request_time_per_output_token_seconds`, Delta über genau eine
+Anfrage, damit andere Requests das Ergebnis nicht verfälschen):
+
+| Optimierung | Ergebnis | Übernommen? |
+|---|---|---|
+| `cudagraph_capture_sizes=1,2,4,8,16` (siehe `ModelConfig.cudagraph_capture_sizes`) | Kaltstart ~17s schneller (Graph-Capture 2s statt ~23s), Decode-Speed unverändert (10.83 vs. 10.97 Tok/s) | ✅ Ja - reiner Gewinn, kein Trade-off |
+| FP8-KV-Cache (`--kv-cache-dtype fp8`) | Keine messbare Beschleunigung bei kurzem Kontext (10.76 Tok/s) + zusätzlicher Kaltstart-Overhead (~46s Extra-Warmup für FP8-Kalibrierung) | ❌ Nein - bringt bei kurzem Kontext nichts, nur Kosten. Könnte bei sehr langem Kontext/hoher Parallelität anders aussehen (KV-Cache macht dort einen größeren Anteil der Speicherbandbreite aus) - hier nicht getestet |
+| n-gram-Spekulation (`--speculative-config '{"method":"ngram","num_speculative_tokens":5,"prompt_lookup_max":4,"prompt_lookup_min":2}'`) | Freie Kreativantwort: 10.48 Tok/s (~5% langsamer). Wiederholungslastige Aufgabe (Text/Code wörtlich kopieren): **58 Tok/s (5× schneller als Baseline)**, Ausgabe nachweislich exakt identisch zur Vorlage | ✅ Ja - siehe Einordnung unten |
+
+**Warum n-gram-Spekulation trotz der 5%-Verlangsamung bei freier Prosa
+übernommen wurde:** Anders als Quantisierung ist spekulatives Decodieren
+**mathematisch verlustfrei** - ein kleiner, kostenloser "Rate-Mechanismus"
+schlägt mehrere Tokens auf einmal vor, das eigentliche Modell verifiziert sie
+nur noch (viel billiger als sie einzeln zu generieren); ein falscher Rat
+kostet nur etwas Zeit, nie Qualität. Der Rate-Mechanismus (n-gram/Prompt-
+Lookup) sucht nach Wiederholungen zwischen Prompt und bisheriger Antwort - bei
+freier Kreativantwort (wenig Wiederholung) trifft er selten und kostet daher
+minimal Zeit, bei Aufgaben mit viel wörtlicher Wiederholung (Code-Bearbeitung,
+Refactoring, Zitieren, strukturierte Ausgaben - genau das Profil dieses
+Setups mit Tool-Calling/RAG/VS-Code-Nutzung) trifft er oft und bringt ein
+Vielfaches an Tempo. Nettoabwägung: kleiner Verlust im selteneren Fall,
+großer Gewinn im für dieses Projekt häufigeren Fall.
