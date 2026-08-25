@@ -456,10 +456,9 @@ function renderCollections() {
 }
 
 // --- Documents (DataTables, siehe /static/vendor/datatables/README.md) -----
-// Kann mit vielen Dokumenten pro Collection wachsen (insbesondere die
-// automatische "lessons_learned"-Collection) - daher paginiert. Spaltentitel
-// hängen von der Sprache ab -> bei Sprachwechsel komplett neu aufgebaut (siehe
-// lang-select-Handler unten).
+// Kann mit vielen Dokumenten pro Collection wachsen - daher paginiert.
+// Spaltentitel hängen von der Sprache ab -> bei Sprachwechsel komplett neu
+// aufgebaut (siehe lang-select-Handler unten).
 let documentsTable = null;
 
 function initDocumentsTable() {

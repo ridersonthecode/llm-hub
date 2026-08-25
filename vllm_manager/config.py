@@ -154,19 +154,6 @@ class RagConfig(BaseModel):
     # der eigentlichen Antwort ablenken.
     auto_rag_top_k: int = 3
     auto_rag_min_score: float = 0.5
-    # Collection für die automatische "Lessons Learned"-Ablage (siehe
-    # mcp_tools.remember_lesson/search_lessons): KI-Agenten mit Tool-Zugriff
-    # (z.B. Qwen in VS Code Copilot Chat, Agent-Modus, via .vscode/mcp.json)
-    # speichern hier gelöste Fehler/Korrekturen, damit sie beim nächsten
-    # ähnlichen Problem sofort wiedergefunden werden - projektweit, nicht nur
-    # in der jeweiligen Chat-Session.
-    lessons_learned_collection: str = "lessons_learned"
-    # Sicherheitsnetz zusätzlich zum aktiven Tool-Aufruf: wird bei JEDER
-    # Chat-Anfrage an ein Modell mit gesetzter ModelConfig.rag_collection
-    # automatisch AUCH die Lessons-Learned-Collection durchsucht und
-    # eingespeist (siehe rag.apply_auto_rag) - greift auch dann, wenn das
-    # Modell search_lessons nicht selbst aufruft.
-    lessons_learned_auto_inject: bool = True
 
 
 class Config(BaseModel):

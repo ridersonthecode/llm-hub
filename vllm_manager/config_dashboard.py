@@ -457,16 +457,6 @@ CONFIG_DASHBOARD_HTML = r"""<!doctype html>
           <input type="number" id="f-rag_auto_rag_min_score" min="0" max="1" step="0.05">
         </div>
       </div>
-      <div class="row">
-        <div>
-          <label><span data-i18n="cfg.field.lessonsLearnedCollection">Lessons Learned collection</span><span class="help-icon" data-help="cfg_lessonsLearnedCollection" data-i18n-title="help.clickForInfo" title="Click for more info">?</span></label>
-          <input type="text" id="f-rag_lessons_learned_collection">
-        </div>
-      </div>
-      <div class="check-row">
-        <input type="checkbox" id="f-rag_lessons_learned_auto_inject">
-        <label for="f-rag_lessons_learned_auto_inject" data-i18n="cfg.field.lessonsLearnedAutoInject">Auto-inject Lessons Learned into every request</label><span class="help-icon" data-help="cfg_lessonsLearnedAutoInject" data-i18n-title="help.clickForInfo" title="Click for more info">?</span>
-      </div>
     </div>
   </section>
 
@@ -696,8 +686,6 @@ function renderForm() {
   $("f-rag_chunk_overlap_chars").value = rag.chunk_overlap_chars ?? 200;
   $("f-rag_auto_rag_top_k").value = rag.auto_rag_top_k ?? 3;
   $("f-rag_auto_rag_min_score").value = rag.auto_rag_min_score ?? 0.5;
-  $("f-rag_lessons_learned_collection").value = rag.lessons_learned_collection ?? "lessons_learned";
-  $("f-rag_lessons_learned_auto_inject").checked = rag.lessons_learned_auto_inject !== false;
 
   populateModelSelects();
   $("f-default_model").value = state.default_model ?? "";
@@ -712,7 +700,6 @@ function renderForm() {
     + "#f-pricing_input_per_mtok,#f-pricing_output_per_mtok,"
     + "#f-rag_enabled,#f-rag_qdrant_host,#f-rag_qdrant_port,#f-rag_default_collection,"
     + "#f-rag_chunk_size_chars,#f-rag_chunk_overlap_chars,#f-rag_auto_rag_top_k,#f-rag_auto_rag_min_score,"
-    + "#f-rag_lessons_learned_collection,#f-rag_lessons_learned_auto_inject,"
     + "#f-default_model,#f-rag_embedding_model")
     .forEach(el => { el.oninput = markDirty; el.onchange = markDirty; });
 }
@@ -1175,8 +1162,6 @@ function buildPayload() {
       chunk_overlap_chars: parseInt($("f-rag_chunk_overlap_chars").value, 10),
       auto_rag_top_k: parseInt($("f-rag_auto_rag_top_k").value, 10),
       auto_rag_min_score: parseFloat($("f-rag_auto_rag_min_score").value),
-      lessons_learned_collection: $("f-rag_lessons_learned_collection").value,
-      lessons_learned_auto_inject: $("f-rag_lessons_learned_auto_inject").checked,
     },
   };
 }

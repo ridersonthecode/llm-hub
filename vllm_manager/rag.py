@@ -190,31 +190,19 @@ async def apply_auto_rag(model: str, messages: list) -> Optional[dict]:
     (OpenAI-API wie VS Code, Ollama-API-Alt-Tools) davon profitieren, ohne
     selbst irgendetwas Besonderes unterstützen zu müssen.
 
-    Durchsucht - unabhängig von der modell-eigenen rag_collection - zusätzlich
-    IMMER auch die Lessons-Learned-Collection (siehe
-    RagConfig.lessons_learned_collection/lessons_learned_auto_inject und
-    mcp_tools.remember_lesson/search_lessons), sofern aktiviert: ein Sicherheits-
-    netz für den Fall, dass ein Agent (z.B. Qwen in VS Code) search_lessons
-    nicht selbst proaktiv aufruft.
-
-    Gibt None zurück, wenn nichts angewendet wurde (kein rag_collection
-    konfiguriert UND Lessons-Learned-Auto-Inject aus, RAG global nicht
-    aktiviert, kein Suchtext in der letzten User-Nachricht, keine ausreichend
-    relevanten Treffer in beiden Collections, oder ein Fehler bei Qdrant/
-    Embedding-Modell - RAG ist ein Zusatz und darf den eigentlichen Chat nie
-    zum Scheitern bringen), sonst {"collections": [...], "hits": N} fürs
-    Telemetrie-Tracking im Dashboard (Active/Recent Requests)."""
+    Gibt None zurück, wenn nichts angewendet wurde (kein rag_collection für
+    dieses Modell konfiguriert, RAG global nicht aktiviert, kein Suchtext in
+    der letzten User-Nachricht, keine ausreichend relevanten Treffer, oder ein
+    Fehler bei Qdrant/Embedding-Modell - RAG ist ein Zusatz und darf den
+    eigentlichen Chat nie zum Scheitern bringen), sonst {"collections": [...],
+    "hits": N} fürs Telemetrie-Tracking im Dashboard (Active/Recent Requests)."""
     cfg = get_config()
     if not cfg.rag.enabled or not cfg.rag.embedding_model:
         return None
     mcfg = cfg.models.get(model)
-    collections = []
-    if mcfg and mcfg.rag_collection:
-        collections.append(mcfg.rag_collection)
-    if cfg.rag.lessons_learned_auto_inject and cfg.rag.lessons_learned_collection not in collections:
-        collections.append(cfg.rag.lessons_learned_collection)
-    if not collections:
+    if not mcfg or not mcfg.rag_collection:
         return None
+    collections = [mcfg.rag_collection]
     query_text = ""
     for m in reversed(messages or []):
         if m.get("role") == "user":
