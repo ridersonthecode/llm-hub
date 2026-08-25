@@ -184,6 +184,52 @@ _metrics_cache: dict[int, dict] = {}
 _metrics_cache_at: dict[int, float] = {}
 _metrics_locks: dict[int, asyncio.Lock] = {}
 
+# (port, Metrik-Name) -> (letzter kumulativer sum-Stand, letzter count-Stand)
+# bzw. -> letzter daraus berechneter "seit letzter Änderung"-Mittelwert in ms.
+# Siehe _recent_avg_ms() - derselbe Differenz-über-Zeit-Trick wie
+# system_metrics._read_cpu() (dort: CPU-Ticks aus /proc/stat), nur hier auf
+# vLLMs eigene kumulative Latenz-Histogramme angewendet.
+_prev_hist_samples: dict[tuple[int, str], tuple[float, float]] = {}
+_recent_avg_ms: dict[tuple[int, str], Optional[float]] = {}
+
+
+def _recent_avg(port: int, metric: str, cur_sum: float, cur_count: float) -> Optional[float]:
+    """Mittelwert (in ms) NUR über die Anfragen, die seit der letzten Messung
+    NEU abgeschlossen wurden - bewusst NICHT das Lifetime-Mittel seit Engine-
+    Start, das vLLMs rohe Prometheus-Zähler eigentlich hergeben (sum/count
+    sind monoton wachsende Zähler, die nie zurückgesetzt werden außer bei
+    einem Engine-Neustart).
+
+    Live beobachtet (2026-08-25): eine einzelne langsame historische Anfrage
+    (z.B. während hoher Nebenlast, oder ein Kaltstart-Sample kurz nach dem
+    Neuladen) zog den angezeigten Wert für den GESAMTEN Rest der Laufzeit
+    dieser Engine dauerhaft nach unten - ein Nutzer, der live im Editor einen
+    deutlich schnelleren Stream sah, hätte im Dashboard trotzdem dauerhaft
+    einen viel schlechteren Wert gesehen ("1.5 Tok/s" trotz tatsächlich
+    normaler Geschwindigkeit). Mit dieser Differenzbildung "vergisst" der
+    angezeigte Wert alte, längst abgeschlossene Anfragen von selbst - er
+    zeigt immer nur, was seit dem letzten Poll (per Dashboard-Heartbeat,
+    ca. 1x/s) tatsächlich NEU abgeschlossen wurde.
+
+    Gibt None zurück, solange nach einem (Neu-)Start noch keine einzige
+    Anfrage abgeschlossen wurde. Danach bleibt der zuletzt berechnete Wert
+    stehen, bis die nächste Anfrage fertig ist - kein Zittern zwischen "kein
+    Wert" und einer Zahl, nur weil zwischen zwei Polls zufällig nichts fertig
+    wurde."""
+    key = (port, metric)
+    prev_sum, prev_count = _prev_hist_samples.get(key, (0.0, 0.0))
+    if cur_count < prev_count:
+        # Zähler kleiner als beim letzten Mal -> Engine wurde neu gestartet
+        # (frischer Prozess, frische Prometheus-Zähler) - alte Vergleichsbasis
+        # verwerfen, sonst würde die nächste Differenz absurd groß/negativ.
+        prev_sum, prev_count = 0.0, 0.0
+    if cur_count > prev_count:
+        d_sum = cur_sum - prev_sum
+        d_count = cur_count - prev_count
+        _recent_avg_ms[key] = round((d_sum / d_count) * 1000, 2)
+        _prev_hist_samples[key] = (cur_sum, cur_count)
+    return _recent_avg_ms.get(key)
+
 
 def _get_metrics_client() -> httpx.AsyncClient:
     """Ein wiederverwendeter Client statt einem neuen pro Aufruf - vermeidet
@@ -220,6 +266,18 @@ async def fetch_engine_metrics(port: Optional[int] = None) -> dict:
             r = await _get_metrics_client().get(url)
             r.raise_for_status()
             result = _parse_prometheus(r.text)
+            # Rohe kumulative Zähler in "seit letztem Poll neu abgeschlossen"
+            # umrechnen (siehe _recent_avg()-Docstring) statt des irreführenden
+            # Lifetime-Mittels seit Engine-Start anzuzeigen.
+            result["avg_ttft_ms"] = _recent_avg(
+                resolved_port, "ttft", result.pop("_raw_ttft_sum"), result.pop("_raw_ttft_count")
+            )
+            result["avg_tpot_ms"] = _recent_avg(
+                resolved_port, "tpot", result.pop("_raw_tpot_sum"), result.pop("_raw_tpot_count")
+            )
+            result["avg_e2e_latency_ms"] = _recent_avg(
+                resolved_port, "e2e", result.pop("_raw_e2e_sum"), result.pop("_raw_e2e_count")
+            )
         except Exception:
             result = {}
         _metrics_cache[resolved_port] = result
@@ -245,22 +303,20 @@ def _parse_prometheus(text: str) -> dict:
             # Bei mehreren Engines/Labels aufsummieren (bei uns i.d.R. nur eine aktiv)
             values[name] = values.get(name, 0.0) + value
 
-    def avg_ms(sum_key: str, count_key: str) -> Optional[float]:
-        count = values.get(count_key, 0.0)
-        if not count:
-            return None
-        return round((values.get(sum_key, 0.0) / count) * 1000, 2)
-
     return {
         "num_requests_running": values.get("vllm:num_requests_running"),
         "num_requests_waiting": values.get("vllm:num_requests_waiting"),
         "kv_cache_usage_perc": values.get("vllm:kv_cache_usage_perc"),
         "prompt_tokens_total": values.get("vllm:prompt_tokens_total"),
         "generation_tokens_total": values.get("vllm:generation_tokens_total"),
-        "avg_ttft_ms": avg_ms("vllm:time_to_first_token_seconds_sum", "vllm:time_to_first_token_seconds_count"),
-        "avg_tpot_ms": avg_ms(
-            "vllm:request_time_per_output_token_seconds_sum",
-            "vllm:request_time_per_output_token_seconds_count",
-        ),
-        "avg_e2e_latency_ms": avg_ms("vllm:e2e_request_latency_seconds_sum", "vllm:e2e_request_latency_seconds_count"),
+        # Rohe kumulative sum/count der drei Latenz-Histogramme - NICHT direkt
+        # als Lifetime-Mittel anzeigen (siehe fetch_engine_metrics/_recent_avg_ms
+        # für den Grund). "_raw_"-Präfix markiert: nur intern für die Delta-
+        # Berechnung gedacht, wird dort wieder rausgenommen.
+        "_raw_ttft_sum": values.get("vllm:time_to_first_token_seconds_sum", 0.0),
+        "_raw_ttft_count": values.get("vllm:time_to_first_token_seconds_count", 0.0),
+        "_raw_tpot_sum": values.get("vllm:request_time_per_output_token_seconds_sum", 0.0),
+        "_raw_tpot_count": values.get("vllm:request_time_per_output_token_seconds_count", 0.0),
+        "_raw_e2e_sum": values.get("vllm:e2e_request_latency_seconds_sum", 0.0),
+        "_raw_e2e_count": values.get("vllm:e2e_request_latency_seconds_count", 0.0),
     }
