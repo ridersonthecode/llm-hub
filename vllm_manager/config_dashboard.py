@@ -756,6 +756,11 @@ function renderModels() {
           <div class="detect-results" id="detect-results-${i}" style="display:none;"></div>
         </div>
 
+        <div style="margin: 12px 0;">
+          <button class="btn perf-tune-btn" data-idx="${i}" data-i18n="cfg.action.perfTune">🚀 Auto-tune performance</button>
+          <div class="perf-tune-results" id="perf-tune-results-${i}" style="display:none;"></div>
+        </div>
+
         <div class="card">
           <div class="hint" data-i18n="cfg.hint.autoManaged">🔒 Automatically determined from the model itself at every engine start - not editable here, any manual value would be overwritten on the next start anyway.</div>
           <div class="row" style="margin-top:6px;">
@@ -887,6 +892,9 @@ function renderModels() {
   });
   document.querySelectorAll(".detect-btn").forEach(el => {
     el.addEventListener("click", () => detectCapabilities(parseInt(el.dataset.idx, 10)));
+  });
+  document.querySelectorAll(".perf-tune-btn").forEach(el => {
+    el.addEventListener("click", () => startPerfTune(parseInt(el.dataset.idx, 10)));
   });
   // Die gerade eingefügten data-i18n-Elemente (Feld-Labels, Hilfe-Icon-Titel)
   // wurden oben mit dem Englisch-Fallback-Text erzeugt - erst hierdurch werden
@@ -1081,6 +1089,148 @@ function applyDetected(idx, data) {
   const m = modelsList[idx];
   if (data.max_model_len.suggested != null) m.max_model_len = data.max_model_len.suggested;
   if (data.gpu_memory_utilization.suggested != null) m.gpu_memory_utilization = data.gpu_memory_utilization.suggested;
+  markDirty();
+  openAccordions.add(idx);
+  renderModels();
+}
+
+// --- Performance-Tuning (Dashboard-Button "🚀 Auto-tune performance") ------
+// Startet perf_tuner.start_job() (siehe dort) und pollt den Fortschritt.
+// Läuft mehrere Minuten (mehrere volle Modell-Kaltstarts) - die Box bleibt
+// dabei bewusst robust gegen ein zwischenzeitliches renderModels() (z.B.
+// weil der Nutzer ein anderes Feld ändert): der Job läuft serverseitig
+// unabhängig weiter, das Polling hört nur auf, sein DOM-Ziel zu aktualisieren,
+// falls die Box verschwunden ist (kein Fehler, einfach nichts mehr sichtbar
+// zu tun - ein Neuladen der Seite verliert dadurch aber die Anzeige).
+const PERF_TUNE_STEP_LABELS = {
+  queued: "cfg.perfTune.step.queued",
+  baseline: "cfg.perfTune.step.baseline",
+  cudagraph_capture_sizes: "cfg.perfTune.step.cudagraph",
+  speculative_decoding: "cfg.perfTune.step.speculative",
+  restoring: "cfg.perfTune.step.restoring",
+  done: "cfg.perfTune.step.done",
+};
+
+async function startPerfTune(idx) {
+  const name = (modelsList[idx].name || "").trim();
+  const box = $(`perf-tune-results-${idx}`);
+  if (!box || !name) return;
+  if (!confirm(t("confirm.perfTune", { model: name }))) return;
+  box.style.display = "block";
+  box.innerHTML = `<div class="hint">${esc(t("cfg.status.perfTuneStarting"))}</div>`;
+  try {
+    const res = await fetch(`/models/${encodeURIComponent(name)}/perf_tune`, { method: "POST", headers: authHeaders() });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.detail || res.statusText);
+    pollPerfTune(idx, data.job_id);
+  } catch (e) {
+    box.innerHTML = `<div class="hint" style="color:var(--bad)">${esc(t("cfg.status.perfTuneFailed", { msg: e.message }))}</div>`;
+  }
+}
+
+function pollPerfTune(idx, jobId) {
+  const tick = async () => {
+    const box = $(`perf-tune-results-${idx}`);
+    if (!box) return;  // Box durch ein zwischenzeitliches renderModels() verschwunden - Job laeuft serverseitig weiter, hier nichts mehr zu tun
+    let job;
+    try {
+      const res = await fetch(`/models/perf_tune/${jobId}`, { headers: authHeaders() });
+      job = await res.json();
+    } catch (e) {
+      box.innerHTML = `<div class="hint" style="color:var(--bad)">${esc(t("cfg.status.perfTuneFailed", { msg: e.message }))}</div>`;
+      return;
+    }
+    if (job.state === "running") {
+      renderPerfTuneProgress(idx, job);
+      setTimeout(tick, 4000);
+    } else {
+      renderPerfTuneResults(idx, job);
+    }
+  };
+  tick();
+}
+
+function renderPerfTuneProgress(idx, job) {
+  const box = $(`perf-tune-results-${idx}`);
+  if (!box) return;
+  const elapsed = Math.round((Date.now() / 1000) - job.started_at);
+  const stepLabel = t(PERF_TUNE_STEP_LABELS[job.step] || "cfg.perfTune.step.baseline");
+  box.innerHTML = `
+    <div class="card" style="margin-top:8px;">
+      <div class="hint">${esc(t("cfg.status.perfTuneRunning", { step: stepLabel, elapsed }))}</div>
+      <div class="actions-row" style="margin-top:8px;">
+        <div class="spacer"></div>
+        <button class="btn danger perf-tune-cancel-btn">${t("action.cancelDownload")}</button>
+      </div>
+    </div>`;
+  box.querySelector(".perf-tune-cancel-btn").addEventListener("click", async () => {
+    await fetch(`/models/perf_tune/${job.job_id}/cancel`, { method: "POST", headers: authHeaders() });
+  });
+}
+
+function perfTuneVerdictBadge(verdict) {
+  if (verdict === "improved") return `<span class="badge ok">${t("cfg.perfTune.verdict.improved")}</span>`;
+  if (verdict === "regressed") return `<span class="badge" style="background:var(--bad-bg);color:var(--bad);">${t("cfg.perfTune.verdict.regressed")}</span>`;
+  if (verdict === "already_configured") return `<span class="badge idle">${t("cfg.perfTune.verdict.alreadyConfigured")}</span>`;
+  return `<span class="badge idle">${t("cfg.perfTune.verdict.noChange")}</span>`;
+}
+
+function renderPerfTuneResults(idx, job) {
+  const box = $(`perf-tune-results-${idx}`);
+  if (!box) return;
+  if (job.state === "error") {
+    box.innerHTML = `<div class="hint" style="color:var(--bad)">${esc(t("cfg.status.perfTuneFailed", { msg: job.error || "" }))}</div>`;
+    return;
+  }
+  if (job.state === "cancelled") {
+    box.innerHTML = `<div class="hint">${esc(t("cfg.status.perfTuneCancelled"))}</div>`;
+    return;
+  }
+  const rows = job.findings.map((f, fi) => {
+    const canApply = f.verdict !== "regressed" && f.verdict !== "already_configured";
+    if (f.test === "cudagraph_capture_sizes") {
+      const detail = f.verdict === "already_configured"
+        ? t("cfg.perfTune.detail.cudagraphAlready", { value: f.current_value })
+        : t("cfg.perfTune.detail.cudagraph", {
+            baselineCold: f.baseline_cold_start_s, tunedCold: f.tuned_cold_start_s,
+            baselineDecode: f.baseline_decode_tok_s ?? "–", tunedDecode: f.tuned_decode_tok_s ?? "–",
+          });
+      return { title: t("cfg.perfTune.test.cudagraph"), verdict: f.verdict, detail, canApply, idx: fi };
+    }
+    const detail = f.verdict === "already_configured"
+      ? t("cfg.perfTune.detail.speculativeAlready")
+      : t("cfg.perfTune.detail.speculative", {
+          baselineCreative: f.baseline_creative_tok_s ?? "–", tunedCreative: f.tuned_creative_tok_s ?? "–",
+          baselineRepetition: f.baseline_repetition_tok_s ?? "–", tunedRepetition: f.tuned_repetition_tok_s ?? "–",
+          correctness: f.correctness_ok ? "✅" : "⚠️",
+        });
+    return { title: t("cfg.perfTune.test.speculative"), verdict: f.verdict, detail, canApply, idx: fi };
+  });
+  box.innerHTML = `
+    <div class="card" style="margin-top:8px;">
+      ${rows.map(r => `
+        <div style="margin-bottom:10px;">
+          <div><strong>${esc(r.title)}</strong> ${perfTuneVerdictBadge(r.verdict)}</div>
+          <div class="hint" style="margin-top:2px;">${esc(r.detail)}</div>
+          ${r.canApply ? `<button class="btn primary perf-tune-apply-btn" data-fi="${r.idx}" style="margin-top:6px;">${t("cfg.action.applyDetected")}</button>` : ""}
+        </div>
+      `).join("")}
+    </div>`;
+  box.querySelectorAll(".perf-tune-apply-btn").forEach(el => {
+    el.addEventListener("click", () => applyPerfTuneFinding(idx, job.findings[parseInt(el.dataset.fi, 10)]));
+  });
+}
+
+function applyPerfTuneFinding(idx, finding) {
+  const m = modelsList[idx];
+  if (finding.test === "cudagraph_capture_sizes") {
+    m.cudagraph_capture_sizes = finding.recommended_value;
+  } else if (finding.test === "speculative_decoding") {
+    const existing = m.extra_args || [];
+    if (!existing.includes("--speculative-config")) {
+      m.extra_args = existing.concat(finding.recommended_extra_args);
+    }
+  }
   markDirty();
   openAccordions.add(idx);
   renderModels();

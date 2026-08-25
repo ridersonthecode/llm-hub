@@ -17,7 +17,7 @@ from fastapi.staticfiles import StaticFiles
 
 from pydantic import ValidationError
 
-from . import capability_detector, config_editor, cost_tracker, downloader, process_manager, rag, telemetry
+from . import capability_detector, config_editor, cost_tracker, downloader, perf_tuner, process_manager, rag, telemetry
 from .auth import ApiKeyMiddleware
 from . import catalog
 from .catalog import list_cached_models
@@ -271,6 +271,36 @@ async def detect_model_capabilities_endpoint(model: str):
     capability_detector.py. Rein lesend, kein Ladevorgang nötig."""
     cfg = get_config()
     return capability_detector.detect_capabilities(model, cfg.hf_home)
+
+
+@app.post("/models/{model:path}/perf_tune")
+async def perf_tune_endpoint(model: str):
+    """Startet den automatisierten Performance-Test (Dashboard-Button "🚀
+    Auto-tune performance") als Hintergrund-Job - siehe perf_tuner.py für den
+    genauen Ablauf und die Sicherheitsvorkehrungen (nur ein Job gleichzeitig,
+    Original-Config wird immer wiederhergestellt). Läuft mehrere Minuten,
+    daher Job-Polling wie bei Downloads statt einer blockierenden Antwort."""
+    try:
+        job_id = await perf_tuner.start_job(model)
+    except ValueError as e:
+        raise HTTPException(409, str(e))
+    return {"job_id": job_id}
+
+
+@app.get("/models/perf_tune/{job_id}")
+async def perf_tune_status_endpoint(job_id: str):
+    job = perf_tuner.get_job(job_id)
+    if job is None:
+        raise HTTPException(404, "Unbekannte job_id.")
+    return job
+
+
+@app.post("/models/perf_tune/{job_id}/cancel")
+async def cancel_perf_tune_endpoint(job_id: str):
+    ok = await perf_tuner.cancel_job(job_id)
+    if not ok:
+        raise HTTPException(404, f"Performance-Test-Job '{job_id}' existiert nicht (mehr) oder läuft nicht mehr.")
+    return {"ok": True}
 
 
 @app.post("/models/{model:path}/unload")
