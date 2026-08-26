@@ -280,6 +280,7 @@ CONFIG_DASHBOARD_HTML = r"""<!doctype html>
     <a href="#sec-pricing" data-i18n="cfg.section.pricing">Cost Tracking</a>
     <a href="#sec-rag" data-i18n="cfg.section.rag">RAG</a>
     <a href="#sec-models" data-i18n="cfg.section.models">Models</a>
+    <a href="#sec-nvfp4" data-i18n="cfg.section.nvfp4">NVFP4 quantization</a>
     <a href="#sec-backups" data-i18n="cfg.section.backups">Backups</a>
   </nav>
 
@@ -466,6 +467,32 @@ CONFIG_DASHBOARD_HTML = r"""<!doctype html>
     <div style="margin-top:10px;">
       <button class="btn" id="add-model-btn" data-i18n="cfg.action.addModel">+ Add model</button>
     </div>
+  </section>
+
+  <section id="sec-nvfp4">
+    <h2><span data-i18n="cfg.section.nvfp4">NVFP4 quantization</span><span class="help-icon" data-help="cfg_nvfp4" data-i18n-title="help.clickForInfo" title="Click for more info">?</span></h2>
+    <p class="hint" data-i18n="cfg.nvfp4.intro">Self-quantize any Hugging Face model to NVFP4 locally (NVIDIA Model Optimizer, in a Docker container) - for models that don't have a ready-made NVFP4 checkpoint on the Hub yet. Runs many minutes, needs Docker and all models unloaded first (the container uses GPU/unified memory outside the hot pool's accounting). Result is registered automatically, just like a finished download.</p>
+    <div class="row">
+      <div>
+        <label><span data-i18n="cfg.nvfp4.field.model">Hugging Face model ID</span></label>
+        <input type="text" id="nvfp4-model" placeholder="org/model-name">
+      </div>
+      <div>
+        <label><span data-i18n="cfg.nvfp4.field.tp">Tensor parallel size</span></label>
+        <input type="number" id="nvfp4-tp" min="1" value="1">
+      </div>
+      <div>
+        <label><span data-i18n="cfg.field.hfToken">HF token (optional, for gated models)</span></label>
+        <input type="text" id="nvfp4-hf-token">
+      </div>
+    </div>
+    <div style="margin-top:8px;">
+      <label><input type="checkbox" id="nvfp4-upgrade-transformers"> <span data-i18n="cfg.nvfp4.field.upgradeTransformers">Upgrade transformers before quantizing</span><span class="help-icon" data-help="cfg_nvfp4UpgradeTransformers" data-i18n-title="help.clickForInfo" title="Click for more info">?</span></label>
+    </div>
+    <div style="margin-top:10px;">
+      <button class="btn" id="nvfp4-start-btn" data-i18n="cfg.action.nvfp4Start">🧪 Quantize to NVFP4</button>
+    </div>
+    <div id="nvfp4-results" style="display:none;"></div>
   </section>
 
   <section id="sec-backups">
@@ -1248,6 +1275,110 @@ $("add-model-btn").addEventListener("click", () => {
   markDirty();
   renderModels();
 });
+
+// --- NVFP4-Selbstquantisierung (Dashboard-Button "🧪 Quantize to NVFP4") ---
+// Startet nvfp4_quantizer.start_job() (siehe dort) und pollt den Fortschritt
+// über einen rohen Log-Tail (das Docker-Skript liefert keine strukturierten
+// Zwischenschritte wie der Auto-Tuner, daher grob nur eine Textphase +
+// Log-Zeilen statt der Findings-Tabelle dort). Läuft viele Minuten (Docker-
+// Image + Model-Optimizer-Install + Modell-Download + Kalibrierung) - dieselbe
+// Robustheit gegen ein verschwindendes Box-Element wie beim Auto-Tuner oben
+// (Seite neu laden verliert die Anzeige, der Job läuft serverseitig weiter).
+const NVFP4_STEP_LABELS = {
+  starting: "cfg.nvfp4.step.starting",
+  cloning: "cfg.nvfp4.step.cloning",
+  installing: "cfg.nvfp4.step.installing",
+  downloading_model: "cfg.nvfp4.step.downloading",
+  quantizing: "cfg.nvfp4.step.quantizing",
+  exporting: "cfg.nvfp4.step.exporting",
+};
+
+async function startNvfp4Quantize() {
+  const model = $("nvfp4-model").value.trim();
+  const tp = parseInt($("nvfp4-tp").value, 10) || 1;
+  const hfToken = $("nvfp4-hf-token").value.trim();
+  const upgradeTransformers = $("nvfp4-upgrade-transformers").checked;
+  const box = $("nvfp4-results");
+  if (!model) return;
+  if (!confirm(t("confirm.nvfp4Quantize", { model }))) return;
+  box.style.display = "block";
+  box.innerHTML = `<div class="hint">${esc(t("cfg.status.nvfp4Starting"))}</div>`;
+  try {
+    const res = await fetch("/models/quantize/nvfp4", {
+      method: "POST",
+      headers: { ...authHeaders(), "Content-Type": "application/json" },
+      body: JSON.stringify({ model, tp, hf_token: hfToken || null, upgrade_transformers: upgradeTransformers }),
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.detail || res.statusText);
+    pollNvfp4(data.job_id);
+  } catch (e) {
+    box.innerHTML = `<div class="hint" style="color:var(--bad)">${esc(t("cfg.status.nvfp4Failed", { msg: e.message }))}</div>`;
+  }
+}
+
+function pollNvfp4(jobId) {
+  const tick = async () => {
+    const box = $("nvfp4-results");
+    if (!box) return;  // Box existiert (statisch), aber zur Sicherheit dieselbe Absicherung wie beim Auto-Tuner
+    let job;
+    try {
+      const res = await fetch(`/models/quantize/nvfp4/${jobId}`, { headers: authHeaders() });
+      job = await res.json();
+    } catch (e) {
+      box.innerHTML = `<div class="hint" style="color:var(--bad)">${esc(t("cfg.status.nvfp4Failed", { msg: e.message }))}</div>`;
+      return;
+    }
+    if (job.state === "running") {
+      renderNvfp4Progress(job);
+      setTimeout(tick, 3000);
+    } else {
+      renderNvfp4Result(job);
+    }
+  };
+  tick();
+}
+
+function renderNvfp4Progress(job) {
+  const box = $("nvfp4-results");
+  if (!box) return;
+  const elapsed = Math.round((Date.now() / 1000) - job.started_at);
+  const stepLabel = t(NVFP4_STEP_LABELS[job.step] || "cfg.nvfp4.step.starting");
+  const logText = (job.log_tail || []).slice(-15).join("\n");
+  box.innerHTML = `
+    <div class="card" style="margin-top:8px;">
+      <div class="hint">${esc(t("cfg.status.nvfp4Running", { step: stepLabel, elapsed }))}</div>
+      <pre class="mono" style="max-height:220px;overflow:auto;background:var(--bg-2, #0000000d);padding:8px;border-radius:6px;margin-top:8px;white-space:pre-wrap;">${esc(logText)}</pre>
+      <div class="actions-row" style="margin-top:8px;">
+        <div class="spacer"></div>
+        <button class="btn danger nvfp4-cancel-btn">${t("action.cancelDownload")}</button>
+      </div>
+    </div>`;
+  box.querySelector(".nvfp4-cancel-btn").addEventListener("click", async () => {
+    await fetch(`/models/quantize/nvfp4/${job.job_id}/cancel`, { method: "POST", headers: authHeaders() });
+  });
+}
+
+function renderNvfp4Result(job) {
+  const box = $("nvfp4-results");
+  if (!box) return;
+  const logText = (job.log_tail || []).slice(-30).join("\n");
+  const logHtml = `<pre class="mono" style="max-height:220px;overflow:auto;background:var(--bg-2, #0000000d);padding:8px;border-radius:6px;margin-top:8px;white-space:pre-wrap;">${esc(logText)}</pre>`;
+  if (job.state === "error") {
+    box.innerHTML = `<div class="hint" style="color:var(--bad)">${esc(t("cfg.status.nvfp4Failed", { msg: job.error || "" }))}</div>${logHtml}`;
+    return;
+  }
+  if (job.state === "cancelled") {
+    box.innerHTML = `<div class="hint">${esc(t("cfg.status.nvfp4Cancelled"))}</div>`;
+    return;
+  }
+  box.innerHTML = `<div class="hint" style="color:var(--ok)">${esc(t("cfg.status.nvfp4Done", { path: job.registered_model || "" }))}</div>`;
+  // Neu registriertes Modell sofort in der Models-Liste sichtbar machen, ohne
+  // dass der Nutzer die Seite neu laden muss.
+  loadConfig();
+}
+
+$("nvfp4-start-btn").addEventListener("click", startNvfp4Quantize);
 
 // --- Zustand -> Request-Body ------------------------------------------------
 function buildPayload() {

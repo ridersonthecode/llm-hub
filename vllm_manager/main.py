@@ -17,7 +17,7 @@ from fastapi.staticfiles import StaticFiles
 
 from pydantic import ValidationError
 
-from . import capability_detector, config_editor, cost_tracker, downloader, perf_tuner, process_manager, rag, telemetry
+from . import capability_detector, config_editor, cost_tracker, downloader, nvfp4_quantizer, perf_tuner, process_manager, rag, telemetry
 from .auth import ApiKeyMiddleware
 from . import catalog
 from .catalog import list_cached_models
@@ -130,6 +130,15 @@ async def lifespan(_app: FastAPI):
             logger.warning("Beim Start: %d verwaiste(n) Engine-Prozess(e) aus vorherigem Lauf beendet: %s", len(killed), killed)
     except Exception:
         logger.exception("Aufräumen verwaister Engine-Prozesse beim Start fehlgeschlagen")
+    # Downloads, die beim letzten Beenden (z.B. 'systemctl restart' für ein
+    # Update) noch liefen, automatisch fortsetzen statt sie stillschweigend zu
+    # verlieren - siehe downloader.resume_pending_downloads()-Docstring.
+    try:
+        resumed = await downloader.resume_pending_downloads()
+        if resumed:
+            logger.info("Beim Start: %d unterbrochene(n) Download(s) fortgesetzt: %s", len(resumed), resumed)
+    except Exception:
+        logger.exception("Fortsetzen unterbrochener Downloads beim Start fehlgeschlagen")
     watchdog = asyncio.create_task(_idle_watchdog())
     orphan_watchdog = asyncio.create_task(_orphan_watchdog())
     auto_reload = asyncio.create_task(_auto_reload_last_model())
@@ -300,6 +309,42 @@ async def cancel_perf_tune_endpoint(job_id: str):
     ok = await perf_tuner.cancel_job(job_id)
     if not ok:
         raise HTTPException(404, f"Performance-Test-Job '{job_id}' existiert nicht (mehr) oder läuft nicht mehr.")
+    return {"ok": True}
+
+
+@app.post("/models/quantize/nvfp4")
+async def quantize_nvfp4_endpoint(body: dict):
+    """Startet die Selbst-Quantisierung eines HF-Modells zu NVFP4 als
+    Hintergrund-Job (Dashboard-Button "NVFP4 quantisieren" im Config-Editor) -
+    siehe nvfp4_quantizer.py für den genauen Ablauf. Läuft je nach Modellgröße
+    viele Minuten (Docker-Image + Model-Optimizer-Install + Download +
+    Kalibrierung), daher Job-Polling wie bei Downloads/Auto-Tune statt einer
+    blockierenden Antwort."""
+    model = body.get("model")
+    if not model:
+        raise HTTPException(400, "'model' fehlt im Request-Body, z.B. {\"model\": \"org/name\"}.")
+    try:
+        job_id = await nvfp4_quantizer.start_job(
+            model, body.get("tp", 1), body.get("hf_token"), bool(body.get("upgrade_transformers", False)),
+        )
+    except ValueError as e:
+        raise HTTPException(409, str(e))
+    return {"job_id": job_id}
+
+
+@app.get("/models/quantize/nvfp4/{job_id}")
+async def quantize_nvfp4_status_endpoint(job_id: str):
+    job = nvfp4_quantizer.get_job(job_id)
+    if job is None:
+        raise HTTPException(404, "Unbekannte job_id.")
+    return job
+
+
+@app.post("/models/quantize/nvfp4/{job_id}/cancel")
+async def cancel_quantize_nvfp4_endpoint(job_id: str):
+    ok = await nvfp4_quantizer.cancel_job(job_id)
+    if not ok:
+        raise HTTPException(404, f"Quantisierungs-Job '{job_id}' existiert nicht (mehr) oder läuft nicht mehr.")
     return {"ok": True}
 
 

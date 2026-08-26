@@ -34,6 +34,17 @@ costs.jsonl.tmp
 last_active_model.json
 last_active_model.json.tmp
 
+# Laufende Downloads fürs automatische Fortsetzen nach 'systemctl restart'
+# (vllm_manager/downloader.py resume_pending_downloads) - enthält ggf. einen
+# HF-Token im Klartext, wie config.json auch.
+pending_downloads.json
+pending_downloads.json.tmp
+
+# Zwischenablage der NVFP4-Selbstquantisierung (vllm_manager/nvfp4_quantizer.py)
+# - wird nach jedem Job aufgeräumt, nur als Absicherung gegen Leichen bei
+# einem Absturz mitten im Lauf.
+quantize_output/
+
 # Claude Code lokale Projekt-Settings (Permissions dieser Maschine)
 .claude/settings.local.json
 
