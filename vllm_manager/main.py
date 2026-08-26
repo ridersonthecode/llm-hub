@@ -600,6 +600,21 @@ _REPETITION_LOOKBACK = 2000
 _REPETITION_MIN_PERIOD = 3
 _REPETITION_MAX_PERIOD = 400
 
+# Registry laufender Streams, damit POST /requests/{rid}/cancel (Dashboard-
+# Button "Abbrechen" bei Active Requests) eine hängende Anfrage manuell
+# beenden kann - z.B. wenn der eigentliche Client (VSCode o.ä.) längst nicht
+# mehr zuhört, die Engine aber unbemerkt weiter generiert (siehe Chat vom
+# 2026-08-26: genau dieser Fall trat beim "completely—"-Loop auf, wo die
+# automatische Erkennung nicht griff). Schließen der Upstream-Verbindung lässt
+# die Engine einen Client-Disconnect erkennen und die Generierung serverseitig
+# beenden - dieselbe Technik wie beim automatischen Loop-Abbruch unten, nur
+# von außen ausgelöst statt automatisch. rid -> httpx.Response (stream=True).
+_active_streams: dict[str, httpx.Response] = {}
+# rids, deren Abbruch WIR ausgelöst haben - unterscheidet im except-Block von
+# gen() einen echten Verbindungsfehler (weiter als "error" behandeln, Log +
+# re-raise wie bisher) von unserem eigenen absichtlichen upstream.aclose().
+_cancelled_rids: set[str] = set()
+
 
 def _min_repeats_for_period(period: int) -> int:
     if period < 10:
@@ -668,6 +683,22 @@ def _finish_and_record(rid: str, status: str, prompt_tokens=None, completion_tok
         )
 
 
+@app.post("/requests/{rid}/cancel")
+async def cancel_request_endpoint(rid: str):
+    """Bricht eine laufende, über proxy_v1() weitergeleitete Anfrage manuell ab
+    (Dashboard-Button "Abbrechen" bei Active Requests) - siehe _active_streams
+    oben. Deckt NICHT Anfragen über das Ollama-Kompatibilitäts-Layer
+    (ollama_compat.py /api/chat) ab, das nutzt keinen Streaming-Aufruf und
+    landet deshalb nie in dieser Registry; dort kommt dieselbe 404 wie bei
+    einer bereits beendeten Anfrage."""
+    upstream = _active_streams.get(rid)
+    if upstream is None:
+        raise HTTPException(404, f"Keine aktive, abbrechbare Anfrage mit id '{rid}' gefunden (evtl. bereits beendet).")
+    _cancelled_rids.add(rid)
+    await upstream.aclose()
+    return {"ok": True}
+
+
 @app.api_route("/v1/{path:path}", methods=["GET", "POST"])
 async def proxy_v1(path: str, request: Request):
     cfg = get_config()
@@ -729,6 +760,7 @@ async def proxy_v1(path: str, request: Request):
     req = client.build_request(request.method, target, content=body, headers=fwd_headers)
     upstream = await client.send(req, stream=True)
     result_status = "ok" if upstream.status_code < 400 else "error"
+    _active_streams[rid] = upstream
 
     async def gen():
         first_chunk = True
@@ -748,6 +780,22 @@ async def proxy_v1(path: str, request: Request):
         content_buf = ""
         aborted_loop = False
         abort_field = "content"
+        # TEMPORÄRE DIAGNOSE (siehe Chat vom 2026-08-26, "completely—"-Loop bei
+        # GitHubCopilotChat): _has_repetition_loop wurde nachweislich nie
+        # aufgerufen, obwohl der Client sichtbar Wiederholungstext bekam -
+        # tokens_streamed/reasoning_tokens_streamed blieben bei 0, phase nie
+        # über "prefill" hinaus. Heißt: delta enthielt weder content noch
+        # reasoning_content noch tool_calls - welches Feld es dann war, wissen
+        # wir nicht. Loggt roh, um das nächste Mal die tatsächliche Form zu
+        # sehen: (a) die ersten 3 Events unabhängig vom Inhalt (Normalfall zum
+        # Vergleich), (b) jedes Event mit delta-Keys außerhalb der drei
+        # bekannten Felder, (c) jedes Event mit >1 choices (wir lesen bisher
+        # nur choices[0]!), und (d) ab Event 300 jedes 300. als
+        # Langzeit-Stichprobe (falls delta durchgehend leer bleibt, würde (b)
+        # nie greifen). Hart gedeckelt auf 15 Zeilen/Anfrage. Wieder entfernen,
+        # sobald geklärt (siehe main.py-Docstring von _has_repetition_loop oben).
+        _debug_event_count = 0
+        _unrecognized_delta_logged = 0
         try:
             async for chunk in upstream.aiter_raw():
                 if first_chunk:
@@ -769,6 +817,18 @@ async def proxy_v1(path: str, request: Request):
                                 continue
                             choices = obj.get("choices") or []
                             delta = (choices[0].get("delta") or {}) if choices else {}
+                            _debug_event_count += 1
+                            if detect_loop and _unrecognized_delta_logged < 15 and (
+                                _debug_event_count <= 3
+                                or len(choices) > 1
+                                or (delta and set(delta.keys()) - {"content", "reasoning_content", "tool_calls", "role"})
+                                or (_debug_event_count >= 300 and _debug_event_count % 300 == 0)
+                            ):
+                                _unrecognized_delta_logged += 1
+                                logger.warning(
+                                    "SSE-Diagnose (rid=%s, event #%d, log #%d): %r",
+                                    rid, _debug_event_count, _unrecognized_delta_logged, obj,
+                                )
                             if delta.get("content"):
                                 telemetry.increment_tokens(rid)
                                 if detect_loop:
@@ -817,9 +877,20 @@ async def proxy_v1(path: str, request: Request):
                 except Exception:
                     pass
         except Exception:
-            status = "error"
-            raise
+            # Von uns selbst ausgelöster Abbruch (siehe /requests/{rid}/cancel
+            # unten) schließt upstream während dieser Schleife noch läuft - das
+            # wirft hier eine ganz normale httpx-Exception, ist aber kein
+            # Fehler, sondern das gewünschte Ergebnis. Alles andere (echter
+            # Verbindungsabbruch zur Engine etc.) bleibt wie bisher "error"
+            # inkl. Log/re-raise.
+            if rid in _cancelled_rids:
+                status = "cancelled"
+            else:
+                status = "error"
+                raise
         finally:
+            _active_streams.pop(rid, None)
+            _cancelled_rids.discard(rid)
             _finish_and_record(rid, status, prompt_tokens, completion_tokens)
             await upstream.aclose()
             await client.aclose()

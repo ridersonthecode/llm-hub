@@ -1059,6 +1059,7 @@ function updateRecentTable(recent) {
 function statusCell(r) {
   if (r.status === "ok") return `<span class="badge ok">${t("status.ok")}</span>`;
   if (r.status === "aborted_loop") return `<span class="badge error" title="${esc(t("status.abortedLoopHint"))}">${t("status.abortedLoop")}</span>`;
+  if (r.status === "cancelled") return `<span class="badge idle" title="${esc(t("status.cancelledHint"))}">${t("status.cancelled")}</span>`;
   return `<span class="badge error">${t("status.error")}</span>`;
 }
 
@@ -1249,7 +1250,7 @@ function render(data) {
     safeSetHTML($("active-request-box"), `<div class="empty">${t("empty.noActiveRequest")}</div>`);
   } else {
     safeSetHTML($("active-request-box"), `<table><thead><tr>
-      <th>${t("th.model")}</th><th>${t("th.app")}</th><th>${t("th.endpoint")}</th><th>${t("th.port")}</th><th>${t("th.rag")}${helpIcon("rag")}</th><th>${t("th.phase")}${helpIcon("phase")}</th><th>${t("th.elapsed")}</th><th>${t("th.loadTime")}${helpIcon("loadTime")}</th><th>${t("th.ttft")}${helpIcon("ttft")}</th>
+      <th>${t("th.model")}</th><th>${t("th.app")}</th><th>${t("th.endpoint")}</th><th>${t("th.port")}</th><th>${t("th.rag")}${helpIcon("rag")}</th><th>${t("th.phase")}${helpIcon("phase")}</th><th>${t("th.elapsed")}</th><th>${t("th.loadTime")}${helpIcon("loadTime")}</th><th>${t("th.ttft")}${helpIcon("ttft")}</th><th>${t("th.action")}</th>
       </tr></thead><tbody>` + active.map(r => {
         const elapsed = Date.now()/1000 - r.started_at;
         const port = (engs.find(e => e.loaded_model === r.model) || {}).port;
@@ -1276,6 +1277,7 @@ function render(data) {
           <td class="mono">${fmtDuration(elapsed)}</td>
           <td class="mono">${r.queued_ms ? fmtMs(r.queued_ms) : "–"}</td>
           <td class="mono">${fmtMs(r.ttft_ms)}</td>
+          <td><button class="btn danger cancel-request-btn" data-rid="${esc(r.id)}" data-model="${esc(r.model)}">${t("action.cancelRequest")}</button></td>
         </tr>`;
       }).join("") + `</tbody></table>`);
   }
@@ -1444,6 +1446,36 @@ async function cancelDownload(jobId, model, btn) {
 $("downloads-box").addEventListener("click", (e) => {
   const btn = e.target.closest(".cancel-download-btn");
   if (btn) cancelDownload(btn.dataset.jobId, btn.dataset.model, btn);
+});
+
+// --- Laufende Anfrage abbrechen -------------------------------------------
+// Für hängende Anfragen, bei denen der eigentliche Client (VSCode o.ä.)
+// längst nicht mehr zuhört, die Engine aber unbemerkt weiter generiert (siehe
+// main.py /requests/{rid}/cancel). Schließt serverseitig die Verbindung zur
+// Engine - der Effekt ist derselbe wie beim automatischen Loop-Abbruch, nur
+// manuell ausgelöst. Deckt keine Anfragen über das Ollama-Kompatibilitäts-
+// Layer ab (dort 404, siehe main.py-Docstring dort).
+async function cancelActiveRequest(rid, model, btn) {
+  if (!confirm(t("confirm.cancelRequest", { model: modelName(model) }))) return;
+  const original = btn.textContent;
+  btn.disabled = true;
+  btn.textContent = t("action.cancelling");
+  try {
+    const headers = {};
+    if (apiKey) headers["Authorization"] = "Bearer " + apiKey;
+    const res = await fetch(`/requests/${encodeURIComponent(rid)}/cancel`, { method: "POST", headers });
+    if (!res.ok) throw new Error(await res.text());
+    // Nächster Heartbeat (≤1s) entfernt die Zeile automatisch (wandert nach
+    // Recent Requests mit Status "cancelled").
+  } catch (e) {
+    alert(t("error.cancelRequestFailed", { msg: e.message }));
+    btn.disabled = false;
+    btn.textContent = original;
+  }
+}
+$("active-request-box").addEventListener("click", (e) => {
+  const btn = e.target.closest(".cancel-request-btn");
+  if (btn) cancelActiveRequest(btn.dataset.rid, btn.dataset.model, btn);
 });
 
 // --- Modell-Katalog / Klick-Modal ---------------------------------------
