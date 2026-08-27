@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Optional
 
 import asyncio
+import random
 import httpx
 from fastapi import FastAPI, Header, HTTPException, Request
 from fastapi.responses import StreamingResponse
@@ -645,6 +646,17 @@ _REPETITION_LOOKBACK = 2000
 _REPETITION_MIN_PERIOD = 3
 _REPETITION_MAX_PERIOD = 400
 
+# Automatischer Neuversuch nach erkannter Wiederholungsschleife (siehe
+# gen()/_build_retry_body unten, Chat vom 2026-08-27): statt sofort mit einer
+# Abbruch-Notiz zu beenden, startet der Manager bis zu _LOOP_RETRY_MAX
+# frische Generierungsversuche im SELBEN SSE-Stream nach - der Client (VS
+# Code o.ä.) sieht eine durchgehende Antwort, keinen Fehler/Timeout. Bewusst
+# NICHT gepuffert (kein Zurückrollen des bereits gestreamten Schleifentexts -
+# das würde die Zeit bis zum ersten sichtbaren Token bei JEDER Anfrage
+# erhöhen, nicht nur bei tatsächlichen Schleifen) - der Schleifentext bleibt
+# sichtbar, eine Notiz macht den Neuversuch kenntlich.
+_LOOP_RETRY_MAX = 2
+
 # Registry laufender Streams, damit POST /requests/{rid}/cancel (Dashboard-
 # Button "Abbrechen" bei Active Requests) eine hängende Anfrage manuell
 # beenden kann - z.B. wenn der eigentliche Client (VSCode o.ä.) längst nicht
@@ -707,6 +719,41 @@ def _build_loop_abort_chunk(model: str, field: str) -> bytes:
         "choices": [{"index": 0, "delta": {field: note}, "finish_reason": "stop"}],
     }
     return f"data: {json.dumps(obj)}\n\ndata: [DONE]\n\n".encode("utf-8")
+
+
+def _build_loop_retry_chunk(model: str, field: str, attempt: int) -> bytes:
+    """Wie _build_loop_abort_chunk, aber OHNE finish_reason/[DONE] - der
+    Stream läuft im selben SSE-Response mit einem frischen Generierungs-
+    versuch weiter (siehe _LOOP_RETRY_MAX). Der bereits gestreamte
+    Schleifentext lässt sich mitten im Stream nicht mehr zurückrollen, diese
+    Notiz macht wenigstens sichtbar, dass gerade automatisch neu versucht
+    wird, statt dass unvermittelt anderer Text weitergeht."""
+    note = f"\n\n[Wiederholungsschleife erkannt, automatischer Neuversuch {attempt}/{_LOOP_RETRY_MAX} …]\n\n"
+    obj = {
+        "id": "loop-retry",
+        "object": "chat.completion.chunk",
+        "created": int(time.time()),
+        "model": model,
+        "choices": [{"index": 0, "delta": {field: note}, "finish_reason": None}],
+    }
+    return f"data: {json.dumps(obj)}\n\n".encode("utf-8")
+
+
+def _build_retry_body(parsed_body: Optional[dict], attempt: int) -> Optional[bytes]:
+    """Baut den Request-Body für einen automatischen Neuversuch nach
+    erkannter Wiederholungsschleife: dieselbe Anfrage, aber mit angehobenem
+    repetition_penalty und frischem, zufälligem seed - sonst würde ein
+    deterministisch samplendes Modell (temperature=0 oder vom Client fest
+    gesetzter seed) exakt dieselbe Schleife erneut produzieren. Gibt None
+    zurück, wenn der ursprüngliche Body kein JSON war (dann ist kein
+    sinnvoller Neuversuch möglich, siehe Aufrufer)."""
+    if parsed_body is None:
+        return None
+    retry_body = dict(parsed_body)
+    base_penalty = retry_body.get("repetition_penalty") or 1.0
+    retry_body["repetition_penalty"] = min(1.5, base_penalty + 0.15 * attempt)
+    retry_body["seed"] = random.randint(0, 2**31 - 1)
+    return json.dumps(retry_body).encode("utf-8")
 
 
 def _finish_and_record(rid: str, status: str, prompt_tokens=None, completion_tokens=None) -> None:
@@ -809,7 +856,6 @@ async def proxy_v1(path: str, request: Request):
 
     async def gen():
         first_chunk = True
-        sse_buffer = b""
         full_body = bytearray()
         prompt_tokens = None
         completion_tokens = None
@@ -821,98 +867,130 @@ async def proxy_v1(path: str, request: Request):
         # greift der Default (an), analog zu ModelConfig.repetition_detection.
         mcfg = cfg.models.get(model)
         detect_loop = is_stream and (mcfg.repetition_detection if mcfg is not None else True)
-        reasoning_buf = ""
-        content_buf = ""
-        aborted_loop = False
-        abort_field = "content"
-        # TEMPORÄRE DIAGNOSE (siehe Chat vom 2026-08-26, "completely—"-Loop bei
-        # GitHubCopilotChat): _has_repetition_loop wurde nachweislich nie
-        # aufgerufen, obwohl der Client sichtbar Wiederholungstext bekam -
-        # tokens_streamed/reasoning_tokens_streamed blieben bei 0, phase nie
-        # über "prefill" hinaus. Heißt: delta enthielt weder content noch
-        # reasoning_content noch tool_calls - welches Feld es dann war, wissen
-        # wir nicht. Loggt roh, um das nächste Mal die tatsächliche Form zu
-        # sehen: (a) die ersten 3 Events unabhängig vom Inhalt (Normalfall zum
-        # Vergleich), (b) jedes Event mit delta-Keys außerhalb der drei
-        # bekannten Felder, (c) jedes Event mit >1 choices (wir lesen bisher
-        # nur choices[0]!), und (d) ab Event 300 jedes 300. als
-        # Langzeit-Stichprobe (falls delta durchgehend leer bleibt, würde (b)
-        # nie greifen). Hart gedeckelt auf 15 Zeilen/Anfrage. Wieder entfernen,
-        # sobald geklärt (siehe main.py-Docstring von _has_repetition_loop oben).
-        _debug_event_count = 0
-        _unrecognized_delta_logged = 0
+        current_upstream = upstream
+        attempt = 0
         try:
-            async for chunk in upstream.aiter_raw():
-                if first_chunk:
-                    telemetry.mark_first_token(rid)
-                    first_chunk = False
-                if is_stream:
-                    sse_buffer += chunk
-                    while b"\n\n" in sse_buffer:
-                        event, sse_buffer = sse_buffer.split(b"\n\n", 1)
-                        for line in event.split(b"\n"):
-                            if not line.startswith(b"data: "):
-                                continue
-                            payload = line[len(b"data: "):].strip()
-                            if payload == b"[DONE]":
-                                continue
-                            try:
-                                obj = json.loads(payload)
-                            except Exception:
-                                continue
-                            choices = obj.get("choices") or []
-                            delta = (choices[0].get("delta") or {}) if choices else {}
-                            _debug_event_count += 1
-                            if detect_loop and _unrecognized_delta_logged < 15 and (
-                                _debug_event_count <= 3
-                                or len(choices) > 1
-                                or (delta and set(delta.keys()) - {"content", "reasoning_content", "tool_calls", "role"})
-                                or (_debug_event_count >= 300 and _debug_event_count % 300 == 0)
-                            ):
-                                _unrecognized_delta_logged += 1
-                                logger.warning(
-                                    "SSE-Diagnose (rid=%s, event #%d, log #%d): %r",
-                                    rid, _debug_event_count, _unrecognized_delta_logged, obj,
-                                )
-                            if delta.get("content"):
-                                telemetry.increment_tokens(rid)
-                                if detect_loop:
-                                    content_buf = (content_buf + delta["content"])[-_REPETITION_LOOKBACK:]
-                                    if _has_repetition_loop(content_buf):
-                                        aborted_loop, abort_field = True, "content"
-                            # reasoning_content: separates Feld für den Denkprozess bei
-                            # Modellen mit reasoning_parser (siehe config.json) - zählt
-                            # NICHT in "content" hinein, deshalb eigener Zähler.
-                            if delta.get("reasoning_content"):
-                                telemetry.increment_reasoning_tokens(rid)
-                                if detect_loop:
-                                    reasoning_buf = (reasoning_buf + delta["reasoning_content"])[-_REPETITION_LOOKBACK:]
-                                    if _has_repetition_loop(reasoning_buf):
-                                        aborted_loop, abort_field = True, "reasoning_content"
-                            if delta.get("tool_calls"):
-                                telemetry.mark_tool_call(rid)
-                            usage = obj.get("usage")
-                            if usage:
-                                prompt_tokens = usage.get("prompt_tokens", prompt_tokens)
-                                completion_tokens = usage.get("completion_tokens", completion_tokens)
-                                # Live sichtbar machen, falls der Client stream_options.include_usage
-                                # gesetzt hat und usage schon vor dem letzten Chunk mitkommt.
-                                telemetry.update_partial_usage(rid, prompt_tokens, completion_tokens)
-                else:
-                    full_body.extend(chunk)
-                yield chunk
-                if aborted_loop:
-                    # Sichtbar machen statt einfach kommentarlos abzuschneiden,
-                    # dann den Upstream-Read beenden - schließt gleich im
-                    # finally-Block die Verbindung, was die Engine als
-                    # Client-Disconnect erkennt und die Generierung beendet.
-                    yield _build_loop_abort_chunk(model, abort_field)
-                    status = "aborted_loop"
-                    logger.warning(
-                        "Wiederholungsschleife erkannt und abgebrochen: Modell '%s', Feld '%s' (rid=%s)",
-                        model, abort_field, rid,
-                    )
+            # Äußere Schleife = automatische Neuversuche nach einer erkannten
+            # Wiederholungsschleife (siehe _LOOP_RETRY_MAX oben) - jede
+            # Iteration liest EINEN Generierungsversuch komplett durch, bei
+            # aborted_loop mit noch verbleibenden Versuchen wird current_upstream
+            # durch einen frischen Request ersetzt und die Schleife läuft
+            # weiter, statt den Stream zu beenden.
+            while True:
+                sse_buffer = b""
+                reasoning_buf = ""
+                content_buf = ""
+                aborted_loop = False
+                abort_field = "content"
+                # TEMPORÄRE DIAGNOSE (siehe Chat vom 2026-08-26, "completely—"-Loop bei
+                # GitHubCopilotChat): _has_repetition_loop wurde nachweislich nie
+                # aufgerufen, obwohl der Client sichtbar Wiederholungstext bekam -
+                # tokens_streamed/reasoning_tokens_streamed blieben bei 0, phase nie
+                # über "prefill" hinaus. Heißt: delta enthielt weder content noch
+                # reasoning_content noch tool_calls - welches Feld es dann war, wissen
+                # wir nicht. Loggt roh, um das nächste Mal die tatsächliche Form zu
+                # sehen: (a) die ersten 3 Events unabhängig vom Inhalt (Normalfall zum
+                # Vergleich), (b) jedes Event mit delta-Keys außerhalb der drei
+                # bekannten Felder, (c) jedes Event mit >1 choices (wir lesen bisher
+                # nur choices[0]!), und (d) ab Event 300 jedes 300. als
+                # Langzeit-Stichprobe (falls delta durchgehend leer bleibt, würde (b)
+                # nie greifen). Hart gedeckelt auf 15 Zeilen/Anfrage. Wieder entfernen,
+                # sobald geklärt (siehe main.py-Docstring von _has_repetition_loop oben).
+                _debug_event_count = 0
+                _unrecognized_delta_logged = 0
+                async for chunk in current_upstream.aiter_raw():
+                    if first_chunk:
+                        telemetry.mark_first_token(rid)
+                        first_chunk = False
+                    if is_stream:
+                        sse_buffer += chunk
+                        while b"\n\n" in sse_buffer:
+                            event, sse_buffer = sse_buffer.split(b"\n\n", 1)
+                            for line in event.split(b"\n"):
+                                if not line.startswith(b"data: "):
+                                    continue
+                                payload = line[len(b"data: "):].strip()
+                                if payload == b"[DONE]":
+                                    continue
+                                try:
+                                    obj = json.loads(payload)
+                                except Exception:
+                                    continue
+                                choices = obj.get("choices") or []
+                                delta = (choices[0].get("delta") or {}) if choices else {}
+                                _debug_event_count += 1
+                                if detect_loop and _unrecognized_delta_logged < 15 and (
+                                    _debug_event_count <= 3
+                                    or len(choices) > 1
+                                    or (delta and set(delta.keys()) - {"content", "reasoning_content", "tool_calls", "role"})
+                                    or (_debug_event_count >= 300 and _debug_event_count % 300 == 0)
+                                ):
+                                    _unrecognized_delta_logged += 1
+                                    logger.warning(
+                                        "SSE-Diagnose (rid=%s, event #%d, log #%d): %r",
+                                        rid, _debug_event_count, _unrecognized_delta_logged, obj,
+                                    )
+                                if delta.get("content"):
+                                    telemetry.increment_tokens(rid)
+                                    if detect_loop:
+                                        content_buf = (content_buf + delta["content"])[-_REPETITION_LOOKBACK:]
+                                        if _has_repetition_loop(content_buf):
+                                            aborted_loop, abort_field = True, "content"
+                                # reasoning_content: separates Feld für den Denkprozess bei
+                                # Modellen mit reasoning_parser (siehe config.json) - zählt
+                                # NICHT in "content" hinein, deshalb eigener Zähler.
+                                if delta.get("reasoning_content"):
+                                    telemetry.increment_reasoning_tokens(rid)
+                                    if detect_loop:
+                                        reasoning_buf = (reasoning_buf + delta["reasoning_content"])[-_REPETITION_LOOKBACK:]
+                                        if _has_repetition_loop(reasoning_buf):
+                                            aborted_loop, abort_field = True, "reasoning_content"
+                                if delta.get("tool_calls"):
+                                    telemetry.mark_tool_call(rid)
+                                usage = obj.get("usage")
+                                if usage:
+                                    prompt_tokens = usage.get("prompt_tokens", prompt_tokens)
+                                    completion_tokens = usage.get("completion_tokens", completion_tokens)
+                                    # Live sichtbar machen, falls der Client stream_options.include_usage
+                                    # gesetzt hat und usage schon vor dem letzten Chunk mitkommt.
+                                    telemetry.update_partial_usage(rid, prompt_tokens, completion_tokens)
+                    else:
+                        full_body.extend(chunk)
+                    yield chunk
+                    if aborted_loop:
+                        # Laufenden Read beenden (Engine erkennt das gleich als
+                        # Client-Disconnect und bricht die Generierung dieses
+                        # Versuchs ab) - was danach passiert, entscheidet der
+                        # Retry-Block unten (Neuversuch oder endgültiger Abbruch).
+                        break
+                if not aborted_loop:
+                    # Versuch normal zu Ende (kein Loop erkannt) - fertig, kein Retry.
                     break
+                # aborted_loop kann nur True werden, wenn detect_loop bereits True
+                # war (siehe oben) - kein zusätzlicher detect_loop-Check nötig.
+                retry_body = _build_retry_body(parsed_body, attempt + 1)
+                if attempt < _LOOP_RETRY_MAX and retry_body is not None:
+                    attempt += 1
+                    yield _build_loop_retry_chunk(model, abort_field, attempt)
+                    logger.warning(
+                        "Wiederholungsschleife erkannt, automatischer Neuversuch %d/%d: Modell '%s', Feld '%s' (rid=%s)",
+                        attempt, _LOOP_RETRY_MAX, model, abort_field, rid,
+                    )
+                    await current_upstream.aclose()
+                    retry_req = client.build_request(request.method, target, content=retry_body, headers=fwd_headers)
+                    current_upstream = await client.send(retry_req, stream=True)
+                    _active_streams[rid] = current_upstream
+                    continue
+                # Kein JSON-Body zum Modifizieren oder Neuversuche aufgebraucht -
+                # wie bisher mit sichtbarer Notiz endgültig abbrechen.
+                yield _build_loop_abort_chunk(model, abort_field)
+                status = "aborted_loop"
+                logger.warning(
+                    "Wiederholungsschleife erkannt und endgültig abgebrochen (nach %d Neuversuch(en)): "
+                    "Modell '%s', Feld '%s' (rid=%s)",
+                    attempt, model, abort_field, rid,
+                )
+                break
             if not is_stream and full_body:
                 try:
                     obj = json.loads(bytes(full_body))
@@ -937,7 +1015,7 @@ async def proxy_v1(path: str, request: Request):
             _active_streams.pop(rid, None)
             _cancelled_rids.discard(rid)
             _finish_and_record(rid, status, prompt_tokens, completion_tokens)
-            await upstream.aclose()
+            await current_upstream.aclose()
             await client.aclose()
 
     return StreamingResponse(

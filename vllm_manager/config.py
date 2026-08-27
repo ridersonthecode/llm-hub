@@ -121,8 +121,12 @@ class ModelConfig(BaseModel):
     # Text-Abschnitt mehrfach hintereinander exakt wiederkehrt - typisches
     # Symptom kleinerer Reasoning-Modelle, die im Denkprozess (<think>...)
     # hängen bleiben. Nur für gestreamte Anfragen wirksam (siehe main.py-
-    # Docstring). Default an; pro Modell abschaltbar, falls es zu
-    # Fehlalarmen bei absichtlich repetitiven Antworten kommt.
+    # Docstring). Vor dem endgültigen Abbruch startet main.py automatisch bis
+    # zu _LOOP_RETRY_MAX frische Neuversuche im selben Stream (höherer
+    # repetition_penalty + neuer seed je Versuch) - für den Client sichtbar
+    # nur als Zwischen-Hinweis, kein Fehler/Timeout. Default an; pro Modell
+    # abschaltbar, falls es zu Fehlalarmen bei absichtlich repetitiven
+    # Antworten kommt.
     repetition_detection: bool = True
     # Priorität bei der Verdrängungsauswahl in process_manager._make_room()
     # (Hot Pool voll oder Speicherbudget knapp): HÖHERE Zahl = wird SPÄTER

@@ -325,15 +325,31 @@ Wird eine Schleife erkannt:
 - Die Verbindung zur Engine wird sofort geschlossen (spart tatsächlich Rechenzeit,
   nicht nur eine kosmetische Client-seitige Kürzung - getestet mit einer Fake-Engine,
   die bestätigt, dass sie den Abbruch bemerkt und aufhört zu generieren).
-- Der Client bekommt einen abschließenden Chunk mit einem sichtbaren Hinweis
-  ("Automatisch abgebrochen: Wiederholungsschleife erkannt") im selben Feld
-  (`content` oder `reasoning_content`), in dem die Schleife erkannt wurde, plus
-  regulärem `finish_reason: "stop"` - kein kommentarloser Abbruch.
+- **Automatischer Neuversuch** (`main.py`, `_LOOP_RETRY_MAX = 2`, Anlass: Chat vom
+  2026-08-27 - Clients wie VS Code Copilot Chat sehen den regulären Abschluss
+  unten als Erfolg und bieten deshalb selbst keinen Retry an): statt sofort
+  abzubrechen, startet der Manager bis zu 2 frische Generierungsversuche **im
+  selben SSE-Stream** nach - mit angehobenem `repetition_penalty` (+0.15 je
+  Versuch, gedeckelt bei 1.5) und neuem zufälligem `seed`, damit ein
+  deterministisch samplendes Modell (z.B. `temperature≈0`) nicht exakt dieselbe
+  Schleife erneut produziert. Der Client bekommt dafür einen sichtbaren
+  Zwischen-Hinweis ("Wiederholungsschleife erkannt, automatischer Neuversuch
+  1/2 …") im selben Feld, in dem der laufende Stream danach normal weiterläuft -
+  bewusst NICHT gepuffert/zurückgerollt (der bereits gestreamte Schleifentext
+  bleibt sichtbar), sonst würde JEDE Anfrage auf die volle Antwortzeit warten
+  müssen, nur um im seltenen Schleifenfall sauber neu anfangen zu können.
+  Funktioniert nur bei einem JSON-Request-Body (praktisch immer der Fall).
+- Erst wenn auch nach 2 Neuversuchen wieder eine Schleife erkannt wird (oder gar
+  kein JSON-Body vorlag), bekommt der Client den abschließenden Chunk mit dem
+  sichtbaren Hinweis ("Automatisch abgebrochen: Wiederholungsschleife erkannt")
+  im betroffenen Feld (`content` oder `reasoning_content`) plus regulärem
+  `finish_reason: "stop"` - kein kommentarloser Abbruch.
 - Erscheint im Dashboard (Aktive/Letzte Anfragen) als eigener Status
-  "Abgebrochen (Schleife)", unterscheidbar von einem echten Fehler.
+  "Abgebrochen (Schleife)", unterscheidbar von einem echten Fehler - auch wenn
+  vorher bereits Neuversuche liefen.
 
-**Einschränkung:** wirkt nur bei gestreamten Anfragen und nur über
-`/v1/chat/completions`/`/api/chat` (nicht bei `/v1/completions` oder
+**Einschränkung:** wirkt (Erkennung wie Neuversuch) nur bei gestreamten Anfragen
+und nur über `/v1/chat/completions`/`/api/chat` (nicht bei `/v1/completions` oder
 nicht-gestreamten Requests) - ein Grund mehr, Streaming zu nutzen, wo es das
 Client-Tool zulässt.
 
