@@ -492,5 +492,22 @@
   "help.cfg_extraArgs.title": "Extra args",
   "help.cfg_extraArgs.body": "Additional command-line flags passed to vllm serve for this model, one flag/value per line (e.g. --foo on one line, then bar on the next) - for anything not covered by a dedicated field above.",
   "help.cfg_notes.title": "Notes",
-  "help.cfg_notes.body": "Free-text notes, purely informational - shown e.g. in the model info tooltip on the main dashboard. Has no effect on how the model runs."
+  "help.cfg_notes.body": "Free-text notes, purely informational - shown e.g. in the model info tooltip on the main dashboard. Has no effect on how the model runs.",
+
+  "chat.title": "Chat",
+  "chat.action.refreshModels": "Refresh model list",
+  "chat.action.send": "Send",
+  "chat.action.stop": "Stop",
+  "chat.action.clear": "Clear chat",
+  "chat.action.copyCode": "Copy",
+  "chat.action.copied": "Copied!",
+  "chat.label.maxTokens": "Max tokens",
+  "chat.label.reasoning": "Thinking",
+  "chat.placeholder.message": "Type a message… (Shift+Enter for a new line)",
+  "chat.hint.empty": "Pick a model above and send a message to start.",
+  "chat.hint.noModels": "No enabled models found",
+  "chat.status.waiting": "Waiting for the model (loads it first if not already running)…",
+  "chat.status.stopped": "Stopped.",
+  "chat.status.streamError": "Error: {msg}",
+  "chat.confirm.clear": "Clear the whole conversation?"
 }

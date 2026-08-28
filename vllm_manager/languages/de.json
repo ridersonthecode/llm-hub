@@ -492,5 +492,22 @@
   "help.cfg_extraArgs.title": "Extra Args",
   "help.cfg_extraArgs.body": "Zusätzliche Kommandozeilen-Flags, die für dieses Modell an vllm serve übergeben werden, ein Flag/Wert pro Zeile (z.B. --foo in einer Zeile, dann bar in der nächsten) - für alles, was kein eigenes Feld oben abdeckt.",
   "help.cfg_notes.title": "Notes",
-  "help.cfg_notes.body": "Freitext-Notizen, rein informativ - werden z.B. im Modell-Info-Tooltip im Haupt-Dashboard angezeigt. Haben keinen Einfluss darauf, wie das Modell läuft."
+  "help.cfg_notes.body": "Freitext-Notizen, rein informativ - werden z.B. im Modell-Info-Tooltip im Haupt-Dashboard angezeigt. Haben keinen Einfluss darauf, wie das Modell läuft.",
+
+  "chat.title": "Chat",
+  "chat.action.refreshModels": "Modellliste aktualisieren",
+  "chat.action.send": "Senden",
+  "chat.action.stop": "Stopp",
+  "chat.action.clear": "Chat leeren",
+  "chat.action.copyCode": "Kopieren",
+  "chat.action.copied": "Kopiert!",
+  "chat.label.maxTokens": "Max. Tokens",
+  "chat.label.reasoning": "Denkprozess",
+  "chat.placeholder.message": "Nachricht eingeben… (Shift+Enter für Zeilenumbruch)",
+  "chat.hint.empty": "Oben ein Modell auswählen und eine Nachricht senden, um loszulegen.",
+  "chat.hint.noModels": "Keine aktivierten Modelle gefunden",
+  "chat.status.waiting": "Warte auf das Modell (lädt es zuerst, falls noch nicht aktiv)…",
+  "chat.status.stopped": "Abgebrochen.",
+  "chat.status.streamError": "Fehler: {msg}",
+  "chat.confirm.clear": "Die ganze Unterhaltung löschen?"
 }

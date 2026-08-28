@@ -23,6 +23,7 @@ from .auth import ApiKeyMiddleware
 from . import catalog
 from .catalog import list_cached_models
 from .config import get_config
+from .chat_dashboard import router as chat_dashboard_router
 from .config_dashboard import router as config_dashboard_router
 from .cost_dashboard import router as cost_dashboard_router
 from .dashboard import router as dashboard_router
@@ -161,6 +162,7 @@ app.include_router(ollama_router)
 app.include_router(rag_dashboard_router)
 app.include_router(config_dashboard_router)
 app.include_router(cost_dashboard_router)
+app.include_router(chat_dashboard_router)
 # Reine ASGI-Middleware statt @app.middleware("http") - siehe auth.py
 # Docstring: BaseHTTPMiddleware bricht Streaming-Responses (stream: true).
 app.add_middleware(ApiKeyMiddleware)
