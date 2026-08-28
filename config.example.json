@@ -16,6 +16,8 @@
   "default_model": "NousResearch/Hermes-3-Llama-3.1-8B",
   "startup_timeout_seconds": 1800,
   "queue_timeout_seconds": 1800,
+  "max_concurrent_requests": 2,
+  "queue_debounce_seconds": 3.0,
   "default_serve_args": {
     "gpu_memory_utilization": 0.5,
     "max_model_len": 32768

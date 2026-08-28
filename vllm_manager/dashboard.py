@@ -1066,6 +1066,7 @@ function statusCell(r) {
 // Phasen einer aktiven Anfrage (siehe telemetry.py _set_phase): was die
 // Engine gerade tut, für die Active-Requests-Tabelle im Dashboard.
 const PHASE_META = {
+  queued:    { icon: "🕓", key: "phase.queued",    badgeClass: "loading" },
   loading:   { icon: "🥶", key: "phase.loading",   badgeClass: "loading" },
   prefill:   { icon: "⏳", key: "phase.prefill",   badgeClass: "idle" },
   thinking:  { icon: "💭", key: "phase.thinking",  badgeClass: "running" },

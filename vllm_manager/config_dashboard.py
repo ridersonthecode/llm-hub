@@ -354,6 +354,16 @@ CONFIG_DASHBOARD_HTML = r"""<!doctype html>
           </div>
           <label><span data-i18n="cfg.field.queueTimeout">Queue timeout (seconds)</span><span class="help-icon" data-help="cfg_queueTimeout" data-i18n-title="help.clickForInfo" title="Click for more info">?</span></label>
           <input type="number" id="f-queue_timeout_seconds" min="1">
+          <div class="row">
+            <div>
+              <label><span data-i18n="cfg.field.maxConcurrentRequests">Max concurrent requests (all models)</span><span class="help-icon" data-help="cfg_maxConcurrentRequests" data-i18n-title="help.clickForInfo" title="Click for more info">?</span></label>
+              <input type="number" id="f-max_concurrent_requests" min="1">
+            </div>
+            <div>
+              <label><span data-i18n="cfg.field.queueDebounceSeconds">Queue debounce (seconds)</span><span class="help-icon" data-help="cfg_queueDebounceSeconds" data-i18n-title="help.clickForInfo" title="Click for more info">?</span></label>
+              <input type="number" id="f-queue_debounce_seconds" min="0" step="0.5">
+            </div>
+          </div>
         </div>
       </section>
     </div>
@@ -671,6 +681,9 @@ async function loadConfig() {
   renderPriorityList();
   clearDirty();
   await loadBackups();
+  // Nach einem (erneuten) Laden der Seite an evtl. noch laufende/inzwischen
+  // fertige Auto-Tune-Jobs andocken - siehe PERF_TUNE_STORAGE_KEY oben.
+  reattachPerfTuneJobs();
 }
 
 function bindText(id, path) {
@@ -695,6 +708,8 @@ function renderForm() {
   $("f-idle_timeout_seconds").value = state.idle_timeout_seconds ?? "";
   $("f-startup_timeout_seconds").value = state.startup_timeout_seconds ?? 900;
   $("f-queue_timeout_seconds").value = state.queue_timeout_seconds ?? 1800;
+  $("f-max_concurrent_requests").value = state.max_concurrent_requests ?? 2;
+  $("f-queue_debounce_seconds").value = state.queue_debounce_seconds ?? 3.0;
 
   const dsa = state.default_serve_args || {};
   $("f-dsa_gpu_memory_utilization").value = dsa.gpu_memory_utilization ?? "";
@@ -722,7 +737,7 @@ function renderForm() {
   document.querySelectorAll("#f-host,#f-port,#f-engine_host,#f-engine_port,#f-hf_home,#f-vllm_bin,"
     + "#f-api_key_enabled,#f-api_key_key,#f-max_concurrent_models,#f-gpu_memory_ceiling,"
     + "#f-idle_timeout_seconds,#f-startup_timeout_seconds,#f-auto_reload_last_model,"
-    + "#f-queue_timeout_seconds,"
+    + "#f-queue_timeout_seconds,#f-max_concurrent_requests,#f-queue_debounce_seconds,"
     + "#f-dsa_gpu_memory_utilization,#f-dsa_max_model_len,"
     + "#f-pricing_input_per_mtok,#f-pricing_output_per_mtok,"
     + "#f-rag_enabled,#f-rag_qdrant_host,#f-rag_qdrant_port,#f-rag_default_collection,"
@@ -923,6 +938,21 @@ function renderModels() {
   document.querySelectorAll(".perf-tune-btn").forEach(el => {
     el.addEventListener("click", () => startPerfTune(parseInt(el.dataset.idx, 10)));
   });
+  // renderModels() baut die Ergebnis-Box jeder Karte oben immer leer/versteckt
+  // auf (siehe Template) - für Modelle mit einem bekannten Auto-Tune-Job
+  // (laufend oder fertig) hier wiederherstellen (setzt dabei auch den
+  // "disabled"-Zustand des Buttons, siehe renderPerfTuneProgress/-Results),
+  // sonst würde z.B. ein Klick auf "Übernehmen" bei einem von zwei Befunden
+  // (das selbst renderModels() auslöst, um das geänderte Feld anzuzeigen) den
+  // zweiten Befund mit verschwinden lassen - siehe Kommentar am Anfang des
+  // Auto-Tune-Abschnitts.
+  Object.keys(perfTuneJobs).forEach(name => {
+    const job = perfTuneJobs[name];
+    const box = perfTuneBox(name);
+    if (!box) return;  // Modell inzwischen entfernt
+    if (job.state === "running") renderPerfTuneProgress(name, job);
+    else renderPerfTuneResults(name, job);
+  });
   // Die gerade eingefügten data-i18n-Elemente (Feld-Labels, Hilfe-Icon-Titel)
   // wurden oben mit dem Englisch-Fallback-Text erzeugt - erst hierdurch werden
   // sie tatsächlich in der aktuell gewählten Sprache angezeigt.
@@ -1048,6 +1078,10 @@ async function deleteModelCacheFromEditor(name, btn) {
 // dem lokalen HF-Cache, siehe capability_detector.py) - reiner Vorschlag,
 // wird erst nach Klick auf "Übernehmen" in die Formularfelder geschrieben. ---
 async function detectCapabilities(idx) {
+  // Ab hier über den Modellnamen statt idx adressiert (siehe applyDetected
+  // unten) - derselbe Grund wie beim Auto-Tune-Fix: idx kann sich verschieben,
+  // während die Anfrage unterwegs ist (Modell hinzugefügt/entfernt), der
+  // Name nicht.
   const name = (modelsList[idx].name || "").trim();
   const box = $(`detect-results-${idx}`);
   if (!box) return;
@@ -1066,14 +1100,20 @@ async function detectCapabilities(idx) {
       box.innerHTML = `<div class="hint">${esc(t("cfg.status.detectNotCached"))}</div>`;
       return;
     }
-    renderDetectResults(idx, data);
+    renderDetectResults(name, data);
   } catch (e) {
     box.innerHTML = `<div class="hint" style="color:var(--bad)">${esc(t("cfg.status.detectFailed", { msg: e.message }))}</div>`;
   }
 }
 
-function renderDetectResults(idx, data) {
-  const box = $(`detect-results-${idx}`);
+function detectBox(name) {
+  const idx = currentModelIdx(name);
+  return idx === -1 ? null : $(`detect-results-${idx}`);
+}
+
+function renderDetectResults(name, data) {
+  const box = detectBox(name);
+  if (!box) return;  // Modell wurde entfernt, während die Anfrage unterwegs war
   const confBadge = (c) => {
     if (c === "high") return `<span class="badge ok">${t("cfg.detect.confHigh")}</span>`;
     if (c === "low") return `<span class="badge idle">${t("cfg.detect.confLow")}</span>`;
@@ -1101,18 +1141,20 @@ function renderDetectResults(idx, data) {
       <div class="actions-row" style="margin-top:10px;">
         <span class="hint">${t("cfg.hint.detectDisclaimerScoped")}</span>
         <div class="spacer"></div>
-        <button class="btn primary apply-detect-btn" data-idx="${idx}">${t("cfg.action.applyDetected")}</button>
+        <button class="btn primary apply-detect-btn">${t("cfg.action.applyDetected")}</button>
       </div>
     </div>`;
-  box.querySelector(".apply-detect-btn").addEventListener("click", () => applyDetected(idx, data));
+  box.querySelector(".apply-detect-btn").addEventListener("click", () => applyDetected(name, data));
 }
 
-function applyDetected(idx, data) {
+function applyDetected(name, data) {
   // task/vision/tool_calling/reasoning werden hier NICHT mehr übernommen -
   // die sind seit 2026-08-25 keine Nutzer-Einstellung mehr, sondern werden
   // bei jedem Engine-Start ohnehin frisch erkannt (siehe process_manager.
   // _build_command). Nur max_model_len/gpu_memory_utilization bleiben echte
   // Abwägungen, die sich lohnt hier als Startwert zu übernehmen.
+  const idx = currentModelIdx(name);
+  if (idx === -1) return;  // Modell wurde entfernt, während die Anfrage unterwegs war
   const m = modelsList[idx];
   if (data.max_model_len.suggested != null) m.max_model_len = data.max_model_len.suggested;
   if (data.gpu_memory_utilization.suggested != null) m.gpu_memory_utilization = data.gpu_memory_utilization.suggested;
@@ -1123,12 +1165,27 @@ function applyDetected(idx, data) {
 
 // --- Performance-Tuning (Dashboard-Button "🚀 Auto-tune performance") ------
 // Startet perf_tuner.start_job() (siehe dort) und pollt den Fortschritt.
-// Läuft mehrere Minuten (mehrere volle Modell-Kaltstarts) - die Box bleibt
-// dabei bewusst robust gegen ein zwischenzeitliches renderModels() (z.B.
-// weil der Nutzer ein anderes Feld ändert): der Job läuft serverseitig
-// unabhängig weiter, das Polling hört nur auf, sein DOM-Ziel zu aktualisieren,
-// falls die Box verschwunden ist (kein Fehler, einfach nichts mehr sichtbar
-// zu tun - ein Neuladen der Seite verliert dadurch aber die Anzeige).
+// Läuft mehrere Minuten (mehrere volle Modell-Kaltstarts). Zwei Bugs wurden
+// hier am 2026-08-28 behoben (siehe Chat) - beide Wurzelursache: der Job
+// wurde rein über den Akkordeon-INDEX (idx) adressiert, nicht über den
+// Modellnamen:
+// 1. "Übernehmen" bei einem von zwei Befunden ließ den zweiten unwieder-
+//    bringlich verschwinden, weil applyPerfTuneFinding() zum Aktualisieren
+//    der Formularfelder renderModels() aufruft - das baut ALLE Akkordeon-
+//    Karten (inkl. der Ergebnis-Box, siehe deren leeres <div> im Template)
+//    komplett neu auf. perfTuneJobs unten hält den zuletzt bekannten
+//    Job-Zustand pro MODELLNAME fest und renderModels() stellt die Box
+//    danach wieder her, statt sie leer zu lassen.
+// 2. Ein Seiten-Reload verlor die job_id komplett (nur eine lokale JS-
+//    Variable) - der Job lief zwar serverseitig unbeeindruckt weiter (siehe
+//    perf_tuner.py), aber im Dashboard war er danach nicht mehr auffindbar,
+//    außer man kannte die job_id von Hand. PERF_TUNE_STORAGE_KEY merkt sie
+//    jetzt pro Modellname in localStorage; reattachPerfTuneJobs() docken
+//    beim (erneuten) Laden der Seite automatisch wieder an.
+// Als Nebeneffekt beider Fixes wird die Box jetzt auch bei jedem Aufruf über
+// den aktuellen Modellnamen gefunden statt über den ursprünglich erfassten
+// idx - der sich verschieben würde, würde währenddessen ein anderes Modell
+// hinzugefügt/entfernt.
 const PERF_TUNE_STEP_LABELS = {
   queued: "cfg.perfTune.step.queued",
   baseline: "cfg.perfTune.step.baseline",
@@ -1138,48 +1195,123 @@ const PERF_TUNE_STEP_LABELS = {
   done: "cfg.perfTune.step.done",
 };
 
+const PERF_TUNE_STORAGE_KEY = "vllm_perftune_active_jobs";
+
+function loadPerfTuneJobIds() {
+  try { return JSON.parse(localStorage.getItem(PERF_TUNE_STORAGE_KEY) || "{}"); }
+  catch (e) { return {}; }
+}
+function savePerfTuneJobId(model, jobId) {
+  const map = loadPerfTuneJobIds();
+  map[model] = jobId;
+  localStorage.setItem(PERF_TUNE_STORAGE_KEY, JSON.stringify(map));
+}
+function clearPerfTuneJobId(model) {
+  const map = loadPerfTuneJobIds();
+  delete map[model];
+  localStorage.setItem(PERF_TUNE_STORAGE_KEY, JSON.stringify(map));
+}
+
+// Modellname -> zuletzt gepollter Job (auch fertige/abgebrochene/fehlgeschlagene)
+// - überlebt renderModels()-Aufrufe, siehe Kommentar oben.
+let perfTuneJobs = {};
+// Modellnamen, für die gerade eine Poll-Schleife (setTimeout-Kette) aktiv ist -
+// verhindert doppelte Schleifen, falls z.B. reattachPerfTuneJobs() und ein
+// gerade abgeschlossener startPerfTune() sich überschneiden würden.
+let perfTunePolling = new Set();
+// "modellname::testname" für bereits per "Übernehmen" übernommene Befunde -
+// da die Ergebnis-Box nach dem Übernehmen (renderModels()) jetzt aus
+// perfTuneJobs heraus neu aufgebaut wird (siehe oben), würde ohne das hier
+// derselbe Befund erneut mit aktivem "Übernehmen"-Button erscheinen, obwohl
+// er schon angewendet wurde.
+let appliedPerfTuneFindings = new Set();
+
+function currentModelIdx(name) {
+  return modelsList.findIndex(m => (m.name || "").trim() === name);
+}
+function perfTuneBox(name) {
+  const idx = currentModelIdx(name);
+  return idx === -1 ? null : $(`perf-tune-results-${idx}`);
+}
+function setPerfTuneButtonDisabled(name, disabled) {
+  // Verhindert einen zweiten Klick auf "Auto-tune performance" fürs gleiche
+  // Modell, während schon ein Job läuft (würde serverseitig ohnehin nur mit
+  // 409 abgelehnt, siehe perf_tuner.start_job - hier vorbeugend statt erst
+  // nach dem fehlgeschlagenen Request).
+  const idx = currentModelIdx(name);
+  if (idx === -1) return;
+  const btn = document.querySelector(`.perf-tune-btn[data-idx="${idx}"]`);
+  if (btn) btn.disabled = disabled;
+}
+
 async function startPerfTune(idx) {
   const name = (modelsList[idx].name || "").trim();
   const box = $(`perf-tune-results-${idx}`);
   if (!box || !name) return;
   if (!confirm(t("confirm.perfTune", { model: name }))) return;
+  // Alte "übernommen"-Markierungen dieses Modells gehören zum vorigen Testlauf -
+  // ein neuer Lauf soll wieder mit frischen, anklickbaren Befunden starten.
+  Array.from(appliedPerfTuneFindings).forEach(key => {
+    if (key.startsWith(name + "::")) appliedPerfTuneFindings.delete(key);
+  });
   box.style.display = "block";
   box.innerHTML = `<div class="hint">${esc(t("cfg.status.perfTuneStarting"))}</div>`;
   try {
     const res = await fetch(`/models/${encodeURIComponent(name)}/perf_tune`, { method: "POST", headers: authHeaders() });
     const data = await res.json();
     if (!res.ok) throw new Error(data.detail || res.statusText);
-    pollPerfTune(idx, data.job_id);
+    savePerfTuneJobId(name, data.job_id);
+    pollPerfTune(name, data.job_id);
   } catch (e) {
     box.innerHTML = `<div class="hint" style="color:var(--bad)">${esc(t("cfg.status.perfTuneFailed", { msg: e.message }))}</div>`;
   }
 }
 
-function pollPerfTune(idx, jobId) {
+function pollPerfTune(name, jobId) {
+  if (perfTunePolling.has(name)) return;  // schon eine Schleife für dieses Modell aktiv
+  perfTunePolling.add(name);
   const tick = async () => {
-    const box = $(`perf-tune-results-${idx}`);
-    if (!box) return;  // Box durch ein zwischenzeitliches renderModels() verschwunden - Job laeuft serverseitig weiter, hier nichts mehr zu tun
     let job;
     try {
       const res = await fetch(`/models/perf_tune/${jobId}`, { headers: authHeaders() });
+      if (res.status === 404) {
+        // Job serverseitig unbekannt - z.B. weil der Dienst neugestartet wurde,
+        // während er lief (JOBS ist rein in-memory, siehe perf_tuner.py).
+        // Nichts mehr zu pollen.
+        perfTunePolling.delete(name);
+        clearPerfTuneJobId(name);
+        delete perfTuneJobs[name];
+        const box = perfTuneBox(name);
+        if (box) box.innerHTML = `<div class="hint" style="color:var(--bad)">${esc(t("cfg.status.perfTuneLost"))}</div>`;
+        return;
+      }
       job = await res.json();
     } catch (e) {
-      box.innerHTML = `<div class="hint" style="color:var(--bad)">${esc(t("cfg.status.perfTuneFailed", { msg: e.message }))}</div>`;
+      perfTunePolling.delete(name);
+      const box = perfTuneBox(name);
+      if (box) box.innerHTML = `<div class="hint" style="color:var(--bad)">${esc(t("cfg.status.perfTuneFailed", { msg: e.message }))}</div>`;
       return;
     }
+    perfTuneJobs[name] = job;
+    const box = perfTuneBox(name);
+    if (!box) { perfTunePolling.delete(name); return; }  // Modell inzwischen aus der Liste entfernt
     if (job.state === "running") {
-      renderPerfTuneProgress(idx, job);
+      renderPerfTuneProgress(name, job);
       setTimeout(tick, 4000);
     } else {
-      renderPerfTuneResults(idx, job);
+      perfTunePolling.delete(name);
+      clearPerfTuneJobId(name);
+      renderPerfTuneResults(name, job);
     }
   };
   tick();
 }
 
-function renderPerfTuneProgress(idx, job) {
-  const box = $(`perf-tune-results-${idx}`);
+function renderPerfTuneProgress(name, job) {
+  setPerfTuneButtonDisabled(name, true);
+  const box = perfTuneBox(name);
   if (!box) return;
+  box.style.display = "block";
   const elapsed = Math.round((Date.now() / 1000) - job.started_at);
   const stepLabel = t(PERF_TUNE_STEP_LABELS[job.step] || "cfg.perfTune.step.baseline");
   box.innerHTML = `
@@ -1202,9 +1334,11 @@ function perfTuneVerdictBadge(verdict) {
   return `<span class="badge idle">${t("cfg.perfTune.verdict.noChange")}</span>`;
 }
 
-function renderPerfTuneResults(idx, job) {
-  const box = $(`perf-tune-results-${idx}`);
+function renderPerfTuneResults(name, job) {
+  setPerfTuneButtonDisabled(name, false);
+  const box = perfTuneBox(name);
   if (!box) return;
+  box.style.display = "block";
   if (job.state === "error") {
     box.innerHTML = `<div class="hint" style="color:var(--bad)">${esc(t("cfg.status.perfTuneFailed", { msg: job.error || "" }))}</div>`;
     return;
@@ -1214,7 +1348,8 @@ function renderPerfTuneResults(idx, job) {
     return;
   }
   const rows = job.findings.map((f, fi) => {
-    const canApply = f.verdict !== "regressed" && f.verdict !== "already_configured";
+    const alreadyApplied = appliedPerfTuneFindings.has(`${name}::${f.test}`);
+    const canApply = !alreadyApplied && f.verdict !== "regressed" && f.verdict !== "already_configured";
     if (f.test === "cudagraph_capture_sizes") {
       const detail = f.verdict === "already_configured"
         ? t("cfg.perfTune.detail.cudagraphAlready", { value: f.current_value })
@@ -1222,7 +1357,7 @@ function renderPerfTuneResults(idx, job) {
             baselineCold: f.baseline_cold_start_s, tunedCold: f.tuned_cold_start_s,
             baselineDecode: f.baseline_decode_tok_s ?? "–", tunedDecode: f.tuned_decode_tok_s ?? "–",
           });
-      return { title: t("cfg.perfTune.test.cudagraph"), verdict: f.verdict, detail, canApply, idx: fi };
+      return { title: t("cfg.perfTune.test.cudagraph"), verdict: f.verdict, detail, canApply, alreadyApplied, idx: fi };
     }
     const detail = f.verdict === "already_configured"
       ? t("cfg.perfTune.detail.speculativeAlready")
@@ -1231,7 +1366,7 @@ function renderPerfTuneResults(idx, job) {
           baselineRepetition: f.baseline_repetition_tok_s ?? "–", tunedRepetition: f.tuned_repetition_tok_s ?? "–",
           correctness: f.correctness_ok ? "✅" : "⚠️",
         });
-    return { title: t("cfg.perfTune.test.speculative"), verdict: f.verdict, detail, canApply, idx: fi };
+    return { title: t("cfg.perfTune.test.speculative"), verdict: f.verdict, detail, canApply, alreadyApplied, idx: fi };
   });
   box.innerHTML = `
     <div class="card" style="margin-top:8px;">
@@ -1240,15 +1375,18 @@ function renderPerfTuneResults(idx, job) {
           <div><strong>${esc(r.title)}</strong> ${perfTuneVerdictBadge(r.verdict)}</div>
           <div class="hint" style="margin-top:2px;">${esc(r.detail)}</div>
           ${r.canApply ? `<button class="btn primary perf-tune-apply-btn" data-fi="${r.idx}" style="margin-top:6px;">${t("cfg.action.applyDetected")}</button>` : ""}
+          ${r.alreadyApplied ? `<div class="hint" style="margin-top:6px;color:var(--ok)">${esc(t("cfg.perfTune.applied"))}</div>` : ""}
         </div>
       `).join("")}
     </div>`;
   box.querySelectorAll(".perf-tune-apply-btn").forEach(el => {
-    el.addEventListener("click", () => applyPerfTuneFinding(idx, job.findings[parseInt(el.dataset.fi, 10)]));
+    el.addEventListener("click", () => applyPerfTuneFinding(name, job.findings[parseInt(el.dataset.fi, 10)]));
   });
 }
 
-function applyPerfTuneFinding(idx, finding) {
+function applyPerfTuneFinding(name, finding) {
+  const idx = currentModelIdx(name);
+  if (idx === -1) return;
   const m = modelsList[idx];
   if (finding.test === "cudagraph_capture_sizes") {
     m.cudagraph_capture_sizes = finding.recommended_value;
@@ -1258,9 +1396,18 @@ function applyPerfTuneFinding(idx, finding) {
       m.extra_args = existing.concat(finding.recommended_extra_args);
     }
   }
+  appliedPerfTuneFindings.add(`${name}::${finding.test}`);
   markDirty();
   openAccordions.add(idx);
   renderModels();
+}
+
+function reattachPerfTuneJobs() {
+  const map = loadPerfTuneJobIds();
+  Object.entries(map).forEach(([name, jobId]) => {
+    if (currentModelIdx(name) === -1) return;  // Modell (aktuell) nicht in der Liste
+    pollPerfTune(name, jobId);
+  });
 }
 
 $("add-model-btn").addEventListener("click", () => {
@@ -1427,6 +1574,8 @@ function buildPayload() {
     auto_reload_last_model: $("f-auto_reload_last_model").checked,
     startup_timeout_seconds: parseInt($("f-startup_timeout_seconds").value, 10),
     queue_timeout_seconds: parseInt($("f-queue_timeout_seconds").value, 10),
+    max_concurrent_requests: parseInt($("f-max_concurrent_requests").value, 10),
+    queue_debounce_seconds: parseFloat($("f-queue_debounce_seconds").value),
     default_serve_args: dsa,
     default_pricing: {
       input_per_mtok: parseFloat($("f-pricing_input_per_mtok").value),

@@ -289,7 +289,14 @@ async def list_collections() -> list[dict]:
 
 async def list_documents(collection: str) -> list[dict]:
     """Gruppiert die gespeicherten Chunks nach document_id für eine
-    Dokumenten-Ansicht statt einer rohen Chunk-Liste."""
+    Dokumenten-Ansicht statt einer rohen Chunk-Liste - inklusive des
+    vollständigen, in Chunk-Reihenfolge zusammengesetzten Textes je Dokument
+    (Feld "text"), damit die Dashboard-Tabelle ganze Einträge direkt zeigen
+    kann, ohne für jedes Dokument extra get_document_chunks() nachzuladen
+    (Chat vom 2026-08-27: "ich will ganze Einträge sehen können" - vorher gab
+    es hier bewusst NUR Metadaten, siehe Git-Historie dieses Docstrings; bei
+    den überschaubaren Collection-Größen eines Heimservers wiegt der direkte
+    Überblick schwerer als der schlankere Payload)."""
     cfg = get_config()
     _require_rag(cfg)
     client = _qdrant_client(cfg)
@@ -297,6 +304,11 @@ async def list_documents(collection: str) -> list[dict]:
         if not await client.collection_exists(collection):
             return []
         docs: dict[str, dict] = {}
+        # Separat von `docs` gesammelt statt dort mitgeführt: die Chunks eines
+        # Dokuments kommen beim Scrollen nicht zwingend in chunk_index-
+        # Reihenfolge herein (Qdrant liefert nach Punkt-ID, nicht Payload-
+        # Feld) - erst nach dem vollständigen Scroll sortiert zusammensetzen.
+        doc_chunk_texts: dict[str, list[tuple[int, str]]] = {}
         offset = None
         while True:
             points, offset = await client.scroll(
@@ -320,8 +332,14 @@ async def list_documents(collection: str) -> list[dict]:
                     },
                 )
                 d["chunk_count"] = max(d["chunk_count"], pl.get("chunk_count", 0))
+                doc_chunk_texts.setdefault(doc_id, []).append(
+                    (pl.get("chunk_index") or 0, pl.get("text") or "")
+                )
             if offset is None:
                 break
+        for doc_id, d in docs.items():
+            ordered = sorted(doc_chunk_texts.get(doc_id, []), key=lambda t: t[0])
+            d["text"] = "\n\n".join(text for _, text in ordered)
         return sorted(docs.values(), key=lambda d: d.get("added_at") or 0, reverse=True)
     finally:
         await client.close()

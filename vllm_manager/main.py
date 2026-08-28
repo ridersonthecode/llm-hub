@@ -18,7 +18,7 @@ from fastapi.staticfiles import StaticFiles
 
 from pydantic import ValidationError
 
-from . import capability_detector, config_editor, cost_tracker, downloader, nvfp4_quantizer, perf_tuner, process_manager, rag, telemetry
+from . import capability_detector, config_editor, cost_tracker, downloader, nvfp4_quantizer, perf_tuner, process_manager, rag, request_queue, telemetry
 from .auth import ApiKeyMiddleware
 from . import catalog
 from .catalog import list_cached_models
@@ -290,6 +290,13 @@ async def perf_tune_endpoint(model: str):
     genauen Ablauf und die Sicherheitsvorkehrungen (nur ein Job gleichzeitig,
     Original-Config wird immer wiederhergestellt). Läuft mehrere Minuten,
     daher Job-Polling wie bei Downloads statt einer blockierenden Antwort."""
+    other = nvfp4_quantizer.get_current_job()
+    if other is not None:
+        raise HTTPException(
+            409,
+            f"Es läuft gerade eine NVFP4-Quantisierung (für '{other['model']}') - beides braucht die GPU "
+            f"exklusiv, bitte warten, bis sie fertig ist.",
+        )
     try:
         job_id = await perf_tuner.start_job(model)
     except ValueError as e:
@@ -324,6 +331,13 @@ async def quantize_nvfp4_endpoint(body: dict):
     model = body.get("model")
     if not model:
         raise HTTPException(400, "'model' fehlt im Request-Body, z.B. {\"model\": \"org/name\"}.")
+    other = perf_tuner.get_current_job()
+    if other is not None:
+        raise HTTPException(
+            409,
+            f"Es läuft gerade ein Performance-Test (für '{other['model']}') - beides braucht die GPU "
+            f"exklusiv, bitte warten, bis er fertig ist.",
+        )
     try:
         job_id = await nvfp4_quantizer.start_job(
             model, body.get("tp", 1), body.get("hf_token"), bool(body.get("upgrade_transformers", False)),
@@ -785,6 +799,13 @@ async def cancel_request_endpoint(rid: str):
     einer bereits beendeten Anfrage."""
     upstream = _active_streams.get(rid)
     if upstream is None:
+        # Noch nicht an ein Modell übergeben, sondern in der globalen
+        # Concurrency-Warteschlange (siehe request_queue.py) - ein anderer
+        # Abbruch-Pfad als bei einer bereits laufenden Anfrage, da hier noch
+        # keine Upstream-Verbindung existiert, die man schließen könnte.
+        if request_queue.cancel_waiting(rid):
+            _finish_and_record(rid, "cancelled")
+            return {"ok": True}
         raise HTTPException(404, f"Keine aktive, abbrechbare Anfrage mit id '{rid}' gefunden (evtl. bereits beendet).")
     _cancelled_rids.add(rid)
     await upstream.aclose()
@@ -831,9 +852,17 @@ async def proxy_v1(path: str, request: Request):
             f"oder in config.json unter \"models\" registrieren.",
         )
 
+    # Globale Concurrency-Grenze (siehe config.max_concurrent_requests/
+    # queue_debounce_seconds, request_queue.py) - bewusst VOR ensure_loaded():
+    # ein wartender Request soll noch keinen Modell-Kaltstart/-Wechsel
+    # auslösen oder GPU-Zeit belegen, bis er tatsächlich dran ist. Ab hier bis
+    # zum release() im finally von gen() (bzw. im except-Zweig unten bei
+    # Fehlschlag vor dem Streaming) zählt diese Anfrage als "aktiv".
+    await request_queue.acquire(rid)
     try:
         engine_status = await process_manager.ensure_loaded(model)
     except (RuntimeError, TimeoutError) as e:
+        request_queue.release()
         _finish_and_record(rid, "error")
         raise HTTPException(503, str(e))
     telemetry.mark_ready(rid)
@@ -850,7 +879,15 @@ async def proxy_v1(path: str, request: Request):
     client = httpx.AsyncClient(timeout=None)
     fwd_headers = {k: v for k, v in request.headers.items() if k.lower() not in HOP_BY_HOP}
     req = client.build_request(request.method, target, content=body, headers=fwd_headers)
-    upstream = await client.send(req, stream=True)
+    try:
+        upstream = await client.send(req, stream=True)
+    except Exception:
+        # Engine zwischen mark_ready() und hier weggebrochen (selten, aber
+        # vorgekommen) - Slot muss trotzdem wieder frei werden, sonst bliebe
+        # er dauerhaft belegt (siehe request_queue.acquire() oben).
+        request_queue.release()
+        _finish_and_record(rid, "error")
+        raise
     result_status = "ok" if upstream.status_code < 400 else "error"
     _active_streams[rid] = upstream
 
@@ -882,22 +919,6 @@ async def proxy_v1(path: str, request: Request):
                 content_buf = ""
                 aborted_loop = False
                 abort_field = "content"
-                # TEMPORÄRE DIAGNOSE (siehe Chat vom 2026-08-26, "completely—"-Loop bei
-                # GitHubCopilotChat): _has_repetition_loop wurde nachweislich nie
-                # aufgerufen, obwohl der Client sichtbar Wiederholungstext bekam -
-                # tokens_streamed/reasoning_tokens_streamed blieben bei 0, phase nie
-                # über "prefill" hinaus. Heißt: delta enthielt weder content noch
-                # reasoning_content noch tool_calls - welches Feld es dann war, wissen
-                # wir nicht. Loggt roh, um das nächste Mal die tatsächliche Form zu
-                # sehen: (a) die ersten 3 Events unabhängig vom Inhalt (Normalfall zum
-                # Vergleich), (b) jedes Event mit delta-Keys außerhalb der drei
-                # bekannten Felder, (c) jedes Event mit >1 choices (wir lesen bisher
-                # nur choices[0]!), und (d) ab Event 300 jedes 300. als
-                # Langzeit-Stichprobe (falls delta durchgehend leer bleibt, würde (b)
-                # nie greifen). Hart gedeckelt auf 15 Zeilen/Anfrage. Wieder entfernen,
-                # sobald geklärt (siehe main.py-Docstring von _has_repetition_loop oben).
-                _debug_event_count = 0
-                _unrecognized_delta_logged = 0
                 async for chunk in current_upstream.aiter_raw():
                     if first_chunk:
                         telemetry.mark_first_token(rid)
@@ -918,18 +939,6 @@ async def proxy_v1(path: str, request: Request):
                                     continue
                                 choices = obj.get("choices") or []
                                 delta = (choices[0].get("delta") or {}) if choices else {}
-                                _debug_event_count += 1
-                                if detect_loop and _unrecognized_delta_logged < 15 and (
-                                    _debug_event_count <= 3
-                                    or len(choices) > 1
-                                    or (delta and set(delta.keys()) - {"content", "reasoning_content", "tool_calls", "role"})
-                                    or (_debug_event_count >= 300 and _debug_event_count % 300 == 0)
-                                ):
-                                    _unrecognized_delta_logged += 1
-                                    logger.warning(
-                                        "SSE-Diagnose (rid=%s, event #%d, log #%d): %r",
-                                        rid, _debug_event_count, _unrecognized_delta_logged, obj,
-                                    )
                                 if delta.get("content"):
                                     telemetry.increment_tokens(rid)
                                     if detect_loop:
@@ -1015,6 +1024,7 @@ async def proxy_v1(path: str, request: Request):
             _active_streams.pop(rid, None)
             _cancelled_rids.discard(rid)
             _finish_and_record(rid, status, prompt_tokens, completion_tokens)
+            request_queue.release()
             await current_upstream.aclose()
             await client.aclose()
 

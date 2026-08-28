@@ -89,6 +89,20 @@ def _set_phase(rid: str, phase: str) -> None:
         _publish({"type": "phase_change"})
 
 
+def mark_queued(rid: str) -> None:
+    """Anfrage wartet in der globalen Concurrency-Warteschlange (siehe
+    request_queue.py) auf einen freien Slot - noch VOR jedem Modell-Kaltstart/
+    -Wechsel. Eigene Phase, damit das Dashboard "wartet auf Slot" von "Modell
+    lädt gerade" (Phase "loading") unterscheiden kann."""
+    _set_phase(rid, "queued")
+
+
+def mark_dequeued(rid: str) -> None:
+    """Slot wurde zugeteilt (siehe request_queue.acquire) - weiter mit dem
+    normalen Ablauf (Modell laden/Anfrage weiterreichen), siehe mark_ready()."""
+    _set_phase(rid, "loading")
+
+
 def mark_ready(rid: str) -> None:
     """Modell ist geladen, Anfrage wird jetzt an die Engine weitergereicht."""
     r = active_requests.get(rid)

@@ -197,6 +197,27 @@ class Config(BaseModel):
     # an ein bereits geladenes/ladendes Modell warten NIE in dieser
     # Warteschlange, nur echte Modellwechsel.
     queue_timeout_seconds: int = 1800
+    # Obergrenze gleichzeitig BEARBEITETER Anfragen, über ALLE Modelle hinweg -
+    # unabhängig vom Hot Pool (max_concurrent_models begrenzt nur, wie viele
+    # Modelle gleichzeitig GELADEN sind, nicht wie viele Anfragen parallel
+    # laufen). Trifft eine (max_concurrent_requests+1)-te Anfrage ein, wartet
+    # sie in einer Warteschlange (siehe request_queue.py), statt sofort mit
+    # allen anderen um GPU-Zeit zu konkurrieren. Default 2: auf einem
+    # Heimserver mit einer GPU/Unified-Memory-System bringt echte Parallelität
+    # jenseits weniger Anfragen ohnehin kaum noch etwas (geteilte Rechenzeit,
+    # geteilter Speicher), macht aber jede einzelne Anfrage langsamer.
+    max_concurrent_requests: int = 2
+    # Siehe max_concurrent_requests oben. Eine wartende Anfrage wird NICHT
+    # sofort übergeben, sobald ein Slot frei wird, sondern erst, nachdem für
+    # mindestens so viele Sekunden GAR KEINE neue Anfrage mehr eingetroffen
+    # ist (über alle Anfragen hinweg, nicht nur die wartende selbst) - siehe
+    # request_queue.py-Moduldocstring für den Grund (Clients wie VS Code/
+    # GitHub Copilot Chat schicken bei Retry/Abbruch/Tool-Aufrufen oft mehrere
+    # Anfragen in schneller Folge; ohne diese Ruhephase würde der Manager
+    # womöglich genau die Anfrage an ein Modell übergeben, die der Client
+    # Sekundenbruchteile später selbst schon wieder verwirft). 0 = kein
+    # Debounce, wartende Anfragen werden sofort bei freiem Slot übergeben.
+    queue_debounce_seconds: float = 3.0
     default_serve_args: dict = Field(default_factory=dict)
     models: dict[str, ModelConfig] = Field(default_factory=dict)
     rag: RagConfig = Field(default_factory=RagConfig)

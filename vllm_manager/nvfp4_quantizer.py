@@ -363,3 +363,16 @@ def list_jobs() -> list[dict]:
 
 def get_job(job_id: str) -> Optional[dict]:
     return JOBS.get(job_id)
+
+
+def get_current_job() -> Optional[dict]:
+    """Für die GPU-exklusiv-Prüfung ANDERER Hintergrund-Jobsysteme (siehe
+    main.py: perf_tune_endpoint) - liefert den gerade laufenden Job dieses
+    Moduls, falls einer läuft, sonst None. Siehe perf_tuner.get_current_job()
+    für die Begründung, warum das den echten JOBS-Zustand abfragt statt ein
+    zweites Flag mitzuführen."""
+    if _current_job_id is not None:
+        job = JOBS.get(_current_job_id)
+        if job is not None and job["state"] == "running":
+            return job
+    return None

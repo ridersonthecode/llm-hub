@@ -120,6 +120,14 @@ RAG_DASHBOARD_HTML = r"""<!doctype html>
     background:var(--panel-2); border:1px solid var(--border); border-radius:8px;
     padding:12px; font-family:var(--mono); font-size:12px; white-space:pre-wrap; word-break:break-word; margin:0;
   }
+  /* Ganzer Text steckt im DOM (fürs Sortieren/Suchen der DataTable), sichtbar
+     aber auf eine Zeile gekürzt - voller Text per Browser-Tooltip (title-
+     Attribut) oder vollständig/formatiert per "Anzeigen"-Button im Modal. */
+  #documents-table .text-preview {
+    display:-webkit-box; -webkit-line-clamp:2; -webkit-box-orient:vertical;
+    overflow:hidden; max-width:420px; white-space:normal; word-break:break-word;
+    font-size:12.5px; color:var(--text-dim); line-height:1.4;
+  }
   .app-footer {
     margin-top:32px; padding-top:16px; border-top:1px solid var(--border);
     display:flex; align-items:center; justify-content:center; gap:6px;
@@ -471,6 +479,17 @@ function initDocumentsTable() {
     language: { emptyTable: t("empty.noDocuments") },
     columns: [
       { title: t("th.source"), data: null, render: (d, type) => type === "display" ? esc(d.filename || d.source || "–") : (d.filename || d.source || "") },
+      // Voller Text des Dokuments (siehe rag.list_documents - in Chunk-
+      // Reihenfolge zusammengesetzt), gekürzt in der Zelle angezeigt
+      // (CSS text-ellipsis-preview, per Klick/"Anzeigen"-Button vollständig
+      // im Modal, siehe openDocumentModal) - Sortieren/Suchen laufen dank
+      // orderData/type "display" trotzdem über den VOLLEN Text.
+      {
+        title: t("th.text"), data: null,
+        render: (d, type) => type !== "display"
+          ? (d.text || "")
+          : `<span class="text-preview" title="${esc(d.text || "")}">${esc(d.text || "–")}</span>`,
+      },
       { title: t("th.chunks"), data: null, render: (d, type) => type !== "display" ? (d.chunk_count ?? -1) : (d.chunk_count ?? "–") },
       { title: t("th.addedAt"), data: null, render: (d, type) => type !== "display" ? (d.added_at ?? 0) : (d.added_at ? new Date(d.added_at * 1000).toLocaleString(localeFor(currentLang)) : "–") },
       {
@@ -492,6 +511,15 @@ function initDocumentsTable() {
   documentsTable.on("draw", () => {
     document.querySelectorAll("#documents-table .view-doc-btn").forEach(btn => {
       btn.addEventListener("click", () => openDocumentModal(selectedCollection, btn.dataset.id, btn.dataset.title));
+    });
+    // Gekürzte Textvorschau selbst anklickbar - derselbe Weg zum vollen
+    // Text wie über den "Anzeigen"-Button, nur ohne extra Button-Treffer.
+    document.querySelectorAll("#documents-table .text-preview").forEach(el => {
+      el.style.cursor = "pointer";
+      el.addEventListener("click", () => {
+        const btn = el.closest("tr").querySelector(".view-doc-btn");
+        if (btn) openDocumentModal(selectedCollection, btn.dataset.id, btn.dataset.title);
+      });
     });
     document.querySelectorAll("#documents-table .del-doc-btn").forEach(btn => {
       btn.addEventListener("click", async () => {

@@ -121,11 +121,33 @@ def _detect_max_model_len(hf_cfg: dict) -> dict:
 
 
 def _model_weights_bytes(model_dir: Path) -> Optional[int]:
-    """Gesamtgröße der Modell-Gewichte aus dem safetensors-Index (steht dort
-    bereits vor-berechnet als metadata.total_size, kein Aufsummieren aller
-    Shard-Dateien nötig). Fällt auf das Aufsummieren der *.safetensors-
-    Dateigrößen im Verzeichnis zurück, falls kein Index existiert (Modelle
-    mit nur einer einzigen .safetensors-Datei haben oft keinen)."""
+    """Gesamtgröße der Modell-Gewichte - primär durch Aufsummieren der
+    tatsächlichen *.safetensors-Dateigrößen im Verzeichnis (folgt dabei
+    HF-Hub-typischen Symlinks in den blobs/-Cache automatisch, da Path.stat()
+    per Default dem Symlink folgt statt dessen eigene Größe zu nehmen).
+
+    WICHTIG (live beobachtet, 2026-08-27 - Chat "Kommunikation mit LLM-
+    Modellen prüfen"): frühere Version nahm bevorzugt model.safetensors.
+    index.json's metadata.total_size, weil dort angeblich schon vorberechnet
+    (kein Aufsummieren nötig) - bei zai-org/GLM-4.7-Flash war dieser Wert im
+    HF-Repo aber schlicht FALSCH: 29.1 GiB laut Index, tatsächlich 58.16 GiB
+    auf der Platte (exakt Faktor 2, vermutlich ein Rest von einer anderen
+    Quantisierungsstufe im selben Repo). Das drückte den geschätzten
+    gpu_memory_utilization-Startwert bei der automatischen Registrierung auf
+    0.29 statt der nötigen ~0.58 - zwei komplette Kaltstart-Fehlschläge samt
+    JEWEILS erneutem Laden der vollen 58 GiB von der Platte, bevor process_
+    manager._autocorrect_kv_cache_deficit() den Wert mühsam hochkorrigiert
+    hatte. Die tatsächlichen Dateigrößen auf der Platte sind IMMER korrekt
+    (das lädt vLLM ja tatsächlich) und kosten nur billige stat()-Aufrufe,
+    keinen echten Datei-Read - der Index-Wert dient nur noch als Fallback,
+    falls das Verzeichnis aus irgendeinem Grund keine *.safetensors-Dateien
+    hat (z.B. ein anderes Checkpoint-Format)."""
+    try:
+        total = sum(f.stat().st_size for f in model_dir.glob("*.safetensors"))
+        if total:
+            return total
+    except OSError:
+        pass
     index_path = model_dir / "model.safetensors.index.json"
     if index_path.exists():
         try:
@@ -135,20 +157,39 @@ def _model_weights_bytes(model_dir: Path) -> Optional[int]:
                 return int(total)
         except (OSError, json.JSONDecodeError):
             pass
-    try:
-        total = sum(f.stat().st_size for f in model_dir.glob("*.safetensors"))
-        return total or None
-    except OSError:
-        return None
+    return None
 
 
 def _total_device_memory_bytes() -> Optional[int]:
-    """Gesamter GPU-Speicher in Bytes - siehe process_manager._query_gpu_
-    memory_gib() für dieselbe torch.cuda.mem_get_info()-Quelle. Bewusst NICHT
-    nvidia-smi (liefert auf diesem Unified-Memory-System kein memory.total).
-    None, falls torch/CUDA hier (API-Server-Prozess, kein Engine-Prozess)
-    aus irgendeinem Grund nicht verfügbar ist - dann bleibt gpu_memory_
-    utilization unbestimmt statt einer möglicherweise falschen Schätzung."""
+    """Gesamter Speicher, gegen den gpu_memory_utilization geschätzt wird.
+
+    WICHTIG (live beobachtet, 2026-08-27 - Chat "Kommunikation mit LLM-
+    Modellen prüfen": ein frisch heruntergeladenes 58-GiB-Modell wurde mit
+    gpu_memory_utilization=0.29 registriert, obwohl die Gewichtsgröße allein
+    schon ~0.58 gebraucht hätte - zwei folgende Kaltstart-Fehlschläge samt
+    JEWEILS komplettem Neu-Laden der 58 GiB von der Platte, bevor die
+    automatische KV-Cache-Korrektur (process_manager._autocorrect_kv_cache_
+    deficit) den Wert mühsam hochkorrigiert hatte). Ursache: die alte Version
+    fragte torch.cuda.mem_get_info() ab - dieselbe API, die process_manager.
+    _query_gpu_memory_gib() nutzt, dort aber bewusst nur für den FREIEN
+    Speicher, NICHT den GESAMTEN (siehe dessen Docstring: die Abfrage kann
+    unter Speicherdruck fehlschlagen oder inkonsistente Werte liefern, wenn
+    parallel eine andere Engine gerade selbst mitten im Speicher-Profiling
+    steckt). Auf diesem Unified-Memory-System (GB10) ist der "gesamte
+    Speicher" aber ohnehin eine feste Konstante, die mit KEINER Engine-
+    Aktivität schwankt - /proc/meminfo's MemTotal (dieselbe Quelle, die
+    system_metrics._read_ram() fürs RAM-Dashboard nutzt) liefert genau das,
+    ohne jede CUDA-Abfrage und ohne jede Abhängigkeit vom aktuellen
+    Belegungszustand einer anderen Engine. torch.cuda.mem_get_info() bleibt
+    nur als Fallback, falls /proc/meminfo mal nicht lesbar ist (anderes
+    Betriebssystem o.ä.)."""
+    try:
+        with open("/proc/meminfo") as f:
+            for line in f:
+                if line.startswith("MemTotal:"):
+                    return int(line.split()[1]) * 1024  # kB -> Bytes
+    except (OSError, ValueError, IndexError):
+        pass
     try:
         import torch
         _free, total = torch.cuda.mem_get_info()

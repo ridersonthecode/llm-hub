@@ -135,6 +135,21 @@ def get_job(job_id: str) -> Optional[dict]:
     return JOBS.get(job_id)
 
 
+def get_current_job() -> Optional[dict]:
+    """Für die GPU-exklusiv-Prüfung ANDERER Hintergrund-Jobsysteme (siehe
+    main.py: quantize_nvfp4_endpoint) - liefert den gerade laufenden Job
+    dieses Moduls, falls einer läuft, sonst None. Fragt bewusst den
+    tatsächlichen JOBS-Zustand ab statt ein zweites, separat gepflegtes Flag
+    zu halten - sonst müsste jede der vielen return-Stellen in _run_job/
+    cancel_job zusätzlich synchron gehalten werden (genau die Art Bug, die
+    hier vermieden werden soll)."""
+    if _current_job_id is not None:
+        job = JOBS.get(_current_job_id)
+        if job is not None and job["state"] == "running":
+            return job
+    return None
+
+
 def list_jobs() -> list[dict]:
     return sorted(JOBS.values(), key=lambda j: j["started_at"], reverse=True)
 

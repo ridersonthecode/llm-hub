@@ -300,7 +300,11 @@ def _allocate_port(cfg: Config) -> int:
     )
 
 
-_gpu_mem_query_broken = False  # nach dem ersten Fehlschlag nicht bei jedem Modell-Load erneut versuchen
+_gpu_mem_query_broken_until = 0.0  # monotonic-Zeitstempel, siehe _query_gpu_memory_gib
+# Nach einem Fehlschlag NICHT dauerhaft aufgeben (siehe _query_gpu_memory_gib-
+# Docstring: "WICHTIG" 2026-08-27), nur für diese Dauer pausieren und dann
+# automatisch erneut versuchen.
+_GPU_MEM_QUERY_RETRY_COOLDOWN = 60.0
 
 
 def _read_mem_available_gib() -> Optional[float]:
@@ -342,9 +346,29 @@ def _query_gpu_memory_gib() -> tuple[Optional[float], Optional[float]]:
     CUDA-Wert und MemAvailable verwenden - nie SCHLECHTER als die reine
     CUDA-Zahl (falls /proc/meminfo mal nicht lesbar ist oder dieses konkrete
     Deployment doch auf einer klassischen dGPU statt Unified Memory läuft),
-    aber korrigiert das Unterschätzen auf genau diesem Hardware-Typ."""
-    global _gpu_mem_query_broken
-    if _gpu_mem_query_broken:
+    aber korrigiert das Unterschätzen auf genau diesem Hardware-Typ.
+
+    WICHTIG (live beobachtet, 2026-08-27 - Chat "Kommunikation mit LLM-
+    Modellen prüfen"): torch.cuda.mem_get_info() aus einem zweiten Prozess
+    heraus, während eine Engine bereits fast den gesamten Unified-Memory-Pool
+    belegt (genau die Situation, in der DIESER Live-Check am wichtigsten
+    wäre!), kann selbst mit einem harmlosen "CUDA error: out of memory"
+    fehlschlagen (der kleine CUDA-Kontext, den der Aufruf einmalig braucht,
+    passt dann nicht mehr) - reproduziert live durch zwei Aufrufe kurz
+    hintereinander, einer schlug fehl, der andere (bei etwas mehr Luft)
+    lief durch. Ein einzelner solcher Ausrutscher darf den Live-Check daher
+    NICHT für den Rest der Prozesslaufzeit abschalten (das war der alte
+    Bug: `_gpu_mem_query_broken = True` blieb permanent gesetzt) - sonst
+    startet jedes folgende Modell blind gegen die konfigurierten
+    gpu_memory_utilization-Werte, crasht bei einem zu knappen Wert erst
+    nach vollem Kaltstart mit dem KV-Cache-Defizit-Fehler und braucht dann
+    mehrere komplette Neuversuche (bei großen Checkpoints jeweils mehrere
+    Minuten) statt vorher schon zu wissen, dass es eng wird. Fix: nur
+    kurz pausieren (_GPU_MEM_QUERY_RETRY_COOLDOWN), dann automatisch
+    erneut versuchen, statt für immer aufzugeben."""
+    global _gpu_mem_query_broken_until
+    now = time.monotonic()
+    if now < _gpu_mem_query_broken_until:
         return None, None
     try:
         import torch
@@ -357,12 +381,14 @@ def _query_gpu_memory_gib() -> tuple[Optional[float], Optional[float]]:
         return free_gib, total_gib
     except Exception:
         logger.warning(
-            "Live-GPU-Speichercheck nicht möglich (torch.cuda.mem_get_info) - "
-            "verlasse mich fortan nur noch auf die konfigurierten "
-            "gpu_memory_utilization-Werte (gpu_memory_ceiling)",
+            "Live-GPU-Speichercheck fehlgeschlagen (torch.cuda.mem_get_info) - "
+            "verlasse mich für die nächsten %d Sekunden nur auf die konfigurierten "
+            "gpu_memory_utilization-Werte (gpu_memory_ceiling), danach automatisch "
+            "neuer Versuch (siehe Docstring - kein Dauerzustand mehr).",
+            int(_GPU_MEM_QUERY_RETRY_COOLDOWN),
             exc_info=True,
         )
-        _gpu_mem_query_broken = True
+        _gpu_mem_query_broken_until = now + _GPU_MEM_QUERY_RETRY_COOLDOWN
         return None, None
 
 

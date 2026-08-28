@@ -19,7 +19,7 @@ import httpx
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import JSONResponse
 
-from . import process_manager, rag, telemetry
+from . import process_manager, rag, request_queue, telemetry
 from .catalog import list_cached_models
 from .config import Config, get_config
 
@@ -137,9 +137,14 @@ async def api_chat(request: Request):
         openai_body["repetition_penalty"] = mcfg.repetition_penalty
 
     rid = telemetry.start_request(model, "api/chat", user_agent=request.headers.get("user-agent"))
+    # Dieselbe globale Concurrency-Grenze wie proxy_v1() in main.py (siehe
+    # request_queue.py) - gilt "egal an welches Modell", also auch für
+    # Alt-Clients über dieses Ollama-Kompatibilitäts-Layer.
+    await request_queue.acquire(rid)
     try:
         engine_status = await process_manager.ensure_loaded(model)
     except (RuntimeError, TimeoutError) as e:
+        request_queue.release()
         telemetry.finish_request(rid, "error")
         raise HTTPException(503, str(e))
     telemetry.mark_ready(rid)
@@ -157,10 +162,12 @@ async def api_chat(request: Request):
         async with httpx.AsyncClient(timeout=None) as client:
             upstream = await client.post(target, json=openai_body)
     except Exception as e:
+        request_queue.release()
         telemetry.finish_request(rid, "error")
         raise HTTPException(502, f"vLLM-Engine für '{model}' nicht erreichbar: {e}")
 
     if upstream.status_code >= 400:
+        request_queue.release()
         telemetry.finish_request(rid, "error")
         raise HTTPException(upstream.status_code, upstream.text)
 
@@ -169,6 +176,7 @@ async def api_chat(request: Request):
     choice = (data.get("choices") or [{}])[0]
     content = (choice.get("message") or {}).get("content", "")
     usage = data.get("usage") or {}
+    request_queue.release()
     telemetry.finish_request(rid, "ok", usage.get("prompt_tokens"), usage.get("completion_tokens"))
 
     duration_ns = int((time.time() - started) * 1e9)
