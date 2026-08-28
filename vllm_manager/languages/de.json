@@ -496,6 +496,7 @@
 
   "chat.title": "Chat",
   "chat.action.refreshModels": "Modellliste aktualisieren",
+  "chat.action.scrollToBottom": "Nach unten scrollen",
   "chat.action.send": "Senden",
   "chat.action.stop": "Stopp",
   "chat.action.clear": "Chat leeren",

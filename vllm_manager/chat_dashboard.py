@@ -103,12 +103,27 @@ CHAT_DASHBOARD_HTML = r"""<!doctype html>
   .toolbar label { font-size:12px; color:var(--text-dim); display:flex; align-items:center; gap:6px; }
   #max-tokens { width:80px; background:var(--panel); border:1px solid var(--border); color:var(--text); border-radius:8px; height:32px; padding:0 8px; font-size:13px; }
 
+  .messages-wrap { position:relative; flex:1 1 auto; min-height:0; display:flex; }
   #messages {
     flex:1 1 auto; min-height:0; overflow-y:auto; background:var(--panel);
     border:1px solid var(--border); border-radius:12px; padding: 16px;
     display:flex; flex-direction:column; gap:14px;
   }
   .empty-hint { color:var(--text-dim); font-size:13px; text-align:center; margin:auto; }
+
+  /* Erscheint nur, wenn während des Streamens hochgescrollt wurde (siehe
+     JS: stickToBottom) - liegt bewusst AUSSERHALB von #messages (eigenes
+     Geschwisterelement in .messages-wrap), damit es beim Neuaufbau von
+     #messages.innerHTML bei jedem Chunk nicht mit weggerissen wird und der
+     Klick-Listener nur einmal gebunden werden muss. */
+  .scroll-bottom-btn {
+    position:absolute; bottom:14px; left:50%; transform:translateX(-50%);
+    width:36px; height:36px; border-radius:50%; z-index:2;
+    background:var(--panel); border:1px solid var(--border); color:var(--text);
+    box-shadow:0 2px 10px rgba(0,0,0,.18); cursor:pointer; font-size:15px;
+    display:none; align-items:center; justify-content:center;
+  }
+  .scroll-bottom-btn:hover { background:var(--panel-2); }
 
   .msg-row { display:flex; }
   .msg-row.user { justify-content:flex-end; }
@@ -190,7 +205,10 @@ CHAT_DASHBOARD_HTML = r"""<!doctype html>
       <button class="btn danger" id="clear-btn" data-i18n="chat.action.clear">Clear chat</button>
     </div>
 
-    <div id="messages"><div class="empty-hint" id="empty-hint" data-i18n="chat.hint.empty">Pick a model above and send a message to start.</div></div>
+    <div class="messages-wrap">
+      <div id="messages"><div class="empty-hint" id="empty-hint" data-i18n="chat.hint.empty">Pick a model above and send a message to start.</div></div>
+      <button class="scroll-bottom-btn" id="scroll-bottom-btn" data-i18n-title="chat.action.scrollToBottom" title="Scroll to bottom">⬇</button>
+    </div>
 
     <div class="status-line" id="status-line"></div>
 
@@ -413,6 +431,20 @@ $("messages").addEventListener("click", async (e) => {
 // /dashboard/status liefert models_catalog (Name, task, enabled, ...) ohne
 // jegliche Secrets (anders als GET /config, das u.a. hf_token/api_key.key roh
 // mitliefert - für eine reine Modellliste hier bewusst NICHT verwendet).
+// Zuletzt gewähltes Modell pro Browser gemerkt (localStorage - wie Theme/
+// Sprache, siehe oben) und beim nächsten Öffnen der Seite automatisch wieder
+// vorausgewählt. NUR die Modellwahl, nicht der Chatverlauf selbst (siehe
+// Chat vom 2026-08-28 - Verlaufs-Persistenz wurde bewusst verworfen).
+const LAST_MODEL_STORAGE_KEY = "vllm_chat_last_model";
+function saveLastModel(model) {
+  try { localStorage.setItem(LAST_MODEL_STORAGE_KEY, model); }
+  catch (e) { /* z.B. Privatmodus/voller Speicher - nur Komfortfunktion, kein Problem */ }
+}
+function loadLastModel() {
+  try { return localStorage.getItem(LAST_MODEL_STORAGE_KEY) || ""; }
+  catch (e) { return ""; }
+}
+
 async function populateModelSelect() {
   const sel = $("model-select");
   const prev = sel.value;
@@ -428,13 +460,19 @@ async function populateModelSelect() {
     sel.innerHTML = models.map(m =>
       `<option value="${esc(m.model)}">${esc(m.model)}${m.loaded ? " ⚡" : ""}</option>`
     ).join("");
+    // Reihenfolge: 1) schon in dieser Seite ausgewählt (z.B. vor einem
+    // manuellen 🔄-Klick) - 2) beim allerersten Laden das zuletzt genutzte
+    // Modell dieses Browsers - 3) das globale default_model aus config.json.
+    const lastModel = loadLastModel();
     if (models.some(m => m.model === prev)) sel.value = prev;
+    else if (lastModel && models.some(m => m.model === lastModel)) sel.value = lastModel;
     else if (data.default_model && models.some(m => m.model === data.default_model)) sel.value = data.default_model;
   } catch (e) {
     sel.innerHTML = `<option value="">${esc(t("chat.hint.noModels"))}</option>`;
   }
 }
 $("refresh-models-btn").addEventListener("click", populateModelSelect);
+$("model-select").addEventListener("change", (e) => { if (e.target.value) saveLastModel(e.target.value); });
 
 // --- Chat-Zustand ----------------------------------------------------------
 // Nur im Speicher dieser Seite - kein Persistieren über einen Reload hinweg
@@ -458,7 +496,39 @@ function setStatus(text, isError) {
   el.classList.toggle("err", !!isError);
 }
 
+// Auto-Scroll standardmäßig an, schaltet sich selbst ab, sobald während des
+// Streamens hochgescrollt wird (siehe #messages "scroll"-Listener unten) -
+// erst ein Klick auf den Pfeil-Button ODER manuelles Zurückscrollen ganz nach
+// unten aktiviert es wieder.
+let stickToBottom = true;
+const NEAR_BOTTOM_PX = 32; // Toleranz, damit "praktisch unten" auch als unten zählt
+
+function isNearBottom() {
+  const box = $("messages");
+  return box.scrollHeight - box.scrollTop - box.clientHeight < NEAR_BOTTOM_PX;
+}
+function updateScrollButton() {
+  $("scroll-bottom-btn").style.display = stickToBottom ? "none" : "flex";
+}
+$("messages").addEventListener("scroll", () => {
+  const nearBottom = isNearBottom();
+  if (nearBottom !== stickToBottom) {
+    stickToBottom = nearBottom;
+    updateScrollButton();
+  }
+});
+$("scroll-bottom-btn").addEventListener("click", () => {
+  stickToBottom = true;
+  scrollToBottom();
+  updateScrollButton();
+});
+
 function scrollToBottom() {
+  // Nur tatsächlich scrollen, wenn stickToBottom aktiv ist (siehe oben) -
+  // renderMessages() ruft das bei JEDEM Streaming-Chunk auf, ein hoch-
+  // gescrollter Nutzer soll dabei nicht ständig wieder nach unten gerissen
+  // werden.
+  if (!stickToBottom) return;
   const box = $("messages");
   box.scrollTop = box.scrollHeight;
 }
@@ -500,6 +570,11 @@ async function sendMessage() {
   conversation.push(assistantMsg);
   input.value = "";
   input.style.height = "auto";
+  // Eigene, aktiv gesendete Nachricht -> wieder ganz nach unten springen und
+  // Auto-Scroll reaktivieren, auch wenn vorher hochgescrollt war (siehe
+  // stickToBottom oben) - dasselbe Verhalten wie in den meisten Chat-Apps.
+  stickToBottom = true;
+  updateScrollButton();
   renderMessages();
   setBusy(true);
   setStatus(t("chat.status.waiting"));
@@ -605,12 +680,15 @@ $("clear-btn").addEventListener("click", () => {
   if (conversation.length === 0) return;
   if (!confirm(t("chat.confirm.clear"))) return;
   conversation = [];
+  stickToBottom = true;
+  updateScrollButton();
   renderMessages();
   setStatus("");
 });
 
 populateLangSelect();
 applyStaticI18n();
+updateScrollButton();
 renderMessages();
 populateModelSelect();
 </script>
