@@ -59,7 +59,7 @@ def start_request(model: str, path: str, is_stream: bool = False, user_agent: Op
         "queued_ms": None,  # Wartezeit auf Modell-Autostart/-Wechsel, falls nötig
         "ttft_ms": None,  # Zeit bis zum ersten Token AB ready_at (reine Generierungs-TTFT)
         "tokens_streamed": 0,
-        "reasoning_tokens_streamed": 0,  # separat gezählt: Denkprozess-Chunks (delta.reasoning_content, siehe reasoning_parser in config.json)
+        "reasoning_tokens_streamed": 0,  # separat gezählt: Denkprozess-Chunks (delta.reasoning bzw. delta.reasoning_content, siehe reasoning_parser in config.json und main.py gen())
         "prompt_tokens": None,
         "completion_tokens": None,
         "status": "running",

@@ -722,9 +722,11 @@ def _build_loop_abort_chunk(model: str, field: str) -> bytes:
     """Baut einen synthetischen SSE-Abschluss-Chunk, der dem Client sichtbar
     mitteilt, WARUM der Stream vorzeitig endet - statt ihn einfach kommentarlos
     abzuschneiden (der Client würde sonst nur eine unerklärt abgebrochene
-    Antwort sehen). `field` ist "reasoning_content" oder "content", je nachdem
-    wo die Schleife erkannt wurde - die Notiz landet im selben Feld, damit sie
-    dort auftaucht, wo der Client gerade hinschaut (z.B. Reasoning-Box vs.
+    Antwort sehen). `field` ist "content" oder das vom aktuellen Stream
+    tatsächlich genutzte Denkprozess-Feld ("reasoning" oder, bei älteren
+    vLLM-Versionen, "reasoning_content" - siehe Aufrufer), je nachdem wo die
+    Schleife erkannt wurde - die Notiz landet im selben Feld, damit sie dort
+    auftaucht, wo der Client gerade hinschaut (z.B. Reasoning-Box vs.
     normaler Antworttext)."""
     note = "\n\n[Automatisch abgebrochen: Wiederholungsschleife erkannt]"
     obj = {
@@ -947,15 +949,30 @@ async def proxy_v1(path: str, request: Request):
                                         content_buf = (content_buf + delta["content"])[-_REPETITION_LOOKBACK:]
                                         if _has_repetition_loop(content_buf):
                                             aborted_loop, abort_field = True, "content"
-                                # reasoning_content: separates Feld für den Denkprozess bei
-                                # Modellen mit reasoning_parser (siehe config.json) - zählt
-                                # NICHT in "content" hinein, deshalb eigener Zähler.
-                                if delta.get("reasoning_content"):
+                                # reasoning/reasoning_content: separates Feld für den
+                                # Denkprozess bei Modellen mit reasoning_parser (siehe
+                                # config.json) - zählt NICHT in "content" hinein, deshalb
+                                # eigener Zähler. Feldname je vLLM-Version unterschiedlich:
+                                # aktuelle Versionen (siehe installierte 0.26.0,
+                                # entrypoints/openai/chat_completion/protocol.py) liefern
+                                # "reasoning", "reasoning_content" ist dort als deprecated
+                                # markiert - live per curl gegen den echten Stream entdeckt
+                                # (2026-08-28, siehe Chat): mit nur "reasoning_content"
+                                # geprüft lief diese ganze Erkennung seit dem vLLM-Update
+                                # ins Leere. abort_field übernimmt bewusst den Feldnamen,
+                                # den DIESER Stream tatsächlich nutzt (nicht hart
+                                # "reasoning_content"), damit die Abbruch-Notiz beim Client
+                                # im selben Feld landet wie der bisherige Denkprozess-Text.
+                                reasoning_field = "reasoning" if "reasoning" in delta else (
+                                    "reasoning_content" if "reasoning_content" in delta else None
+                                )
+                                reasoning_delta = delta.get("reasoning") or delta.get("reasoning_content")
+                                if reasoning_delta:
                                     telemetry.increment_reasoning_tokens(rid)
                                     if detect_loop:
-                                        reasoning_buf = (reasoning_buf + delta["reasoning_content"])[-_REPETITION_LOOKBACK:]
+                                        reasoning_buf = (reasoning_buf + reasoning_delta)[-_REPETITION_LOOKBACK:]
                                         if _has_repetition_loop(reasoning_buf):
-                                            aborted_loop, abort_field = True, "reasoning_content"
+                                            aborted_loop, abort_field = True, reasoning_field or "reasoning"
                                 if delta.get("tool_calls"):
                                     telemetry.mark_tool_call(rid)
                                 usage = obj.get("usage")
