@@ -179,58 +179,49 @@ async def start_job(model: str, revision: Optional[str] = None, hf_token: Option
     return job_id
 
 
-async def _run_job(job: dict, hf_token: Optional[str]) -> None:
-    cfg = get_config()
-    model = job["model"]
+async def _drain_worker_output(proc: asyncio.subprocess.Process, tail: list[str], max_lines: int = 40) -> None:
+    """Liest laufend aus dem stdout/stderr-Pipe des Download-Kindprozesses
+    (download_worker.py, stderr ist per stderr=STDOUT mit hineingemerged) -
+    MUSS aktiv gelesen werden: der OS-Pipe-Puffer ist auf ~64KB begrenzt,
+    ungelesen würde der Kindprozess irgendwann am nächsten Schreibversuch
+    (z.B. eine weitere tqdm-Fortschrittszeile) hängen bleiben, sobald genug
+    Ausgabe aufgelaufen ist. Hält nur die letzten `max_lines` Zeilen vor - für
+    eine aussagekräftige Fehlermeldung bei Exit-Code != 0 (siehe _run_job)
+    reicht das; ein voller Mitschnitt lohnt sich hier nicht (anders als beim
+    NVFP4-Quantisierungs-Log, das der Nutzer live mitverfolgt)."""
+    assert proc.stdout is not None
+    while True:
+        line = await proc.stdout.readline()
+        if not line:
+            return
+        text = line.decode(errors="replace").rstrip("\n")
+        if text:
+            tail.append(text)
+            if len(tail) > max_lines:
+                del tail[0]
+
+
+async def _run_worker_once(
+    job: dict, worker_args: list[str], env: dict, blobs_dir: Path,
+) -> tuple[int, list[str]]:
+    """Ein einzelner Durchlauf des Download-Kindprozesses inkl. Fortschritts-
+    Tracking (siehe _run_job für den Aufrufer, der das bei Bedarf einmal mit
+    anderer env nachversucht - siehe dort). Gibt (Exit-Code, letzte
+    Ausgabezeilen) zurück; ein Fehlschlag schon beim Start selbst wird als
+    (1, [Fehlertext]) codiert, damit der Aufrufer beide Fälle einheitlich
+    behandeln kann."""
     job_id = job["job_id"]
-    loop = asyncio.get_running_loop()
-    job["state"] = "resolving"
-    try:
-        api = HfApi()
-        info = await loop.run_in_executor(
-            None,
-            lambda: api.model_info(model, revision=job["revision"], files_metadata=True, token=hf_token),
-        )
-        job["bytes_total"] = sum((s.size or 0) for s in (info.siblings or []))
-    except Exception as e:
-        logger.exception("Konnte Metadaten für %s nicht laden", model)
-        job["state"] = "error"
-        job["error"] = f"Konnte Modell-Metadaten nicht laden: {e}"
-        job["finished_at"] = time.time()
-        _HF_TOKENS.pop(job_id, None)
-        _sync_pending_file()
-        return
-
-    if job["state"] == "cancelled":  # zwischen Start und hier schon abgebrochen
-        _HF_TOKENS.pop(job_id, None)
-        _sync_pending_file()
-        return
-
-    job["state"] = "downloading"
-    _sync_pending_file()
-    blobs_dir = _cache_dir_for(model, cfg.hf_home) / "blobs"
-
-    worker_args = [sys.executable, "-m", "vllm_manager.download_worker", model, "--cache-dir", str(Path(cfg.hf_home) / "hub")]
-    if job["revision"]:
-        worker_args += ["--revision", job["revision"]]
-    env = dict(os.environ)
-    if hf_token:
-        env["HF_TOKEN"] = hf_token
-
     try:
         proc = await asyncio.create_subprocess_exec(
             *worker_args, env=env, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT,
         )
     except Exception as e:
-        logger.exception("Konnte Download-Prozess für %s nicht starten", model)
-        job["state"] = "error"
-        job["error"] = f"Download-Prozess konnte nicht gestartet werden: {e}"
-        job["finished_at"] = time.time()
-        _HF_TOKENS.pop(job_id, None)
-        _sync_pending_file()
-        return
+        logger.exception("Konnte Download-Prozess für '%s' nicht starten", job["model"])
+        return 1, [f"Download-Prozess konnte nicht gestartet werden: {e}"]
     _PROCESSES[job_id] = proc
 
+    tail: list[str] = []
+    reader_task = asyncio.create_task(_drain_worker_output(proc, tail))
     last_bytes, last_t = 0, time.time()
     try:
         while proc.returncode is None:
@@ -269,6 +260,82 @@ async def _run_job(job: dict, hf_token: Optional[str]) -> None:
                 proc.terminate()
             except ProcessLookupError:
                 pass
+        # Pipe bis EOF leerlesen (Prozess ist an dieser Stelle beendet oder
+        # gerade eben terminiert worden) - sonst bliebe reader_task als
+        # "pending task destroyed"-Warnung hängen.
+        await reader_task
+
+    return proc.returncode, tail
+
+
+async def _run_job(job: dict, hf_token: Optional[str]) -> None:
+    cfg = get_config()
+    model = job["model"]
+    job_id = job["job_id"]
+    loop = asyncio.get_running_loop()
+    job["state"] = "resolving"
+    try:
+        api = HfApi()
+        info = await loop.run_in_executor(
+            None,
+            lambda: api.model_info(model, revision=job["revision"], files_metadata=True, token=hf_token),
+        )
+        job["bytes_total"] = sum((s.size or 0) for s in (info.siblings or []))
+    except Exception as e:
+        logger.exception("Konnte Metadaten für %s nicht laden", model)
+        job["state"] = "error"
+        job["error"] = f"Konnte Modell-Metadaten nicht laden: {e}"
+        job["finished_at"] = time.time()
+        _HF_TOKENS.pop(job_id, None)
+        _sync_pending_file()
+        return
+
+    if job["state"] == "cancelled":  # zwischen Start und hier schon abgebrochen
+        _HF_TOKENS.pop(job_id, None)
+        _sync_pending_file()
+        return
+
+    job["state"] = "downloading"
+    _sync_pending_file()
+    blobs_dir = _cache_dir_for(model, cfg.hf_home) / "blobs"
+
+    worker_args = [sys.executable, "-m", "vllm_manager.download_worker", model, "--cache-dir", str(Path(cfg.hf_home) / "hub")]
+    if job["revision"]:
+        worker_args += ["--revision", job["revision"]]
+    env = dict(os.environ)
+    if hf_token:
+        env["HF_TOKEN"] = hf_token
+
+    returncode, tail = await _run_worker_once(job, worker_args, env, blobs_dir)
+
+    # Bekannter, reproduzierbarer Fehler von huggingface_hubs "Xet"-Downloadbackend
+    # (hf-xet - seit huggingface_hub >=0.26 für darauf umgestellte Repos der
+    # Default-Downloadpfad statt klassischem HTTP/LFS): bricht manche Repos
+    # komplett mit "Unable to parse string as hex hash value" ab, statt sauber
+    # auf HTTP zurückzufallen - live beobachtet 2026-08-28 bei
+    # orcarouter/Qwen3.8-27B-Uncensored-FP8 (siehe Chat), reproduzierbar über
+    # mehrere Versuche, aber verschwunden mit HF_HUB_DISABLE_XET=1 (klassischer
+    # Pfad). HF_HUB_DISABLE_XET liest huggingface_hub NUR beim Modul-Import
+    # (huggingface_hub.constants), ein In-Prozess-Retry mit geändertem
+    # os.environ innerhalb desselben download_worker-Prozesses würde deshalb
+    # NICHTS bewirken - der Retry hier startet bewusst einen ganz neuen
+    # Kindprozess mit der Variable bereits VOR dessen Start gesetzt.
+    if (
+        returncode != 0
+        and job["state"] != "cancelled"
+        and "HF_HUB_DISABLE_XET" not in env
+        and any("hex hash value" in line or "hf_xet" in line.lower() for line in tail)
+    ):
+        logger.warning(
+            "Download von '%s' vermutlich am Xet-Backend gescheitert (%s) - "
+            "versuche automatisch einmal mit HF_HUB_DISABLE_XET=1 erneut.",
+            model, tail[-1] if tail else "?",
+        )
+        job["bytes_done"] = 0
+        job["percent"] = 0.0
+        retry_env = dict(env)
+        retry_env["HF_HUB_DISABLE_XET"] = "1"
+        returncode, tail = await _run_worker_once(job, worker_args, retry_env, blobs_dir)
 
     if job["state"] == "cancelled":
         # cancel_job() hat state/error/finished_at/Pending-Datei bereits
@@ -277,7 +344,7 @@ async def _run_job(job: dict, hf_token: Optional[str]) -> None:
         _HF_TOKENS.pop(job_id, None)
         return
 
-    if proc.returncode == 0:
+    if returncode == 0:
         job["bytes_done"] = job["bytes_total"] or await asyncio.to_thread(_dir_size, blobs_dir)
         job["percent"] = 100.0
         job["state"] = "done"
@@ -300,9 +367,10 @@ async def _run_job(job: dict, hf_token: Optional[str]) -> None:
                  "Start, für mehr Kontext/Durchsatz ggf. erhöhen.",
         ))
     else:
-        logger.error("Download fehlgeschlagen: %s (exit code %s)", model, proc.returncode)
+        logger.error("Download fehlgeschlagen: %s (exit code %s): %s", model, returncode, tail[-5:])
         job["state"] = "error"
-        job["error"] = f"Download-Prozess beendet mit Exit-Code {proc.returncode}."
+        detail = "\n".join(tail[-5:])
+        job["error"] = f"Download-Prozess beendet mit Exit-Code {returncode}." + (f" Letzte Ausgabe:\n{detail}" if detail else "")
     job["finished_at"] = time.time()
     _HF_TOKENS.pop(job_id, None)
     _sync_pending_file()
