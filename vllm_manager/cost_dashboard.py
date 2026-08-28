@@ -13,7 +13,7 @@ from fastapi.responses import HTMLResponse
 
 from . import cost_tracker
 from .config import get_config
-from .dashboard import _LANGUAGES_JS
+from .dashboard import _LANGUAGES_JS, _is_disconnect_race
 
 router = APIRouter()
 
@@ -62,6 +62,9 @@ async def cost_ws(websocket: WebSocket):
             await websocket.send_json(await build_snapshot())
     except WebSocketDisconnect:
         pass
+    except RuntimeError as e:
+        if not _is_disconnect_race(e):
+            raise
     finally:
         cost_tracker.unsubscribe(q)
 

@@ -206,6 +206,21 @@ async def dashboard_status():
     return await build_snapshot()
 
 
+def _is_disconnect_race(e: RuntimeError) -> bool:
+    """True für uvicorns RuntimeError, wenn ein Client-Disconnect zwischen
+    zwei Heartbeats passiert (Browser-Tab geschlossen/Netzwerk weg) - der wird
+    nicht immer als WebSocketDisconnect gemeldet, sondern fällt manchmal erst
+    beim NÄCHSTEN send_json() als "RuntimeError: Unexpected ASGI message
+    'websocket.send', after sending 'websocket.close'." auf. Harmlos (der
+    Client ist ja tatsächlich weg) - live beobachtet, spammte bislang
+    minütlich den Log in allen drei WebSocket-Endpoints dieses Managers
+    (siehe Chat vom 2026-08-28, "prüfe wieso der Dienst abstürzt"). Bewusst
+    an der Nachricht statt pauschal am Typ RuntimeError erkannt, damit ein
+    ECHTER Bug (z.B. in build_snapshot()) hier nicht stillschweigend
+    verschluckt statt geloggt wird - siehe Aufrufer."""
+    return "after sending" in str(e) and "websocket.close" in str(e)
+
+
 @router.websocket("/dashboard/ws")
 async def dashboard_ws(websocket: WebSocket):
     await websocket.accept()
@@ -236,6 +251,9 @@ async def dashboard_ws(websocket: WebSocket):
             await websocket.send_json(await build_snapshot())
     except WebSocketDisconnect:
         pass
+    except RuntimeError as e:
+        if not _is_disconnect_race(e):
+            raise
     finally:
         telemetry.unsubscribe(q)
 
@@ -305,6 +323,9 @@ async def dashboard_logs_ws(websocket: WebSocket):
                 await websocket.send_json({"type": "append", "text": chunk.decode("utf-8", errors="ignore")})
     except WebSocketDisconnect:
         pass
+    except RuntimeError as e:
+        if not _is_disconnect_race(e):
+            raise
 
 
 @router.get("/dashboard")

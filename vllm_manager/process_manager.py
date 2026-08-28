@@ -681,8 +681,16 @@ async def stop_engine(model: Optional[str] = None, reason: str = "manual_unload"
     Shutdown). `reason` z.B. "manual_unload", "idle_timeout", "crashed",
     "timeout", "shutdown", "orphan_reaped" oder "evicted_for:<neues_modell>"."""
     if model is None:
-        for m in list(engines.keys()):
-            await stop_engine(m, reason=reason, timeout=timeout)
+        # PARALLEL statt nacheinander - bei mehreren gleichzeitig geladenen
+        # Engines (max_concurrent_models > 1) hätte sich die Shutdown-Zeit
+        # sonst mit deren Anzahl multipliziert (jede bis zu `timeout` Sekunden
+        # SIGTERM-Wartezeit) und lief beim Dienst-Stop live beobachtet über
+        # systemd's TimeoutStopSec (siehe vllm.service, Default 90s) hinaus -
+        # KillMode=control-group killt dann die GESAMTE Unit hart per SIGKILL
+        # (journal: "Main process exited, code=killed, status=9/KILL",
+        # "Failed with result 'timeout'", mehrfach beobachtet, zuletzt
+        # 2026-08-28, siehe Chat "prüfe wieso der Dienst abstürzt").
+        await asyncio.gather(*(stop_engine(m, reason=reason, timeout=timeout) for m in list(engines.keys())))
         return
 
     eng = engines.get(model)
@@ -711,7 +719,18 @@ async def stop_engine(model: Optional[str] = None, reason: str = "manual_unload"
         except asyncio.TimeoutError:
             logger.warning("Engine reagiert nicht auf SIGTERM, sende SIGKILL")
             proc.kill()
-            await proc.wait()
+            try:
+                await asyncio.wait_for(proc.wait(), timeout=10)
+            except asyncio.TimeoutError:
+                # Extrem selten (z.B. GPU-Treiber/Kernel-Hang) - lieber jetzt
+                # aufgeben und weitermachen als den gesamten Dienst-Shutdown
+                # unbegrenzt zu blockieren (siehe Kommentar am Aufrufer oben).
+                # reap_orphan_engines() räumt eine liegengebliebene Leiche
+                # beim nächsten Start automatisch auf.
+                logger.error(
+                    "Engine-Prozess pid=%s reagiert nicht mal auf SIGKILL - gebe auf, "
+                    "reap_orphan_engines() räumt das beim nächsten Start auf.", proc.pid,
+                )
         # Fängt vLLM-Versionen ab, die ihre eigenen Worker-Subprozesse beim
         # Beenden nicht zuverlässig mitnehmen (siehe _reap_leftover_children) -
         # sonst genau die Waisenprozesse, die "unsauberes Unloading" verursachen.
