@@ -843,6 +843,13 @@ async def proxy_v1(path: str, request: Request):
                 "owned_by": "llm-hub",
                 "name": n,
                 "url": f"{base_url}/v1",
+                # Inferenz-Backend, das den Prozess für dieses Modell startet
+                # (siehe ModelConfig.engine / process_manager._build_command)
+                # - "vllm" oder "sglang". Nur lokal gecachte, nicht in
+                # config.json registrierte Modelle (mcfg is None) laufen
+                # ausschließlich über vLLM (Auto-Detect kennt kein SGLang),
+                # daher der Default.
+                "engine": mcfg.engine if mcfg else "vllm",
                 # toolCalling/vision/maxInputTokens spiegeln die Auto-Detect-
                 # Werte aus capability_detector.py (siehe ModelConfig-Docstring
                 # in config.py) - bei nur lokal gecachten, nicht registrierten
