@@ -19,7 +19,7 @@ CONFIG_PATH = Path(os.environ.get("LLM_HUB_CONFIG", PROJECT_ROOT / "config.json"
 # models-quantized/, siehe catalog.py/nvfp4_quantizer.py) werden in
 # config.json als Dict-KEY unter "models" geführt - dort IST der Modellname
 # der Pfad (siehe catalog.cache_dir_for). Ein absoluter Pfad wie
-# "/home/user/vllm/models-quantized/Foo" macht die ganze config.json
+# "/home/user/llm-hub/models-quantized/Foo" macht die ganze config.json
 # maschinenspezifisch: kopiert man sie unverändert auf eine andere Maschine
 # oder installiert an einem anderen Ort, zeigt der Eintrag ins Leere (siehe
 # INSTALL.md, dort bisher als bewusst manueller Schritt dokumentiert).

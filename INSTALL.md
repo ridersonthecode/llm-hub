@@ -173,16 +173,16 @@ und diesen Schritt überspringen.
 cd ~/llm-hub
 cp llm-hub.service /tmp/llm-hub.service
 # User/Group/WorkingDirectory/ExecStart-Pfad auf den eigenen Benutzernamen anpassen:
-sed -i "s#mwagner#$USER#g; s#/home/$USER/vllm#$HOME/vllm#g" /tmp/llm-hub.service
+sed -i "s#mwagner#$USER#g; s#/home/$USER/llm-hub#$HOME/llm-hub#g" /tmp/llm-hub.service
 cat /tmp/llm-hub.service   # kurz gegenprüfen, ob Pfade stimmen
 
 sudo mv /tmp/llm-hub.service /etc/systemd/system/llm-hub.service
 sudo systemctl daemon-reload
-sudo systemctl enable --now vllm
+sudo systemctl enable --now llm-hub
 
 # Status prüfen:
 sudo systemctl status llm-hub
-sudo journalctl -u vllm -f   # Live-Logs, Strg+C zum Beenden
+sudo journalctl -u llm-hub -f   # Live-Logs, Strg+C zum Beenden
 ```
 
 **Optional, aber empfohlen** - passwortloser `sudo` für den
@@ -190,7 +190,7 @@ sudo journalctl -u vllm -f   # Live-Logs, Strg+C zum Beenden
 (`/dashboard/config`, siehe Anleitung.md):
 
 ```bash
-sudo visudo -f /etc/sudoers.d/vllm-restart
+sudo visudo -f /etc/sudoers.d/llm-hub-restart
 # Zeile einfügen (Benutzername anpassen):
 #   <user> ALL=(ALL) NOPASSWD: /usr/bin/systemctl restart llm-hub
 ```

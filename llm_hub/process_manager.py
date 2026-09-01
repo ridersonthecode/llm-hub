@@ -1,4 +1,4 @@
-"""Startet/stoppt Engine-Kindprozesse bei Bedarf - ohne dass der vllm-Manager-
+"""Startet/stoppt Engine-Kindprozesse bei Bedarf - ohne dass der LLM-Hub-
 Dienst selbst neu gestartet werden muss. Standardmäßig vllm serve <model>;
 Modelle mit ModelConfig.engine == "sglang" laufen stattdessen über
 <sglang_python> -m sglang.launch_server (siehe _build_sglang_command) - z.B.

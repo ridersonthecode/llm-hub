@@ -2,7 +2,7 @@
 
 Lokal eingebunden statt über CDN, damit die Dashboards auch ohne
 Internetzugang funktionieren (gleiche Philosophie wie der Rest des
-vLLM-Managers: kein externer Build-Schritt, keine Laufzeit-Abhängigkeit von
+LLM-Hubs: kein externer Build-Schritt, keine Laufzeit-Abhängigkeit von
 Drittanbieter-Hosts).
 
 - `dataTables.min.js` – DataTables 3.0.2 Core (jQuery-frei, `datatables.net` auf npm)

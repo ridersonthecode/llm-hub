@@ -72,7 +72,7 @@ def reload_vllm_service(model_name: str) -> bool:
 
     print(
         f"{SERVICE_NAME} neu gestartet mit '{model_name}'. "
-        f"Fortschritt: journalctl -u vllm -f"
+        f"Fortschritt: journalctl -u llm-hub -f"
     )
     return True
 

@@ -82,7 +82,7 @@ sudo systemctl restart llm-hub      # nur nötig bei Config-/Code-Änderungen am
                                   # NICHT zum Modellwechsel!
 sudo systemctl stop llm-hub
 sudo systemctl enable/disable llm-hub
-sudo journalctl -u vllm -f       # Manager-Logs (Start/Stop/Requests)
+sudo journalctl -u llm-hub -f    # Manager-Logs (Start/Stop/Requests)
 ```
 
 Logs der jeweils laufenden vLLM-Engine (Gewichte laden, CUDA-Graphen, Fehler) liegen

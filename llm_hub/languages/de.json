@@ -335,7 +335,7 @@
   "cfg.status.restartRequired": "host/port geändert - wirkt erst nach einem Dienst-Neustart.",
   "cfg.status.restarting": "Neustart ausgelöst - Dienst kurz nicht erreichbar…",
   "cfg.status.backOnline": "Dienst ist wieder online ✅",
-  "cfg.status.restartTimeout": "Noch keine Antwort - manuell prüfen: sudo journalctl -u vllm -f",
+  "cfg.status.restartTimeout": "Noch keine Antwort - manuell prüfen: sudo journalctl -u llm-hub -f",
   "cfg.status.noBackups": "Noch keine Backups",
   "cfg.status.restored": "Wiederhergestellt.",
   "cfg.status.duplicateModel": "Doppelter Modellname \"{model}\" - einen davon vor dem Speichern umbenennen.",
