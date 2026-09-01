@@ -26,6 +26,8 @@ import time
 from pathlib import Path
 from typing import Optional
 
+from .config import resolve_local_model_path
+
 _CACHE_TTL = 3.0
 _cache: dict[str, list[str]] = {}
 _cache_at: dict[str, float] = {}
@@ -99,10 +101,12 @@ def cache_dir_for(model: str, hf_home: str) -> Path:
     Zwei Fälle, analog zu downloader._cache_dir_for: normale HuggingFace-
     Modelle liegen unter hf_home/hub im "models--<org>--<name>"-Konventions-
     Verzeichnis; eigene lokale Modelle (z.B. selbst quantisierte AWQ-Varianten
-    unter models-quantized/) sind in config.json bereits als absoluter Pfad
-    hinterlegt - dort IST der Modellname der Pfad."""
-    if model.startswith("/"):
-        return Path(model)
+    unter models-quantized/) sind in config.json bereits als Pfad hinterlegt
+    (portabel "./"-relativ zu PROJECT_ROOT, oder absolut - siehe
+    config.resolve_local_model_path) - dort IST der Modellname der Pfad."""
+    local = resolve_local_model_path(model)
+    if local is not None:
+        return local
     return Path(hf_home) / "hub" / ("models--" + model.replace("/", "--"))
 
 

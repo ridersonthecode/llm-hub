@@ -27,15 +27,18 @@ import math
 from pathlib import Path
 from typing import Optional
 
+from .config import resolve_local_model_path
+
 
 def _model_dir(model: str, hf_home: str) -> Optional[Path]:
     """Neuester Snapshot-Ordner für ein Modell im HF-Cache, oder None falls
     nicht gecacht. Lokale Pfade (z.B. selbst quantisierte Modelle außerhalb
-    des HF-Cache, siehe models-quantized/) werden direkt als Verzeichnis
-    behandelt."""
-    p = Path(model)
-    if p.is_absolute() and p.is_dir():
-        return p
+    des HF-Cache, siehe models-quantized/, "./"-relativ zu PROJECT_ROOT oder
+    absolut - siehe config.resolve_local_model_path) werden direkt als
+    Verzeichnis behandelt."""
+    local = resolve_local_model_path(model)
+    if local is not None and local.is_dir():
+        return local
     cache_dir = Path(hf_home) / "hub" / ("models--" + model.replace("/", "--"))
     snapshots = cache_dir / "snapshots"
     if not snapshots.exists():

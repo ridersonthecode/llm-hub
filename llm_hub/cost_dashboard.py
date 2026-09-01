@@ -79,7 +79,7 @@ COST_DASHBOARD_HTML = r"""<!doctype html>
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>vLLM Manager – Costs</title>
+<title>LLM Hub – Costs</title>
 <link rel="stylesheet" href="/static/vendor/datatables/dataTables.dataTables.min.css">
 <link rel="stylesheet" href="/static/vendor/datatables/dataTables.inputPaging.min.css">
 <style>
@@ -312,7 +312,7 @@ function populateLangSelect() {
 }
 function applyStaticI18n() {
   document.documentElement.lang = currentLang;
-  document.title = "vLLM Manager – " + t("cost.title");
+  document.title = "LLM Hub – " + t("cost.title");
   document.querySelectorAll("[data-i18n]").forEach(el => { el.textContent = t(el.dataset.i18n); });
   document.querySelectorAll("[data-i18n-title]").forEach(el => { el.title = t(el.dataset.i18nTitle); });
   updateConnText();
@@ -532,12 +532,25 @@ $("reset-all-btn").addEventListener("click", async () => {
   }
 });
 
-// --- WebSocket-Verbindung ----------------------------------------------
+// --- WebSocket-Verbindung ------------------------------------------------
+// Wie im Haupt-Dashboard: nur verbunden, solange der Tab sichtbar ist (siehe
+// dortiger Kommentar) - Server-State (Kostenaufzeichnungen) ist unabhängig
+// von der Verbindung, daher zeigt der nächste Snapshot beim Wiederverbinden
+// wieder den vollständigen, lückenlosen Verlauf.
 let connState = "connecting";
+let ws = null;
+let reconnectTimer = null;
+
+function scheduleReconnect() {
+  clearTimeout(reconnectTimer);
+  if (document.hidden) return;
+  reconnectTimer = setTimeout(connect, 1500);
+}
 
 function connect() {
+  if (document.hidden) return;
   const proto = location.protocol === "https:" ? "wss:" : "ws:";
-  const ws = new WebSocket(proto + "//" + location.host + "/dashboard/costs/ws");
+  ws = new WebSocket(proto + "//" + location.host + "/dashboard/costs/ws");
 
   ws.onopen = () => {
     ws.send(JSON.stringify({ api_key: apiKey }));
@@ -560,12 +573,21 @@ function connect() {
 
   ws.onclose = () => {
     $("conn-dot").classList.remove("live");
-    connState = "reconnecting";
+    connState = document.hidden ? "paused" : "reconnecting";
     updateConnText();
-    setTimeout(connect, 1500);
+    scheduleReconnect();
   };
   ws.onerror = () => ws.close();
 }
+
+document.addEventListener("visibilitychange", () => {
+  if (document.hidden) {
+    clearTimeout(reconnectTimer);
+    if (ws && ws.readyState === WebSocket.OPEN) ws.close();
+  } else if (!ws || ws.readyState === WebSocket.CLOSED || ws.readyState === WebSocket.CLOSING) {
+    connect();
+  }
+});
 
 populateLangSelect();
 applyStaticI18n();

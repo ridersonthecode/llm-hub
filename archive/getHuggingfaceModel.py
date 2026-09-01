@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """Lädt ein HuggingFace-Modell manuell in den vLLM Cache herunter und
-schaltet den laufenden vllm.service standardmäßig auf dieses Modell um.
+schaltet den laufenden llm-hub.service standardmäßig auf dieses Modell um.
 
 Nutzung:
     python getHuggingfaceModel.py <modelname> [--revision REVISION] [--no-reload]
@@ -10,7 +10,7 @@ Beispiel:
 
 Das Umschalten des Dienstes ruft intern 'sudo' auf (Passwortabfrage im
 Terminal ist normal) und ersetzt nur den Modellnamen hinter 'vllm serve'
-in /etc/systemd/system/vllm.service. Andere Flags (z.B. --tool-call-parser
+in /etc/systemd/system/llm-hub.service. Andere Flags (z.B. --tool-call-parser
 hermes) bleiben unverändert und sollten bei nicht-Hermes-Modellen ggf.
 manuell angepasst werden.
 """
@@ -22,12 +22,12 @@ import subprocess
 import sys
 import tempfile
 
-os.environ.setdefault("HF_HOME", "/home/mwagner/vllm/models")
+os.environ.setdefault("HF_HOME", "/home/mwagner/llm-hub/models")
 
 from huggingface_hub import snapshot_download
 
-SERVICE_PATH = "/etc/systemd/system/vllm.service"
-SERVICE_NAME = "vllm.service"
+SERVICE_PATH = "/etc/systemd/system/llm-hub.service"
+SERVICE_NAME = "llm-hub.service"
 
 
 def reload_vllm_service(model_name: str) -> bool:
@@ -85,7 +85,7 @@ def main():
     parser.add_argument(
         "--no-reload",
         action="store_true",
-        help="Nur herunterladen, vllm.service nicht automatisch umschalten/neustarten",
+        help="Nur herunterladen, llm-hub.service nicht automatisch umschalten/neustarten",
     )
     parser.add_argument(
         "--offline",

@@ -24,7 +24,7 @@ from huggingface_hub import HfApi
 from . import catalog, config_editor
 from .config import CONFIG_PATH, get_config
 
-logger = logging.getLogger("vllm_manager.downloader")
+logger = logging.getLogger("llm_hub.downloader")
 
 JOBS: dict[str, dict] = {}
 # Prozess-Handles bewusst NICHT im JOBS-Dict selbst (das wird 1:1 als JSON für
@@ -297,9 +297,9 @@ async def _run_job(job: dict, hf_token: Optional[str]) -> None:
 
     job["state"] = "downloading"
     _sync_pending_file()
-    blobs_dir = _cache_dir_for(model, cfg.hf_home) / "blobs"
+    blobs_dir = _cache_dir_for(model, cfg.resolved_hf_home()) / "blobs"
 
-    worker_args = [sys.executable, "-m", "vllm_manager.download_worker", model, "--cache-dir", str(Path(cfg.hf_home) / "hub")]
+    worker_args = [sys.executable, "-m", "llm_hub.download_worker", model, "--cache-dir", str(Path(cfg.resolved_hf_home()) / "hub")]
     if job["revision"]:
         worker_args += ["--revision", job["revision"]]
     env = dict(os.environ)
@@ -352,7 +352,7 @@ async def _run_job(job: dict, hf_token: Optional[str]) -> None:
         # Sofort sichtbar machen statt bis zu _CACHE_TTL Sekunden zu warten -
         # das neu heruntergeladene Modell soll im Dashboard/den APIs direkt
         # als "gecacht" auftauchen, mit korrekter (nicht 300s alter) Größe.
-        catalog.invalidate_cache(cfg.hf_home)
+        catalog.invalidate_cache(cfg.resolved_hf_home())
         catalog.invalidate_size_cache(model)
         # Ohne das bliebe ein per pull_model()/POST /models/pull heruntergeladenes
         # Modell nur "gecacht, aber nicht registriert" (siehe GET /models) - lädt-

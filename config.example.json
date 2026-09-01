@@ -3,7 +3,7 @@
   "port": 11434,
   "engine_host": "127.0.0.1",
   "engine_port": 18811,
-  "hf_home": "/home/YOUR_USER/vllm/models",
+  "hf_home": null,
   "vllm_bin": null,
   "api_key": {
     "enabled": false,

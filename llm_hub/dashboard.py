@@ -131,7 +131,7 @@ async def _models_catalog(cfg) -> list[dict]:
     """Alle nutzbaren Modelle fürs Dashboard: registrierte (config.json) +
     zusätzlich lokal gecachte, aber nicht registrierte. Liefert die Felder, die
     das Klick-Modal für den HF-Link und den VS-Code-JSON-Schnipsel braucht."""
-    cached = set(await list_cached_models(cfg.hf_home))
+    cached = set(await list_cached_models(cfg.resolved_hf_home()))
     default_mml = (cfg.default_serve_args or {}).get("max_model_len", 32768)
     out = []
     default_gmu = (cfg.default_serve_args or {}).get("gpu_memory_utilization", 0.5)
@@ -172,7 +172,7 @@ async def _models_catalog(cfg) -> list[dict]:
     # Event-Loop blockieren).
     cached_entries = [m for m in out if m["cached"]]
     sizes = await asyncio.gather(
-        *(catalog.get_cached_size_bytes(m["model"], cfg.hf_home) for m in cached_entries)
+        *(catalog.get_cached_size_bytes(m["model"], cfg.resolved_hf_home()) for m in cached_entries)
     )
     for m, size in zip(cached_entries, sizes):
         m["size_bytes"] = size
@@ -338,7 +338,7 @@ DASHBOARD_HTML = r"""<!doctype html>
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>vLLM Manager – Live Status</title>
+<title>LLM Hub – Live Status</title>
 <link rel="stylesheet" href="/static/vendor/datatables/dataTables.dataTables.min.css">
 <link rel="stylesheet" href="/static/vendor/datatables/dataTables.inputPaging.min.css">
 <style>
@@ -577,7 +577,7 @@ DASHBOARD_HTML = r"""<!doctype html>
 <body>
   <div class="topbar">
     <div>
-      <h1 data-i18n="nav.title">vLLM Manager – Live Status</h1>
+      <h1 data-i18n="nav.title">LLM Hub – Live Status</h1>
       <div class="sub"><span class="conn"><span class="dot" id="conn-dot"></span><span id="conn-text" data-i18n="nav.connecting">connecting…</span></span></div>
     </div>
     <div class="topbar-actions">
@@ -748,7 +748,7 @@ function safeSetHTML(el, html) {
 }
 
 // --- i18n ----------------------------------------------------------------
-// Übersetzungen kommen vom Server (vllm_manager/languages/*.json), server-
+// Übersetzungen kommen vom Server (llm_hub/languages/*.json), server-
 // seitig hier als JS-Objekt eingebettet - kein Extra-Request nötig.
 const TRANSLATIONS = __TRANSLATIONS_JSON__;
 const DEFAULT_LANG = "en";
@@ -1640,16 +1640,33 @@ document.querySelectorAll("details[id]").forEach((el) => {
   el.addEventListener("toggle", () => localStorage.setItem(key, el.open ? "1" : "0"));
 });
 
-// --- WebSocket-Verbindung ----------------------------------------------
+// --- WebSocket-Verbindung ------------------------------------------------
+// Nur verbunden, solange der Tab tatsächlich sichtbar ist (Ressourcen sparen:
+// sonst würde der Server pro Sekunde einen vollen Snapshot bauen - inkl.
+// Engine-Metrik-Requests und System-Metriken -, obwohl niemand hinschaut).
+// Beim Sichtbarwerden wird sofort neu verbunden; der Server schickt als
+// allererste Nachricht wieder einen kompletten Snapshot (build_snapshot()
+// liest aus dauerhaftem Server-Zustand: telemetry.recent_requests,
+// process_manager.model_history usw.), so dass Verlauf/History nicht erst ab
+// dem Zeitpunkt des Wiedereinschaltens beginnt, sondern lückenlos weitergeht.
 let apiKey = sessionStorage.getItem("vllm_dashboard_key") || "";
 let latestSnapshot = null;
-let connState = "connecting"; // "connecting" | "live" | "reconnecting"
+let connState = "connecting"; // "connecting" | "live" | "reconnecting" | "paused"
+let ws = null;
+let reconnectTimer = null;
 
 function updateConnText() { $("conn-text").textContent = t("nav." + connState); }
 
+function scheduleReconnect() {
+  clearTimeout(reconnectTimer);
+  if (document.hidden) return; // Tab im Hintergrund: erst bei visibilitychange neu verbinden
+  reconnectTimer = setTimeout(connect, 1500);
+}
+
 function connect() {
+  if (document.hidden) return; // nicht verbinden, solange niemand hinschaut
   const proto = location.protocol === "https:" ? "wss:" : "ws:";
-  const ws = new WebSocket(proto + "//" + location.host + "/dashboard/ws");
+  ws = new WebSocket(proto + "//" + location.host + "/dashboard/ws");
 
   ws.onopen = () => {
     ws.send(JSON.stringify({ api_key: apiKey }));
@@ -1675,12 +1692,21 @@ function connect() {
 
   ws.onclose = () => {
     $("conn-dot").classList.remove("live");
-    connState = "reconnecting";
+    connState = document.hidden ? "paused" : "reconnecting";
     updateConnText();
-    setTimeout(connect, 1500);
+    scheduleReconnect();
   };
   ws.onerror = () => ws.close();
 }
+
+document.addEventListener("visibilitychange", () => {
+  if (document.hidden) {
+    clearTimeout(reconnectTimer);
+    if (ws && ws.readyState === WebSocket.OPEN) ws.close();
+  } else if (!ws || ws.readyState === WebSocket.CLOSED || ws.readyState === WebSocket.CLOSING) {
+    connect();
+  }
+});
 
 populateLangSelect();
 applyStaticI18n();

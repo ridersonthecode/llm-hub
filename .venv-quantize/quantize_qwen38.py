@@ -1,6 +1,6 @@
 """Einmaliges Quantisierungs-Skript: Qwen/Qwen3.8-27B (BF16, offiziell) -> AWQ
 INT4 (vLLM-kompatibel), mit llm-compressor. Läuft in der isolierten
-.venv-quantize (NICHT die produktive .venv von vllm.service!).
+.venv-quantize (NICHT die produktive .venv von llm-hub.service!).
 
 Hybrid-Architektur (Attention + Gated-Delta-Net/Mamba-Layer abwechselnd) - AWQ
 quantisiert generisch pro nn.Linear-Layer, unabhängig vom umgebenden Mechanismus.
@@ -13,7 +13,7 @@ import os
 # Zu spät gesetzt (nach den Imports) führte beim ersten Versuch dazu, dass das
 # bereits lokal vorhandene 55GB-Modell komplett neu nach ~/.cache/huggingface
 # heruntergeladen wurde, statt den vorhandenen Download in HF_HOME zu nutzen.
-os.environ["HF_HOME"] = "/home/mwagner/vllm/models"
+os.environ["HF_HOME"] = "/home/mwagner/llm-hub/models"
 
 import json
 from glob import glob
@@ -26,7 +26,7 @@ from llmcompressor.modifiers.transform.awq.mappings import AWQMapping
 from transformers import AutoModelForImageTextToText, AutoTokenizer
 
 MODEL_ID = "Qwen/Qwen3.8-27B"
-OUTPUT_DIR = "/home/mwagner/vllm/models-quantized/Qwen3.8-27B-AWQ-INT4-v2"
+OUTPUT_DIR = "/home/mwagner/llm-hub/models-quantized/Qwen3.8-27B-AWQ-INT4-v2"
 NUM_CALIBRATION_SAMPLES = 128
 MAX_SEQ_LEN = 2048
 
@@ -61,7 +61,7 @@ ds = ds.map(preprocess, remove_columns=ds.column_names)
 # argument 'hidden_states'). Deshalb hier eigene Mappings OHNE die
 # linear_attention-Zuordnung: nur full_attention- und MLP-Layer werden per AWQ
 # quantisiert, die 48 Mamba-Layer bleiben in voller BF16-Präzision.
-cfg = json.load(open(glob("/home/mwagner/vllm/models/hub/models--Qwen--Qwen3.8-27B/snapshots/*/config.json")[0]))
+cfg = json.load(open(glob("/home/mwagner/llm-hub/models/hub/models--Qwen--Qwen3.8-27B/snapshots/*/config.json")[0]))
 layer_types = cfg["text_config"]["layer_types"]
 full_indices = [i for i, t in enumerate(layer_types) if t == "full_attention"]
 full_re = "|".join(str(i) for i in full_indices)

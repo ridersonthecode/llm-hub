@@ -1,4 +1,4 @@
-# vLLM-Manager – Installation & Benutzung
+# LLM-Hub – Installation & Benutzung
 
 Ersetzt das alte `Anleitung.txt` / `setup_hermes_service.sh` / `getHuggingfaceModel.py`
 Setup (jetzt unter [`archive/`](archive/)) durch einen **Ollama-artigen** vLLM-Betrieb:
@@ -9,8 +9,8 @@ KI-Agenten steuerbar.
 ## Architektur
 
 ```
-vllm.service (systemd, läuft immer)
-  = FastAPI "vLLM-Manager" + MCP-Server, ein Prozess, Port 11434, 0.0.0.0
+llm-hub.service (systemd, läuft immer)
+  = FastAPI "LLM-Hub" + MCP-Server, ein Prozess, Port 11434, 0.0.0.0
       │
       ├─ /v1/*        OpenAI-kompatibler Proxy, lädt Modell automatisch nach
       ├─ /models       Übersicht: registriert / gecacht / geladen
@@ -77,22 +77,22 @@ statt ihn versehentlich doppelt zu starten.
 ## Dienst steuern
 
 ```bash
-sudo systemctl status vllm
-sudo systemctl restart vllm      # nur nötig bei Config-/Code-Änderungen am Manager selbst,
+sudo systemctl status llm-hub
+sudo systemctl restart llm-hub      # nur nötig bei Config-/Code-Änderungen am Manager selbst,
                                   # NICHT zum Modellwechsel!
-sudo systemctl stop vllm
-sudo systemctl enable/disable vllm
+sudo systemctl stop llm-hub
+sudo systemctl enable/disable llm-hub
 sudo journalctl -u vllm -f       # Manager-Logs (Start/Stop/Requests)
 ```
 
 Logs der jeweils laufenden vLLM-Engine (Gewichte laden, CUDA-Graphen, Fehler) liegen
-unter `~/vllm/logs/<model>.log` (Pfad auch in `GET /health` → `log_file`).
+unter `~/llm-hub/logs/<model>.log` (Pfad auch in `GET /health` → `log_file`).
 
 ## config.json
 
-Zentrale, **user-eigene** Datei (`~/vllm/config.json`) – kein `sudo` zum Ändern nötig
+Zentrale, **user-eigene** Datei (`~/llm-hub/config.json`) – kein `sudo` zum Ändern nötig
 (anders als vorher, wo die Modellwahl in der root-eigenen systemd-Unit stand).
-Nach Änderungen: `sudo systemctl restart vllm` (nur der Manager, dauert Sekunden,
+Nach Änderungen: `sudo systemctl restart llm-hub` (nur der Manager, dauert Sekunden,
 nicht Minuten wie ein Modell-Start).
 
 Wichtige Felder:
@@ -154,7 +154,7 @@ angepasst werden – der Manager übersetzt das automatisch:
   hier zentral über `idle_timeout_seconds` bzw. den Hot Pool gesteuert, nicht
   pro Request.
 - Andere Ollama-Endpunkte (`/api/generate`, `/api/pull`, `/api/show`, ...) gibt
-  es nicht – bei Bedarf in [`vllm_manager/ollama_compat.py`](vllm_manager/ollama_compat.py)
+  es nicht – bei Bedarf in [`llm_hub/ollama_compat.py`](llm_hub/ollama_compat.py)
   nach demselben Muster ergänzen.
 
 ## Modelle herunterladen (mit Fortschritt)
@@ -193,7 +193,7 @@ Ausführung stoppen (nur vor dem Start) - nur ein Kindprozess lässt sich jederz
 sauber per Signal beenden.
 
 **Hinweis:** Download-Jobs laufen im Manager-Prozess (der Kindprozess wird von ihm
-verwaltet) und überleben keinen `systemctl restart vllm` – bei einem Neustart
+verwaltet) und überleben keinen `systemctl restart llm-hub` – bei einem Neustart
 während eines laufenden Downloads muss er neu gestartet werden (bereits
 heruntergeladene Dateien bleiben im Cache erhalten, `snapshot_download` setzt fort
 statt neu zu beginnen).
@@ -391,7 +391,7 @@ Zeigt in Echtzeit per WebSocket (kein Polling, kein Neuladen der Seite nötig):
 - Dark-Mode-Toggle oben rechts (merkt sich die Wahl in `localStorage`)
 - Sprachauswahl oben rechts (Dropdown): **Englisch ist Standardsprache**, Deutsch
   wählbar, Wahl wird persistent in `localStorage` gespeichert. Übersetzungen liegen
-  in [`vllm_manager/languages/`](vllm_manager/languages/) – je eine `<code>.json`
+  in [`llm_hub/languages/`](llm_hub/languages/) – je eine `<code>.json`
   pro Sprache (aktuell `en.json`, `de.json`), automatisch beim Serverstart geladen
   und in die Seite eingebettet. Neue Sprache hinzufügen: einfach eine weitere
   `<code>.json` mit denselben Schlüsseln in den Ordner legen, kein Code-Änderung
@@ -505,7 +505,7 @@ HF-Cache (funktioniert auch für noch nicht registrierte, aber schon
 heruntergeladene Modelle - einfach den Namen eintragen und klicken) und
 schlägt Vision/Tool-Calling/Reasoning/Task samt Begründung und
 Konfidenz ("wahrscheinlich"/"unsicher") vor - siehe
-[`vllm_manager/capability_detector.py`](vllm_manager/capability_detector.py)
+[`llm_hub/capability_detector.py`](llm_hub/capability_detector.py)
 für die genaue Heuristik (u.a. `<think>`+`enable_thinking` → Qwen3-Reasoning,
 `<tool_call><function=...>` → Qwen3-XML-Tool-Calling, Harmony-Channels →
 gpt-oss, `1_Pooling/`-Ordner → Embedding-Task). **Reine Vermutung, nichts wird
@@ -523,7 +523,7 @@ den normalen Speichern-Button oben.
   sind mit einem 🔁-Badge markiert und brauchen einen echten Neustart. Bereits
   laufende Engines behalten ihre alten Serve-Args, bis sie neu geladen werden.
 - **"Speichern & Dienst neu starten"**: wie oben, stößt danach zusätzlich
-  `sudo systemctl restart vllm` an. Braucht **passwortlosen sudo** für genau
+  `sudo systemctl restart llm-hub` an. Braucht **passwortlosen sudo** für genau
   diesen Befehl (selbst einzurichten, z.B. per `visudo`-Eintrag - der Manager
   richtet das aus Sicherheitsgründen nicht selbst ein). Ohne passenden
   sudoers-Eintrag schlägt der Button mit einer klaren Fehlermeldung fehl, statt
@@ -604,7 +604,7 @@ per semantischer Suche wiederfinden (Hintergrund siehe
 ```
 Qdrant (Docker-Container, Port 6333/6334, --restart unless-stopped)
   ↑ speichert Vektoren + Metadaten pro Collection
-vLLM-Manager (vllm_manager/rag.py)
+LLM-Hub (llm_hub/rag.py)
   ↑ embedded Text über ein Embedding-Modell im Hot Pool
   ↑ (Qwen/Qwen3-Embedding-0.6B, läuft mit --runner pooling statt generate)
       ├─ /rag/* (REST, von der Dashboard-Seite genutzt)
@@ -696,7 +696,7 @@ Neustart**):
 }
 ```
 
-**Ablauf pro Anfrage** an ein so konfiguriertes Modell (`vllm_manager/rag.py`,
+**Ablauf pro Anfrage** an ein so konfiguriertes Modell (`llm_hub/rag.py`,
 `apply_auto_rag()` - aufgerufen von `main.py` für `/v1/chat/completions` UND von
 `ollama_compat.py` für `/api/chat`, beide Client-Arten profitieren also
 gleichermaßen):
@@ -811,17 +811,17 @@ letzten Start geändert hat).
 ## Manueller Start (zum Debuggen, ohne Dienst)
 
 ```bash
-source ~/vllm/.venv/bin/activate
-python -m vllm_manager
+source ~/llm-hub/.venv/bin/activate
+python -m llm_hub
 ```
 
 ## Projektstruktur
 
 ```
-~/vllm/
+~/llm-hub/
   config.json              # zentrale Konfiguration
-  vllm.service              # systemd-Unit-Vorlage (installiert unter /etc/systemd/system/)
-  vllm_manager/              # FastAPI + MCP Code
+  llm-hub.service              # systemd-Unit-Vorlage (installiert unter /etc/systemd/system/)
+  llm_hub/              # FastAPI + MCP Code
   logs/                      # Log-Dateien je Modell (vllm serve stdout/stderr)
   models/                    # HF_HOME, HuggingFace-Modell-Cache
   archive/                   # altes Setup (setup_hermes_service.sh, getHuggingfaceModel.py)

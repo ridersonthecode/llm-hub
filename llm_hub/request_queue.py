@@ -37,7 +37,7 @@ from typing import Optional
 from . import telemetry
 from .config import get_config
 
-logger = logging.getLogger("vllm_manager.request_queue")
+logger = logging.getLogger("llm_hub.request_queue")
 
 # Wie oft der Hintergrund-Dispatcher prüft, ob eine wartende Anfrage jetzt
 # übergeben werden darf (Slot frei UND Ruhephase erreicht). Kein Grund, das

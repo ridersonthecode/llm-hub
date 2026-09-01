@@ -43,7 +43,7 @@ CHAT_DASHBOARD_HTML = r"""<!doctype html>
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>vLLM Manager – Chat</title>
+<title>LLM Hub – Chat</title>
 <style>
   :root {
     --bg:#f5f6f8; --panel:#ffffff; --panel-2:#eef0f4; --border:#dfe3ea;
@@ -247,7 +247,7 @@ function populateLangSelect() {
 }
 function applyStaticI18n() {
   document.documentElement.lang = currentLang;
-  document.title = "vLLM Manager – " + t("chat.title");
+  document.title = "LLM Hub – " + t("chat.title");
   document.querySelectorAll("[data-i18n]").forEach(el => { el.textContent = t(el.dataset.i18n); });
   document.querySelectorAll("[data-i18n-title]").forEach(el => { el.title = t(el.dataset.i18nTitle); });
   document.querySelectorAll("[data-i18n-placeholder]").forEach(el => { el.placeholder = t(el.dataset.i18nPlaceholder); });

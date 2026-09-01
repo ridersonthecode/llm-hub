@@ -32,10 +32,14 @@ from .ollama_compat import router as ollama_router
 from .rag_dashboard import router as rag_dashboard_router
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
-logger = logging.getLogger("vllm_manager")
+logger = logging.getLogger("llm_hub")
 
 IDLE_CHECK_INTERVAL = 30
 ORPHAN_CHECK_INTERVAL = 300  # 5 Minuten - Prozess-Scan ist billig, muss nicht so oft wie der Idle-Check laufen
+# Fallback für GET /v1/models -> maxInputTokens/maxOutputTokens, wenn kein
+# max_model_len/max_tokens bekannt ist (nicht registrierte, nur gecachte
+# Modelle) - reiner Platzhalter für Clients, die diese Felder erwarten.
+_V1_MODELS_DEFAULT_MAX_TOKENS = 4096
 
 
 async def _idle_check_once() -> None:
@@ -152,7 +156,7 @@ async def lifespan(_app: FastAPI):
     await process_manager.stop_engine(reason="shutdown")
 
 
-app = FastAPI(title="vLLM Manager", lifespan=lifespan)
+app = FastAPI(title="LLM Hub", lifespan=lifespan)
 app.mount("/mcp", mcp.streamable_http_app())
 # Vendorte Frontend-Bibliotheken (siehe static/vendor/datatables/README.md) -
 # lokal statt CDN, damit die Dashboards auch ohne Internetzugang funktionieren.
@@ -176,7 +180,7 @@ async def health():
 @app.get("/models")
 async def list_models_endpoint():
     cfg = get_config()
-    cached = set(await list_cached_models(cfg.hf_home))
+    cached = set(await list_cached_models(cfg.resolved_hf_home()))
     out = []
     for name, mcfg in cfg.models.items():
         out.append({
@@ -282,7 +286,7 @@ async def detect_model_capabilities_endpoint(model: str):
     vom Config-Editor ("Fähigkeiten automatisch erkennen"-Button), siehe
     capability_detector.py. Rein lesend, kein Ladevorgang nötig."""
     cfg = get_config()
-    return capability_detector.detect_capabilities(model, cfg.hf_home)
+    return capability_detector.detect_capabilities(model, cfg.resolved_hf_home())
 
 
 @app.post("/models/{model:path}/perf_tune")
@@ -382,7 +386,7 @@ async def model_cache_info_endpoint(model: str):
     rekursive Verzeichnisgröße über evtl. hunderte GB soll nicht bei jedem
     WebSocket-Heartbeat für jedes Modell neu berechnet werden."""
     cfg = get_config()
-    path = catalog.cache_dir_for(model, cfg.hf_home)
+    path = catalog.cache_dir_for(model, cfg.resolved_hf_home())
     if not path.exists():
         return {"cached": False, "size_bytes": 0, "path": str(path)}
     size = await asyncio.to_thread(catalog.dir_size_bytes, path)
@@ -406,11 +410,11 @@ async def delete_model_cache_endpoint(model: str):
             f"Dateien von der Platte gelöscht werden können.",
         )
     cfg = get_config()
-    path = catalog.cache_dir_for(model, cfg.hf_home)
+    path = catalog.cache_dir_for(model, cfg.resolved_hf_home())
     if not path.exists():
         raise HTTPException(404, f"Für Modell '{model}' sind lokal keine Dateien vorhanden.")
-    freed = await asyncio.to_thread(catalog.delete_model_cache, model, cfg.hf_home)
-    catalog.invalidate_cache(cfg.hf_home)
+    freed = await asyncio.to_thread(catalog.delete_model_cache, model, cfg.resolved_hf_home())
+    catalog.invalidate_cache(cfg.resolved_hf_home())
     catalog.invalidate_size_cache(model)
     return {"ok": True, "freed_bytes": freed}
 
@@ -822,12 +826,37 @@ async def proxy_v1(path: str, request: Request):
     body = await request.body()
 
     if path == "models" and request.method == "GET":
-        cached = await list_cached_models(cfg.hf_home)
+        cached = await list_cached_models(cfg.resolved_hf_home())
         names = sorted(set(cfg.models.keys()) | set(cached))
-        return {
-            "object": "list",
-            "data": [{"id": n, "object": "model", "owned_by": "vllm-manager"} for n in names],
-        }
+        # base_url zeigt auf DIESEN Manager (nicht auf die interne Engine, siehe
+        # engine_host/engine_port oben) - aus dem eingehenden Request abgeleitet
+        # statt aus cfg.host (der ist standardmäßig "0.0.0.0", also für einen
+        # Client nutzlos), damit "url" unabhängig davon stimmt, über welche
+        # Adresse (localhost/LAN-IP/Hostname) der Manager gerade erreicht wird.
+        base_url = str(request.base_url).rstrip("/")
+        data = []
+        for n in names:
+            mcfg = cfg.models.get(n)
+            data.append({
+                "id": n,
+                "object": "model",
+                "owned_by": "llm-hub",
+                "name": n,
+                "url": f"{base_url}/v1",
+                # toolCalling/vision/maxInputTokens spiegeln die Auto-Detect-
+                # Werte aus capability_detector.py (siehe ModelConfig-Docstring
+                # in config.py) - bei nur lokal gecachten, nicht registrierten
+                # Modellen (mcfg is None) gibt es die nicht, dann konservative
+                # Defaults.
+                "toolCalling": bool(mcfg.enable_auto_tool_choice) if mcfg else False,
+                "vision": bool(mcfg.vision) if mcfg else False,
+                "maxInputTokens": mcfg.max_model_len if mcfg and mcfg.max_model_len else _V1_MODELS_DEFAULT_MAX_TOKENS,
+                # maxOutputTokens = ModelConfig.max_tokens (Sicherheitsnetz-
+                # Obergrenze, siehe _apply_default_max_tokens) - None (kein
+                # Limit gesetzt) fällt ebenfalls auf den Default zurück.
+                "maxOutputTokens": mcfg.max_tokens if mcfg and mcfg.max_tokens else _V1_MODELS_DEFAULT_MAX_TOKENS,
+            })
+        return {"object": "list", "data": data}
 
     model = None
     is_stream = False
@@ -848,7 +877,7 @@ async def proxy_v1(path: str, request: Request):
     # Cache-Scan nur, wenn wirklich nötig - im Normalfall (registriertes
     # Modell in config.json) spart das den Disk-I/O-Aufruf auf jeder einzelnen
     # Chat-Anfrage komplett, siehe catalog.py-Docstring.
-    if model not in cfg.models and model not in await list_cached_models(cfg.hf_home):
+    if model not in cfg.models and model not in await list_cached_models(cfg.resolved_hf_home()):
         _finish_and_record(rid, "error")
         raise HTTPException(
             404,

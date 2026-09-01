@@ -1,6 +1,6 @@
 {
   "servers": {
-    "vllm-manager": {
+    "llm-hub": {
       "type": "http",
       "url": "http://10.7.21.3:11434/mcp"
     }

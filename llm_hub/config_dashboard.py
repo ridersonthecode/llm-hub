@@ -27,7 +27,7 @@ CONFIG_DASHBOARD_HTML = r"""<!doctype html>
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>vLLM Manager – Config</title>
+<title>LLM Hub – Config</title>
 <link rel="stylesheet" href="/static/vendor/datatables/dataTables.dataTables.min.css">
 <link rel="stylesheet" href="/static/vendor/datatables/dataTables.inputPaging.min.css">
 <style>
@@ -177,7 +177,7 @@ CONFIG_DASHBOARD_HTML = r"""<!doctype html>
   .modal-overlay.open { display:flex; }
   .modal {
     position:relative; background:var(--panel); border:1px solid var(--border); border-radius:12px;
-    max-width:480px; width:100%; max-height:85vh; overflow-y:auto; padding:22px;
+    max-width:720px; width:100%; max-height:90vh; overflow-y:auto; padding:22px;
   }
   .modal h3 { margin:0 0 4px; font-size:16px; }
   .modal .close-btn {
@@ -312,11 +312,17 @@ CONFIG_DASHBOARD_HTML = r"""<!doctype html>
           <div class="row">
             <div>
               <label><span data-i18n="cfg.field.hfHome">HF Home (model cache dir)</span><span class="help-icon" data-help="cfg_hfHome" data-i18n-title="help.clickForInfo" title="Click for more info">?</span></label>
-              <input type="text" id="f-hf_home">
+              <input type="text" id="f-hf_home" placeholder="auto">
             </div>
             <div>
               <label><span data-i18n="cfg.field.vllmBin">vLLM Binary (empty = auto)</span><span class="help-icon" data-help="cfg_vllmBin" data-i18n-title="help.clickForInfo" title="Click for more info">?</span></label>
               <input type="text" id="f-vllm_bin" placeholder="auto">
+            </div>
+          </div>
+          <div class="row">
+            <div>
+              <label><span data-i18n="cfg.field.sglangPython">SGLang Python interpreter (empty = auto)</span><span class="help-icon" data-help="cfg_sglangPython" data-i18n-title="help.clickForInfo" title="Click for more info">?</span></label>
+              <input type="text" id="f-sglang_python" placeholder="/path/to/sglang-venv/bin/python">
             </div>
           </div>
         </div>
@@ -576,7 +582,7 @@ function populateLangSelect() {
 }
 function applyStaticI18n() {
   document.documentElement.lang = currentLang;
-  document.title = "vLLM Manager – " + t("cfg.title");
+  document.title = "LLM Hub – " + t("cfg.title");
   document.querySelectorAll("[data-i18n]").forEach(el => { el.textContent = t(el.dataset.i18n); });
   document.querySelectorAll("[data-i18n-title]").forEach(el => { el.title = t(el.dataset.i18nTitle); });
 }
@@ -699,6 +705,7 @@ function renderForm() {
   $("f-engine_port").value = state.engine_port ?? "";
   $("f-hf_home").value = state.hf_home ?? "";
   $("f-vllm_bin").value = state.vllm_bin ?? "";
+  $("f-sglang_python").value = state.sglang_python ?? "";
 
   $("f-api_key_enabled").checked = !!(state.api_key && state.api_key.enabled);
   $("f-api_key_key").value = (state.api_key && state.api_key.key) || "";
@@ -734,7 +741,7 @@ function renderForm() {
   $("f-auto_reload_last_model").checked = state.auto_reload_last_model !== false;
   $("f-rag_embedding_model").value = rag.embedding_model ?? "";
 
-  document.querySelectorAll("#f-host,#f-port,#f-engine_host,#f-engine_port,#f-hf_home,#f-vllm_bin,"
+  document.querySelectorAll("#f-host,#f-port,#f-engine_host,#f-engine_port,#f-hf_home,#f-vllm_bin,#f-sglang_python,"
     + "#f-api_key_enabled,#f-api_key_key,#f-max_concurrent_models,#f-gpu_memory_ceiling,"
     + "#f-idle_timeout_seconds,#f-startup_timeout_seconds,#f-auto_reload_last_model,"
     + "#f-queue_timeout_seconds,#f-max_concurrent_requests,#f-queue_debounce_seconds,"
@@ -783,10 +790,17 @@ function renderModels() {
         <span class="badge ${m.enabled === false ? "idle" : "ok"}">${m.enabled === false ? t("badge.disabled") : t("badge.enabled")}</span>
         ${m.vision ? `<span class="badge idle">${t("badge.vision")}</span>` : ""}
         ${m.task === "embed" ? `<span class="badge idle">embed</span>` : ""}
+        ${m.engine === "sglang" ? `<span class="badge idle">SGLang</span>` : ""}
       </div>
       <div class="accordion-body">
         <label><span data-i18n="cfg.field.modelName">Model name / path</span>${helpIcon("cfg_modelName")}</label>
         <input type="text" class="m-field" data-idx="${i}" data-field="name" value="${esc(m.name)}">
+
+        <label><span data-i18n="cfg.field.engine">Engine</span>${helpIcon("cfg_engine")}</label>
+        <select class="m-field" data-idx="${i}" data-field="engine">
+          <option value="vllm" ${(m.engine ?? "vllm") === "vllm" ? "selected" : ""}>vLLM</option>
+          <option value="sglang" ${m.engine === "sglang" ? "selected" : ""}>SGLang</option>
+        </select>
 
         <div class="check-row">
           <input type="checkbox" class="m-field" data-idx="${i}" data-field="enabled" id="m-enabled-${i}" ${m.enabled !== false ? "checked" : ""}>
@@ -805,6 +819,7 @@ function renderModels() {
 
         <div class="card">
           <div class="hint" data-i18n="cfg.hint.autoManaged">🔒 Automatically determined from the model itself at every engine start - not editable here, any manual value would be overwritten on the next start anyway.</div>
+          ${m.engine === "sglang" ? `<div class="hint" data-i18n="cfg.hint.sglangNoAutoFlags">⚠️ Engine: SGLang - tool calling/reasoning parser below are detected for display only, they are NOT passed to the engine (different flag names than vLLM). Add them yourself via "Extra args" if needed.</div>` : ""}
           <div class="row" style="margin-top:6px;">
             <div><span data-i18n="cfg.field.task">Task</span>: <span class="mono">${m.task === "embed" ? "embed" : "generate"}</span></div>
             <div><span data-i18n="badge.vision">Vision</span>: <span class="mono">${m.vision ? "✅" : "–"}</span></div>
@@ -913,6 +928,7 @@ function renderModels() {
         if (header) header.textContent = val || t("cfg.hint.unnamedModel");
       }
       if (field === "name" || field === "enabled") { renderPriorityList(); }
+      if (field === "engine") { renderModels(); }  // Badge + SGLang-Hinweis im Card-Body sofort aktualisieren
     };
     el.addEventListener("input", handler);
     el.addEventListener("change", handler);
@@ -1416,7 +1432,7 @@ $("add-model-btn").addEventListener("click", () => {
     gpu_memory_utilization: null, tool_call_parser: null, reasoning_parser: null,
     enable_auto_tool_choice: false, vision: false, extra_args: [], hf_token: null, notes: "",
     max_tokens: null, rag_collection: null, repetition_penalty: null, repetition_detection: true,
-    priority: 0,
+    priority: 0, engine: "vllm",
   });
   openAccordions.add(modelsList.length - 1);
   markDirty();
@@ -1564,8 +1580,9 @@ function buildPayload() {
     port: parseInt($("f-port").value, 10),
     engine_host: $("f-engine_host").value,
     engine_port: parseInt($("f-engine_port").value, 10),
-    hf_home: $("f-hf_home").value,
+    hf_home: $("f-hf_home").value || null,
     vllm_bin: $("f-vllm_bin").value || null,
+    sglang_python: $("f-sglang_python").value || null,
     api_key: { enabled: $("f-api_key_enabled").checked, key: $("f-api_key_key").value },
     idle_timeout_seconds: num("f-idle_timeout_seconds"),
     max_concurrent_models: parseInt($("f-max_concurrent_models").value, 10),

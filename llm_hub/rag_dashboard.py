@@ -22,7 +22,7 @@ RAG_DASHBOARD_HTML = r"""<!doctype html>
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>vLLM Manager – RAG</title>
+<title>LLM Hub – RAG</title>
 <link rel="stylesheet" href="/static/vendor/datatables/dataTables.dataTables.min.css">
 <link rel="stylesheet" href="/static/vendor/datatables/dataTables.inputPaging.min.css">
 <style>
@@ -31,6 +31,7 @@ RAG_DASHBOARD_HTML = r"""<!doctype html>
     --text:#161922; --text-dim:#4b5363; --mono: "SF Mono", Consolas, "Liberation Mono", monospace;
     --accent:#2563eb; --good:#15803d; --warn:#b45309; --bad:#dc2626;
     --accent-bg:rgba(37,99,235,.10); --good-bg:rgba(21,128,61,.10); --bad-bg:rgba(220,38,38,.10); --warn-bg:rgba(180,83,9,.12);
+    --code-bg:#0d1117; --code-text:#e6edf3; --code-bar:#161b22;
   }
   @media (prefers-color-scheme: dark) {
     :root:not([data-theme="light"]) {
@@ -113,13 +114,39 @@ RAG_DASHBOARD_HTML = r"""<!doctype html>
     position:absolute; top:16px; right:20px; background:none; border:none;
     color:var(--text-dim); font-size:20px; cursor:pointer; line-height:1;
   }
-  .modal .chunk-block { margin-bottom:16px; }
-  .modal .chunk-block:last-child { margin-bottom:0; }
-  .modal .chunk-label { font-size:11px; color:var(--text-dim); text-transform:uppercase; letter-spacing:.04em; margin-bottom:6px; }
-  .modal .chunk-text {
+  /* Ganzes Dokument (alle Chunks der Reihe nach zu EINEM Text
+     zusammengesetzt, siehe openTextModal/openDocumentModal) statt einer
+     Chunk-für-Chunk-Ansicht - wer speichert, denkt in Dokumenten, nicht in
+     den internen Speicher-Häppchen (Chat vom 2026-08-31). Umschaltbar
+     zwischen Rohtext und gerendertem Markdown (für als Text eingefügte
+     .md-Inhalte), siehe view-toggle unten. */
+  .modal .view-toggle { display:flex; gap:6px; margin-bottom:14px; }
+  .modal .view-toggle button {
+    background:var(--panel); border:1px solid var(--border); color:var(--text-dim);
+    border-radius:8px; height:30px; padding:0 12px; font-size:12px; cursor:pointer;
+  }
+  .modal .view-toggle button.active { background:var(--accent); border-color:var(--accent); color:#fff; }
+  .modal .raw-text {
     background:var(--panel-2); border:1px solid var(--border); border-radius:8px;
     padding:12px; font-family:var(--mono); font-size:12px; white-space:pre-wrap; word-break:break-word; margin:0;
   }
+  .modal .md-render p { margin: 0 0 10px; }
+  .modal .md-render p:last-child { margin-bottom:0; }
+  .modal .md-render ul, .modal .md-render ol { margin: 4px 0 10px; padding-left: 22px; }
+  .modal .md-render h3, .modal .md-render h4, .modal .md-render h5, .modal .md-render h6 { margin: 14px 0 8px; }
+  .modal .md-render h3:first-child, .modal .md-render h4:first-child { margin-top:0; }
+  .modal .md-render code { font-family: var(--mono); background:var(--panel-2); border-radius:4px; padding:1px 5px; font-size:.92em; }
+  .modal .md-render .code-block { margin: 8px 0; border-radius:8px; overflow:hidden; border:1px solid var(--border); }
+  .modal .md-render .code-block-bar {
+    display:flex; justify-content:space-between; align-items:center; background:var(--code-bar); color:var(--text-dim);
+    padding:4px 10px; font-size:11px;
+  }
+  .modal .md-render .code-block-bar button {
+    background:none; border:none; color:var(--text-dim); cursor:pointer; font-size:11px; padding:2px 6px;
+  }
+  .modal .md-render .code-block-bar button:hover { color:#fff; }
+  .modal .md-render .code-block pre { margin:0; background:var(--code-bg); color:var(--code-text); padding:12px; overflow-x:auto; }
+  .modal .md-render .code-block code { font-family: var(--mono); font-size:12.5px; background:none; padding:0; }
   /* Ganzer Text steckt im DOM (fürs Sortieren/Suchen der DataTable), sichtbar
      aber auf eine Zeile gekürzt - voller Text per Browser-Tooltip (title-
      Attribut) oder vollständig/formatiert per "Anzeigen"-Button im Modal. */
@@ -238,8 +265,7 @@ RAG_DASHBOARD_HTML = r"""<!doctype html>
 
     <section>
       <h2 data-i18n="section.documents">Documents</h2>
-      <div id="documents-empty-hint" class="empty" data-i18n="empty.selectCollection"></div>
-      <table id="documents-table" class="display" style="width:100%; display:none;"></table>
+      <table id="documents-table" class="display" style="width:100%;"></table>
     </section>
 
     <section>
@@ -271,7 +297,12 @@ RAG_DASHBOARD_HTML = r"""<!doctype html>
       <button class="close-btn" id="text-modal-close">✕</button>
       <h3 id="text-modal-title">–</h3>
       <p class="hint" id="text-modal-hint"></p>
-      <div id="text-modal-body"></div>
+      <div class="view-toggle" id="text-modal-toggle">
+        <button id="text-modal-view-md" data-i18n="modal.viewRendered">Rendered</button>
+        <button id="text-modal-view-raw" data-i18n="modal.viewRaw">Raw text</button>
+      </div>
+      <pre class="raw-text" id="text-modal-raw" style="display:none;"></pre>
+      <div class="md-render" id="text-modal-rendered" style="display:none;"></div>
     </div>
   </div>
 
@@ -320,7 +351,7 @@ function populateLangSelect() {
 }
 function applyStaticI18n() {
   document.documentElement.lang = currentLang;
-  document.title = "vLLM Manager – " + t("rag.title");
+  document.title = "LLM Hub – " + t("rag.title");
   document.querySelectorAll("[data-i18n]").forEach(el => { el.textContent = t(el.dataset.i18n); });
   document.querySelectorAll("[data-i18n-title]").forEach(el => { el.title = t(el.dataset.i18nTitle); });
   document.querySelectorAll("[data-i18n-placeholder]").forEach(el => { el.placeholder = t(el.dataset.i18nPlaceholder); });
@@ -359,19 +390,133 @@ function authHeaders(extra) {
   return h;
 }
 
+// --- Mini-Markdown-Renderer (identisch zum Chat-Dashboard, siehe dort) -----
+// Bewusst kein CDN/keine externe Bibliothek. Nur für die Anzeige gedacht -
+// wer als Text einen kompletten Markdown-Inhalt einfügt (Chat vom
+// 2026-08-31: "ich möchte das auch als komplettes markdown wieder anschauen
+// können"), soll ihn formatiert statt als Rohtext sehen können.
+function mdRenderInline(text) {
+  const codes = [];
+  text = text.replace(/`([^`\n]+)`/g, (_, code) => {
+    codes.push(`<code>${esc(code)}</code>`);
+    return `\u0000${codes.length - 1}\u0000`;
+  });
+  text = esc(text);
+  text = text.replace(/\[([^\]]+)\]\((https?:\/\/[^\s)]+)\)/g, '<a href="$2" target="_blank" rel="noopener noreferrer">$1</a>');
+  text = text.replace(/\*\*([^*\n]+)\*\*/g, "<strong>$1</strong>");
+  text = text.replace(/(^|[^*])\*([^*\n]+)\*(?!\*)/g, "$1<em>$2</em>");
+  text = text.replace(/\u0000(\d+)\u0000/g, (_, i) => codes[Number(i)]);
+  return text;
+}
+function mdRenderBlock(text) {
+  const lines = text.split("\n");
+  const htmlParts = [];
+  let listBuf = [], listType = null, paraBuf = [];
+  const flushList = () => {
+    if (listBuf.length) {
+      const tag = listType === "ol" ? "ol" : "ul";
+      htmlParts.push(`<${tag}>${listBuf.map(li => `<li>${mdRenderInline(li)}</li>`).join("")}</${tag}>`);
+      listBuf = []; listType = null;
+    }
+  };
+  const flushPara = () => {
+    if (paraBuf.length) { htmlParts.push(`<p>${mdRenderInline(paraBuf.join(" "))}</p>`); paraBuf = []; }
+  };
+  for (const line of lines) {
+    const heading = line.match(/^(#{1,4})\s+(.*)$/);
+    const ol = line.match(/^\s*\d+[.)]\s+(.*)$/);
+    const ul = line.match(/^\s*[-*]\s+(.*)$/);
+    if (line.trim() === "") { flushPara(); flushList(); continue; }
+    if (heading) {
+      flushPara(); flushList();
+      const level = heading[1].length + 2; // h3..h6 - h1/h2 bleiben der Modal-Überschrift vorbehalten
+      htmlParts.push(`<h${level}>${mdRenderInline(heading[2])}</h${level}>`);
+    } else if (ol) {
+      flushPara(); if (listType !== "ol") flushList();
+      listType = "ol"; listBuf.push(ol[1]);
+    } else if (ul) {
+      flushPara(); if (listType !== "ul") flushList();
+      listType = "ul"; listBuf.push(ul[1]);
+    } else {
+      flushList(); paraBuf.push(line);
+    }
+  }
+  flushPara(); flushList();
+  return htmlParts.join("");
+}
+function mdRenderCodeBlock(lang, code) {
+  const id = "rag-code-" + Math.random().toString(36).slice(2, 9);
+  return `<div class="code-block">
+    <div class="code-block-bar">
+      <span>${esc(lang || "text")}</span>
+      <button class="code-copy-btn" data-target="${id}">${esc(t("chat.action.copyCode"))}</button>
+    </div>
+    <pre><code id="${id}">${esc(code)}</code></pre>
+  </div>`;
+}
+function renderMarkdown(text) {
+  // An jedem ``` aufsplitten: gerade Indizes = normaler Text, ungerade = Code
+  // (Sprache in der ersten Zeile) - siehe chat_dashboard.py für dieselbe Logik.
+  const parts = (text || "").split("```");
+  let html = "";
+  for (let i = 0; i < parts.length; i++) {
+    if (i % 2 === 0) {
+      html += mdRenderBlock(parts[i]);
+    } else {
+      const seg = parts[i];
+      const nl = seg.indexOf("\n");
+      const lang = nl === -1 ? seg.trim() : seg.slice(0, nl).trim();
+      const code = nl === -1 ? "" : seg.slice(nl + 1);
+      html += mdRenderCodeBlock(lang, code);
+    }
+  }
+  return html;
+}
+// Grobe Heuristik, ob ein Text vermutlich Markdown ist - per Dateiendung
+// (aus "Add File") oder anhand typischer Markdown-Syntax (aus "Add Text",
+// wo es keine Dateiendung gibt). Bestimmt nur die Voreinstellung der
+// Ansicht, per Klick jederzeit umschaltbar.
+function looksLikeMarkdown(title, text) {
+  if (/\.(md|markdown)$/i.test(title || "")) return true;
+  if (!text) return false;
+  return /^#{1,4}\s+\S/m.test(text) || /```/.test(text) || /^\s*[-*]\s+\S/m.test(text) || /\[[^\]]+\]\(https?:\/\//.test(text);
+}
+$("text-modal-rendered").addEventListener("click", async (e) => {
+  const btn = e.target.closest(".code-copy-btn");
+  if (!btn) return;
+  const code = document.getElementById(btn.dataset.target)?.textContent || "";
+  try {
+    await navigator.clipboard.writeText(code);
+    const orig = btn.textContent;
+    btn.textContent = t("modal.copied");
+    setTimeout(() => { btn.textContent = orig; }, 1200);
+  } catch { /* Clipboard-API evtl. ohne HTTPS/Permission nicht verfügbar - stumm ignorieren. */ }
+});
+
 // --- Text-Detail-Modal ------------------------------------------------
-// Zeigt gespeicherte Chunks vollständig (unabgeschnitten) an - für ein
-// ganzes Dokument (mehrere Chunks, siehe openDocumentModal) oder einen
-// einzelnen Treffer aus der Testsuche (siehe renderSearchResults).
-function openTextModal(title, hint, chunks) {
+// Zeigt ein Dokument oder einen Suchtreffer VOLLSTÄNDIG an - als EIN
+// zusammenhängender Text (alle Chunks der Reihe nach zusammengesetzt), nicht
+// Chunk für Chunk, da Chunking nur ein internes Speicher-Detail ist (Chat vom
+// 2026-08-31). Umschaltbar zwischen Rohtext und gerendertem Markdown.
+let modalFullText = "";
+function setModalView(view) {
+  $("text-modal-view-md").classList.toggle("active", view === "md");
+  $("text-modal-view-raw").classList.toggle("active", view === "raw");
+  $("text-modal-rendered").style.display = view === "md" ? "" : "none";
+  $("text-modal-raw").style.display = view === "raw" ? "" : "none";
+}
+$("text-modal-view-md").addEventListener("click", () => setModalView("md"));
+$("text-modal-view-raw").addEventListener("click", () => setModalView("raw"));
+
+function openTextModal(title, hint, fullText, opts) {
+  opts = opts || {};
+  modalFullText = fullText || "";
   $("text-modal-title").textContent = title || "–";
   $("text-modal-hint").textContent = hint || "";
   $("text-modal-hint").style.display = hint ? "" : "none";
-  $("text-modal-body").innerHTML = chunks.map(c => `
-    <div class="chunk-block">
-      ${chunks.length > 1 ? `<div class="chunk-label">${esc(t("modal.chunkLabel", { i: (c.chunk_index ?? 0) + 1, n: c.chunk_count ?? chunks.length }))}</div>` : ""}
-      <pre class="chunk-text">${esc(c.text || "")}</pre>
-    </div>`).join("");
+  $("text-modal-raw").textContent = modalFullText;
+  $("text-modal-rendered").innerHTML = renderMarkdown(modalFullText);
+  setModalView(opts.markdownGuess ? "md" : "raw");
   $("text-modal-overlay").classList.add("open");
 }
 function closeTextModal() { $("text-modal-overlay").classList.remove("open"); }
@@ -384,8 +529,13 @@ async function openDocumentModal(collection, documentId, title) {
   if (!res.ok) { alert(t("error.generic", { msg: await res.text() })); return; }
   const data = await res.json();
   const chunks = data.chunks || [];
+  // Chunks kommen vom Backend schon nach chunk_index sortiert (siehe
+  // rag.get_document_chunks) - hier nur noch zu einem Text zusammenfügen,
+  // wie beim Speichern ursprünglich gechunkt wurde (chunk_text() bricht an
+  // Absatz-/Satzgrenzen, siehe rag.py).
+  const fullText = chunks.map(c => c.text || "").join("\n\n");
   const hint = chunks.length > 1 ? t("modal.chunkCountHint", { n: chunks.length }) : "";
-  openTextModal(title, hint, chunks);
+  openTextModal(title, hint, fullText, { markdownGuess: looksLikeMarkdown(title, fullText) });
 }
 
 // --- Tabs --------------------------------------------------------------
@@ -425,6 +575,7 @@ async function loadCollections() {
   collectionsCache = data.collections || [];
   renderCollections();
   populateCollectionSelects();
+  await loadDocuments(selectedCollection);
 }
 
 function renderCollections() {
@@ -432,9 +583,21 @@ function renderCollections() {
     $("collections-box").innerHTML = `<div class="empty">${t("empty.noCollections")}</div>`;
     return;
   }
+  // Erste Zeile "Alle Collections" (data-name="", selectedCollection===null)
+  // fasst die Dokumente-Tabelle unten über alle Collections zusammen -
+  // Standardansicht beim Laden, ganz ohne dass man erst eine Collection
+  // anklicken oder die Testsuche bemühen muss (Chat vom 2026-08-31: "es gibt
+  // keine generelle Seite wo ich alle Dokumente sehen kann").
+  const totalPoints = collectionsCache.reduce((sum, c) => sum + (c.points_count || 0), 0);
+  const allRow = `
+      <tr class="clickable ${selectedCollection === null ? 'selected' : ''}" data-name="">
+        <td><em>${esc(t("collections.all"))}</em></td>
+        <td class="mono">${totalPoints}</td>
+        <td></td>
+      </tr>`;
   $("collections-box").innerHTML = `<table><thead><tr>
     <th>${t("th.collection")}</th><th>${t("th.chunks")}</th><th>${t("th.action")}</th>
-    </tr></thead><tbody>` + collectionsCache.map(c => `
+    </tr></thead><tbody>` + allRow + collectionsCache.map(c => `
       <tr class="clickable ${c.name === selectedCollection ? 'selected' : ''}" data-name="${esc(c.name)}">
         <td>${esc(c.name)}</td>
         <td class="mono">${c.points_count}</td>
@@ -444,7 +607,7 @@ function renderCollections() {
   $("collections-box").querySelectorAll("tr.clickable").forEach(tr => {
     tr.addEventListener("click", (e) => {
       if (e.target.closest("button")) return;
-      selectedCollection = tr.dataset.name;
+      selectedCollection = tr.dataset.name || null;
       renderCollections();
       loadDocuments(selectedCollection);
     });
@@ -453,11 +616,7 @@ function renderCollections() {
     btn.addEventListener("click", async () => {
       if (!confirm(t("confirm.deleteCollection", { name: btn.dataset.name }))) return;
       await fetch(`/rag/collections/${encodeURIComponent(btn.dataset.name)}`, { method: "DELETE", headers: authHeaders() });
-      if (selectedCollection === btn.dataset.name) {
-        selectedCollection = null;
-        documentsTable.table().container().style.display = "none";
-        $("documents-empty-hint").style.display = "";
-      }
+      if (selectedCollection === btn.dataset.name) selectedCollection = null;
       loadCollections();
     });
   });
@@ -478,6 +637,10 @@ function initDocumentsTable() {
     layout: { bottomEnd: "inputPaging" },
     language: { emptyTable: t("empty.noDocuments") },
     columns: [
+      // Collection-Spalte: nur wirklich aussagekräftig in der "Alle
+      // Collections"-Ansicht, aber auch bei einer gefilterten Collection
+      // harmlos mitgeführt statt die Spalten je nach Ansicht neu aufzubauen.
+      { title: t("th.collection"), data: null, render: (d, type) => esc(d.collection || "") },
       { title: t("th.source"), data: null, render: (d, type) => type === "display" ? esc(d.filename || d.source || "–") : (d.filename || d.source || "") },
       // Voller Text des Dokuments (siehe rag.list_documents - in Chunk-
       // Reihenfolge zusammengesetzt), gekürzt in der Zelle angezeigt
@@ -494,23 +657,19 @@ function initDocumentsTable() {
       { title: t("th.addedAt"), data: null, render: (d, type) => type !== "display" ? (d.added_at ?? 0) : (d.added_at ? new Date(d.added_at * 1000).toLocaleString(localeFor(currentLang)) : "–") },
       {
         title: t("th.action"), data: null, orderable: false,
-        render: (d) => `<button class="view-doc-btn" data-id="${esc(d.document_id)}" data-title="${esc(d.filename || d.source || "–")}">${t("action.select")}</button>`
-          + `<button class="btn danger del-doc-btn" data-id="${esc(d.document_id)}">${t("action.delete")}</button>`,
+        render: (d) => `<button class="view-doc-btn" data-collection="${esc(d.collection)}" data-id="${esc(d.document_id)}" data-title="${esc(d.filename || d.source || "–")}">${t("action.select")}</button>`
+          + `<button class="btn danger del-doc-btn" data-collection="${esc(d.collection)}" data-id="${esc(d.document_id)}">${t("action.delete")}</button>`,
       },
     ],
   });
-  // Wrapper (Suche/Paging/Tabelle) initial ausblenden - erst loadDocuments()
-  // (bei Auswahl einer Collection) blendet ihn wieder ein. Die "display:none"
-  // am statischen <table>-Tag selbst greift nach der DataTables-Initialisierung
-  // nicht mehr, da DataTables das <table> in einen eigenen Wrapper verschiebt.
-  documentsTable.table().container().style.display = "none";
   // Löschen-Buttons werden bei jedem draw() (auch beim Seitenwechsel) neu
-  // erzeugt - Listener daher hier statt einmalig binden. selectedCollection
-  // (globaler State) statt eines geschlossenen Parameters, da draw() nicht
-  // pro loadDocuments()-Aufruf neu gebunden wird.
+  // erzeugt - Listener daher hier statt einmalig binden. Collection kommt
+  // aus data-collection (pro Zeile, siehe oben) statt aus dem globalen
+  // selectedCollection, da die "Alle Collections"-Ansicht Zeilen aus
+  // mehreren Collections gleichzeitig zeigt.
   documentsTable.on("draw", () => {
     document.querySelectorAll("#documents-table .view-doc-btn").forEach(btn => {
-      btn.addEventListener("click", () => openDocumentModal(selectedCollection, btn.dataset.id, btn.dataset.title));
+      btn.addEventListener("click", () => openDocumentModal(btn.dataset.collection, btn.dataset.id, btn.dataset.title));
     });
     // Gekürzte Textvorschau selbst anklickbar - derselbe Weg zum vollen
     // Text wie über den "Anzeigen"-Button, nur ohne extra Button-Treffer.
@@ -518,28 +677,37 @@ function initDocumentsTable() {
       el.style.cursor = "pointer";
       el.addEventListener("click", () => {
         const btn = el.closest("tr").querySelector(".view-doc-btn");
-        if (btn) openDocumentModal(selectedCollection, btn.dataset.id, btn.dataset.title);
+        if (btn) openDocumentModal(btn.dataset.collection, btn.dataset.id, btn.dataset.title);
       });
     });
     document.querySelectorAll("#documents-table .del-doc-btn").forEach(btn => {
       btn.addEventListener("click", async () => {
         if (!confirm(t("confirm.deleteDocument"))) return;
-        await fetch(`/rag/collections/${encodeURIComponent(selectedCollection)}/documents/${encodeURIComponent(btn.dataset.id)}`, {
+        await fetch(`/rag/collections/${encodeURIComponent(btn.dataset.collection)}/documents/${encodeURIComponent(btn.dataset.id)}`, {
           method: "DELETE", headers: authHeaders(),
         });
-        loadDocuments(selectedCollection);
         loadCollections();
       });
     });
   });
 }
 
-async function loadDocuments(collection) {
+async function fetchDocumentsFor(collection) {
   const res = await fetch(`/rag/collections/${encodeURIComponent(collection)}/documents`, { headers: authHeaders() });
   const data = await res.json();
-  const docs = data.documents || [];
-  $("documents-empty-hint").style.display = "none";
-  documentsTable.table().container().style.display = "";
+  // Collection wird pro Dokument mitgeführt, weil die "Alle Collections"-
+  // Ansicht (collection === null) Zeilen aus mehreren Collections mischt.
+  return (data.documents || []).map(d => Object.assign({}, d, { collection }));
+}
+
+// collection === null -> über alle bekannten Collections hinweg (die neue
+// "Alle Collections"-Zeile oben in der Collections-Tabelle) statt nur eine
+// einzelne - Standardansicht, kein Klick auf eine Collection nötig.
+async function loadDocuments(collection) {
+  const docs = collection
+    ? await fetchDocumentsFor(collection)
+    : (await Promise.all(collectionsCache.map(c => fetchDocumentsFor(c.name))))
+        .flat().sort((a, b) => (b.added_at || 0) - (a.added_at || 0));
   documentsTable.clear();
   documentsTable.rows.add(docs);
   documentsTable.draw(false);
@@ -583,7 +751,6 @@ $("add-submit-btn").addEventListener("click", async () => {
     $("add-file-path").value = "";
     $("add-collection-new").value = "";
     loadCollections();
-    if (selectedCollection === collection) loadDocuments(collection);
   } catch (e) {
     statusEl.classList.add("error");
     statusEl.textContent = t("error.generic", { msg: e.message });
@@ -594,6 +761,10 @@ $("add-submit-btn").addEventListener("click", async () => {
 });
 
 // --- Test Search -----------------------------------------------------------
+// Collection des zuletzt gestarteten Suchlaufs - renderSearchResults() (und
+// darüber der Klick auf einen Treffer, der das ganze Dokument öffnet) kennt
+// sonst nicht, aus welcher Collection die Ergebnisse stammen.
+let lastSearchCollection = null;
 $("search-submit-btn").addEventListener("click", async () => {
   const collection = $("search-collection-select").value;
   const query = $("search-query").value;
@@ -612,6 +783,7 @@ $("search-submit-btn").addEventListener("click", async () => {
     });
     if (!res.ok) throw new Error(await res.text());
     const data = await res.json();
+    lastSearchCollection = collection;
     renderSearchResults(data.results || []);
   } catch (e) {
     statusEl.classList.add("error");
@@ -622,30 +794,65 @@ $("search-submit-btn").addEventListener("click", async () => {
   }
 });
 
+// Die Suche findet einzelne Chunks, aber mehrere Treffer können aus
+// demselben Dokument stammen - zu einer Zeile je Dokument zusammenfassen
+// (bester Score gewinnt), da Chunking nur ein internes Speicher-Detail ist
+// (Chat vom 2026-08-31: "ich möchte das immer zusammengefasst sehen und
+// nicht die chunks einzeln", gleicher Gedanke wie bei der Dokumenten-Tabelle
+// oben). Reihenfolge der Ergebnisse bleibt dabei erhalten.
+function groupSearchResultsByDocument(results) {
+  const grouped = [];
+  const indexByKey = new Map();
+  for (const r of results) {
+    const key = r.document_id || `${r.source || ""}|${r.text || ""}`;
+    if (indexByKey.has(key)) {
+      const g = grouped[indexByKey.get(key)];
+      g.matchCount++;
+      if ((r.score ?? 0) > (g.score ?? 0)) { g.score = r.score; g.text = r.text; }
+    } else {
+      indexByKey.set(key, grouped.length);
+      grouped.push(Object.assign({}, r, { matchCount: 1 }));
+    }
+  }
+  grouped.sort((a, b) => (b.score ?? 0) - (a.score ?? 0));
+  return grouped;
+}
+
 function renderSearchResults(results) {
   if (results.length === 0) {
     $("search-results-box").innerHTML = `<div class="empty">${t("empty.noResults")}</div>`;
     return;
   }
+  const grouped = groupSearchResultsByDocument(results);
   $("search-results-box").innerHTML = `<table><thead><tr>
     <th>${t("th.score")}</th><th>${t("th.text")}</th><th>${t("th.source")}</th>
-    </tr></thead><tbody>` + results.map((r, i) => `
+    </tr></thead><tbody>` + grouped.map((r, i) => `
       <tr>
         <td class="mono">${(r.score ?? 0).toFixed(3)}<div class="score-bar-bg"><div class="score-bar-fg" style="width:${Math.max(0, Math.min(100, (r.score ?? 0) * 100))}%"></div></div></td>
-        <td><div class="snippet" data-idx="${i}" title="${esc(t("action.viewFullText"))}">${esc((r.text || "").slice(0, 300))}${(r.text || "").length > 300 ? "…" : ""}</div></td>
+        <td>
+          <div class="snippet" data-idx="${i}" title="${esc(t("action.viewFullText"))}">${esc((r.text || "").slice(0, 300))}${(r.text || "").length > 300 ? "…" : ""}</div>
+          ${r.matchCount > 1 ? `<div class="status-msg">${esc(t("search.matchCount", { n: r.matchCount }))}</div>` : ""}
+        </td>
         <td>${esc(r.source || "–")}</td>
       </tr>`).join("") + `</tbody></table>`;
   document.querySelectorAll("#search-results-box .snippet").forEach(el => {
     el.addEventListener("click", () => {
-      const r = results[el.dataset.idx];
-      openTextModal(r.source || "–", "", [{ chunk_index: r.chunk_index, chunk_count: r.chunk_count, text: r.text }]);
+      const r = grouped[el.dataset.idx];
+      // Ganzes Dokument öffnen (alle Chunks zusammengesetzt) statt nur des
+      // einen getroffenen Chunks - siehe openDocumentModal weiter oben.
+      // Fallback auf den reinen Treffertext nur, falls document_id fehlt
+      // (sollte bei aktuellen Daten nicht vorkommen).
+      if (r.document_id && lastSearchCollection) {
+        openDocumentModal(lastSearchCollection, r.document_id, r.source || "–");
+      } else {
+        openTextModal(r.source || "–", "", r.text || "", { markdownGuess: looksLikeMarkdown(r.source, r.text) });
+      }
     });
   });
 }
 
 function refreshAll() {
   loadCollections();
-  if (selectedCollection) loadDocuments(selectedCollection);
 }
 
 populateLangSelect();

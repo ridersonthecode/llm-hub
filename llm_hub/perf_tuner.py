@@ -39,7 +39,7 @@ import httpx
 from . import config_editor, process_manager, telemetry
 from .config import get_config
 
-logger = logging.getLogger("vllm_manager.perf_tuner")
+logger = logging.getLogger("llm_hub.perf_tuner")
 
 JOBS: dict[str, dict] = {}
 _current_job_id: Optional[str] = None  # nur EIN Tuning-Job gleichzeitig, siehe Moduldocstring

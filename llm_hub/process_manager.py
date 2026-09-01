@@ -1,5 +1,10 @@
-"""Startet/stoppt vLLM-Engine-Kindprozesse (vllm serve <model>) bei Bedarf -
-ohne dass der vllm-Manager-Dienst selbst neu gestartet werden muss.
+"""Startet/stoppt Engine-Kindprozesse bei Bedarf - ohne dass der vllm-Manager-
+Dienst selbst neu gestartet werden muss. Standardmäßig vllm serve <model>;
+Modelle mit ModelConfig.engine == "sglang" laufen stattdessen über
+<sglang_python> -m sglang.launch_server (siehe _build_sglang_command) - z.B.
+für Checkpoints, die (noch) keinen vLLM-Support haben. Der Rest dieses
+Moduls (Hot Pool, Verdrängung, Health-Check, Orphan-Reaping) behandelt beide
+Engines gleich, da beide ein OpenAI-kompatibles API + /health bereitstellen.
 
 Hot Pool: bei max_concurrent_models > 1 können mehrere Modelle gleichzeitig
 geladen bleiben (je ein Kindprozess auf einem eigenen Port aus dem Pool
@@ -56,9 +61,9 @@ except ImportError:  # pragma: no cover - psutil kommt transitiv über vllm mit
     psutil = None
 
 from . import capability_detector, config_editor, telemetry
-from .config import CONFIG_PATH, Config, get_config
+from .config import CONFIG_PATH, PROJECT_ROOT, Config, get_config, resolve_local_model_path
 
-logger = logging.getLogger("vllm_manager.engine")
+logger = logging.getLogger("llm_hub.engine")
 
 LOG_DIR = Path(__file__).resolve().parent.parent / "logs"
 LOG_DIR.mkdir(exist_ok=True)
@@ -70,7 +75,7 @@ model_history: deque[dict] = deque(maxlen=MAX_HISTORY)
 
 # Persistenter Zeiger aufs zuletzt genutzte Modell (nicht PROJECT_ROOT fest
 # verdrahtet, sondern neben der tatsächlich verwendeten config.json - folgt
-# damit VLLM_MANAGER_CONFIG, siehe config_editor.py fürs selbe Muster). Wird
+# damit LLM_HUB_CONFIG, siehe config_editor.py fürs selbe Muster). Wird
 # bei jeder Nutzung eines bereit stehenden Modells aktualisiert (Kaltstart
 # fertig ODER Wiederverwendung eines schon warmen Modells) und beim
 # automatischen Nachladen in main.py's lifespan() gelesen.
@@ -212,6 +217,67 @@ def _parse_cudagraph_sizes(raw: str) -> list[int]:
 
 
 def _build_command(cfg: Config, model: str, port: int) -> list[str]:
+    """Dispatcht auf die passende Engine (siehe ModelConfig.engine) - "vllm"
+    (Default, siehe _build_vllm_command) oder "sglang" (siehe
+    _build_sglang_command). Modelle ohne eigenen models.<name>-Eintrag
+    (z.B. per HF-Repo-Name direkt geladen) laufen wie bisher über vLLM."""
+    mcfg = cfg.models.get(model)
+    engine = mcfg.engine if mcfg else "vllm"
+    if engine == "sglang":
+        return _build_sglang_command(cfg, model, port)
+    return _build_vllm_command(cfg, model, port)
+
+
+def _build_sglang_command(cfg: Config, model: str, port: int) -> list[str]:
+    """Baut das SGLang-Startkommando (`<sglang_python> -m sglang.launch_server
+    ...`) für Modelle mit ModelConfig.engine == "sglang". Bewusst schmaler als
+    _build_vllm_command: nur die generischen, engine-unabhängigen Werte
+    (max_model_len-Deckelung per capability_detector, gpu_memory_utilization/
+    max_model_len aus serve_args_for, extra_args) werden übernommen - vLLM-
+    Flag-spezifische Automatik (tool_call_parser, reasoning_parser,
+    cudagraph_capture_sizes, --runner pooling) NICHT, siehe ModelConfig.engine-
+    Docstring. Bei Bedarf über mcfg.extra_args selbst ergänzen."""
+    mcfg = cfg.models.get(model)
+    gmu, mml = cfg.serve_args_for(model)
+
+    try:
+        caps = capability_detector.detect_capabilities(model, cfg.resolved_hf_home())
+    except Exception:
+        logger.exception("Capability-Erkennung für '%s' fehlgeschlagen - starte ohne max_model_len-Deckelung", model)
+        caps = {"found": False}
+
+    if caps.get("found"):
+        ceiling = caps["max_model_len"]["suggested"]
+        if ceiling and mml > ceiling:
+            logger.warning(
+                "max_model_len=%d für '%s' liegt über der architektonischen Obergrenze des Modells "
+                "(max_position_embeddings=%d) - für diesen Start auf %d gedeckelt.",
+                mml, model, ceiling, ceiling,
+            )
+            mml = ceiling
+        asyncio.create_task(config_editor.sync_detected_capabilities(model, caps))
+
+    # Lokale Modelle ("./"-relativ oder absolut, siehe config.
+    # resolve_local_model_path) brauchen den tatsächlichen Dateisystempfad -
+    # HF-Hub-Repo-Namen ("org/name") gehen unverändert durch, die löst SGLang
+    # selbst über den HF-Cache auf.
+    model_path_arg = resolve_local_model_path(model)
+    cmd = [
+        cfg.resolved_sglang_python(), "-m", "sglang.launch_server",
+        "--model-path", str(model_path_arg) if model_path_arg is not None else model,
+        "--host", cfg.engine_host,
+        "--port", str(port),
+        "--mem-fraction-static", str(gmu),
+        "--context-length", str(mml),
+    ]
+    if caps.get("found") and caps["task"]["suggested"] == "embed":
+        cmd.append("--is-embedding")
+    if mcfg:
+        cmd += list(mcfg.extra_args or [])
+    return cmd
+
+
+def _build_vllm_command(cfg: Config, model: str, port: int) -> list[str]:
     """Baut das vllm-serve-Kommando. task/vision/tool_calling/reasoning_parser
     kommen NICHT mehr aus mcfg (ModelConfig hat diese Felder seit 2026-08-25
     nicht mehr) - das sind Fakten des Modells selbst, keine Nutzer-Einstellung
@@ -237,7 +303,7 @@ def _build_command(cfg: Config, model: str, port: int) -> list[str]:
     gmu, mml = cfg.serve_args_for(model)
 
     try:
-        caps = capability_detector.detect_capabilities(model, cfg.hf_home)
+        caps = capability_detector.detect_capabilities(model, cfg.resolved_hf_home())
     except Exception:
         logger.exception("Capability-Erkennung für '%s' fehlgeschlagen - starte ohne automatische Flags", model)
         caps = {"found": False}
@@ -257,8 +323,12 @@ def _build_command(cfg: Config, model: str, port: int) -> list[str]:
         # der nutzt ausschließlich `caps` direkt (siehe unten).
         asyncio.create_task(config_editor.sync_detected_capabilities(model, caps))
 
+    # Siehe _build_sglang_command oben - lokale Modelle brauchen den
+    # tatsächlichen Dateisystempfad, HF-Hub-Repo-Namen gehen unverändert
+    # durch (vLLM löst die selbst über den HF-Cache auf).
+    model_path_arg = resolve_local_model_path(model)
     cmd = [
-        cfg.resolved_vllm_bin(), "serve", model,
+        cfg.resolved_vllm_bin(), "serve", str(model_path_arg) if model_path_arg is not None else model,
         "--host", cfg.engine_host,
         "--port", str(port),
         "--gpu-memory-utilization", str(gmu),
@@ -599,16 +669,39 @@ def _matched_vllm_serve_model(cmdline: list[str], vllm_bin: Optional[str]) -> Op
     return None
 
 
+def _matched_sglang_model(cmdline: list[str], sglang_python: Optional[str]) -> Optional[str]:
+    """Gegenstück zu _matched_vllm_serve_model für SGLang-Prozesse (siehe
+    _build_sglang_command: `<sglang_python> -m sglang.launch_server
+    --model-path <model> ...`). Anders als beim vLLM-Binary gibt es hier
+    keinen Shebang-Rewrite (Python führt sich selbst per -m aus), das cmdline
+    entspricht also genau dem übergebenen argv."""
+    if "sglang.launch_server" not in cmdline:
+        return None
+    if sglang_python is not None:
+        try:
+            if os.path.realpath(cmdline[0]) != sglang_python:
+                return None
+        except OSError:
+            return None
+    try:
+        idx = cmdline.index("--model-path")
+    except ValueError:
+        return None
+    if idx + 1 >= len(cmdline):
+        return None
+    return cmdline[idx + 1]
+
+
 async def reap_orphan_engines() -> list[dict]:
-    """Findet und beendet vLLM-Engine-Prozesse ("vllm serve ..." dieser
-    Installation), die NICHT im aktuellen `engines`-Dict getrackt sind, samt
-    ihrer Kindprozesse. Das sind Reste eines Absturzes des Manager-Prozesses
-    selbst (der `engines`-Zustand lebt nur im Speicher und ist nach einem
-    Neustart leer, die zuvor gestarteten Kindprozesse überleben aber) oder
-    eines unsauberen Beendens - genau die Prozesse, die "im Dashboard nicht
-    auftauchen" (kein EngineState mehr da), aber weiter GPU-Speicher/Port
-    belegen. Wird beim Start (lifespan) und danach periodisch aufgerufen
-    (siehe main.py)."""
+    """Findet und beendet Engine-Prozesse (vLLM "vllm serve ..." ODER SGLang
+    "... -m sglang.launch_server ..." dieser Installation), die NICHT im
+    aktuellen `engines`-Dict getrackt sind, samt ihrer Kindprozesse. Das sind
+    Reste eines Absturzes des Manager-Prozesses selbst (der `engines`-Zustand
+    lebt nur im Speicher und ist nach einem Neustart leer, die zuvor
+    gestarteten Kindprozesse überleben aber) oder eines unsauberen Beendens -
+    genau die Prozesse, die "im Dashboard nicht auftauchen" (kein EngineState
+    mehr da), aber weiter GPU-Speicher/Port belegen. Wird beim Start
+    (lifespan) und danach periodisch aufgerufen (siehe main.py)."""
     if psutil is None:
         return []
     cfg = get_config()
@@ -616,6 +709,10 @@ async def reap_orphan_engines() -> list[dict]:
         vllm_bin = os.path.realpath(cfg.resolved_vllm_bin())
     except OSError:
         vllm_bin = None
+    try:
+        sglang_python = os.path.realpath(cfg.resolved_sglang_python())
+    except OSError:
+        sglang_python = None
     tracked_pids = {e.process.pid for e in engines.values() if e.process is not None}
     own_pid = os.getpid()
 
@@ -629,7 +726,7 @@ async def reap_orphan_engines() -> list[dict]:
                 cmdline = proc.info["cmdline"] or []
             except (psutil.NoSuchProcess, psutil.AccessDenied):
                 continue
-            model = _matched_vllm_serve_model(cmdline, vllm_bin)
+            model = _matched_vllm_serve_model(cmdline, vllm_bin) or _matched_sglang_model(cmdline, sglang_python)
             if model is not None:
                 found.append((proc, model))
         return found
@@ -643,7 +740,7 @@ async def reap_orphan_engines() -> list[dict]:
         except psutil.NoSuchProcess:
             continue
         logger.warning(
-            "Verwaister vLLM-Engine-Prozess gefunden (pid=%s, Modell=%s, seit %.0fs), "
+            "Verwaister Engine-Prozess gefunden (pid=%s, Modell=%s, seit %.0fs), "
             "der zu keinem aktuellen EngineState gehört - vermutlich Rest eines Manager-"
             "Absturzes oder unsauberen Beendens. Wird beendet.",
             pid, model, time.time() - created_at,
@@ -685,7 +782,7 @@ async def stop_engine(model: Optional[str] = None, reason: str = "manual_unload"
         # Engines (max_concurrent_models > 1) hätte sich die Shutdown-Zeit
         # sonst mit deren Anzahl multipliziert (jede bis zu `timeout` Sekunden
         # SIGTERM-Wartezeit) und lief beim Dienst-Stop live beobachtet über
-        # systemd's TimeoutStopSec (siehe vllm.service, Default 90s) hinaus -
+        # systemd's TimeoutStopSec (siehe llm-hub.service, Default 90s) hinaus -
         # KillMode=control-group killt dann die GESAMTE Unit hart per SIGKILL
         # (journal: "Main process exited, code=killed, status=9/KILL",
         # "Failed with result 'timeout'", mehrfach beobachtet, zuletzt
@@ -978,7 +1075,7 @@ async def _ensure_loaded_once(model: str, wait: bool = True) -> dict:
                     eng.log_path = log_path
                     cmd = _build_command(cfg, model, port)
                     env = os.environ.copy()
-                    env["HF_HOME"] = cfg.hf_home
+                    env["HF_HOME"] = cfg.resolved_hf_home()
                     # systemd setzt kein venv-PATH: Tools wie 'ninja' (von flashinfer beim
                     # JIT-Kompilieren von Sampling-Kerneln benötigt) liegen in .venv/bin und
                     # würden sonst nicht über PATH gefunden (-> Engine-Crash exit=1).
@@ -994,7 +1091,10 @@ async def _ensure_loaded_once(model: str, wait: bool = True) -> dict:
                         stdout=log_f,
                         stderr=asyncio.subprocess.STDOUT,
                         env=env,
-                        cwd=str(Path(cfg.hf_home).parent),
+                        # PROJECT_ROOT direkt statt von hf_home abgeleitet (hf_home kann
+                        # inzwischen bewusst außerhalb des Projektordners liegen, z.B.
+                        # HF-Cache auf einer anderen/größeren Platte).
+                        cwd=str(PROJECT_ROOT),
                     )
                     eng.process = proc
                     eng.started_at = time.time()

@@ -1,5 +1,5 @@
 [Unit]
-Description=vLLM Manager (auto-loading OpenAI-kompatibler Server + MCP)
+Description=LLM Hub (auto-loading OpenAI-kompatibler Server + MCP)
 After=network-online.target
 Wants=network-online.target
 
@@ -7,9 +7,9 @@ Wants=network-online.target
 Type=simple
 User=mwagner
 Group=mwagner
-WorkingDirectory=/home/mwagner/vllm
+WorkingDirectory=/home/mwagner/llm-hub
 Environment=PYTHONUNBUFFERED=1
-ExecStart=/home/mwagner/vllm/.venv/bin/python -m vllm_manager
+ExecStart=/home/mwagner/llm-hub/.venv/bin/python -m llm_hub
 Restart=on-failure
 RestartSec=5
 # Der Manager-Prozess selbst startet sofort; einzelne Modelle laden erst bei

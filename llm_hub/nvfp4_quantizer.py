@@ -33,9 +33,9 @@ from pathlib import Path
 from typing import Optional
 
 from . import config_editor, process_manager
-from .config import get_config
+from .config import PROJECT_ROOT, get_config, local_model_key_for
 
-logger = logging.getLogger("vllm_manager.nvfp4_quantizer")
+logger = logging.getLogger("llm_hub.nvfp4_quantizer")
 
 # Siehe Anleitung, Tabelle "Hardware platform" - DGX-Spark-Zeile (GB10, die
 # GPU dieser Maschine). NICHT die DGX-Station/GB300-Variante (anderes Image,
@@ -209,14 +209,17 @@ async def _run_job(job: dict, hf_token: Optional[str]) -> None:
     cfg = get_config()
     job_id = job["job_id"]
     hf_model_id = job["model"]
-    container_name = f"vllm-manager-nvfp4-{job_id}"
-    project_root = Path(cfg.hf_home).parent  # .../vllm (hf_home ist .../vllm/models)
-    staging_dir = project_root / "quantize_output" / job_id
+    container_name = f"llm-hub-nvfp4-{job_id}"
+    # PROJECT_ROOT direkt statt von hf_home abgeleitet (früher: Path(cfg.
+    # resolved_hf_home()).parent) - hf_home kann inzwischen bewusst außerhalb
+    # des Projektordners liegen (z.B. HF-Cache auf einer anderen/größeren
+    # Platte), dann wäre die Ableitung falsch gewesen.
+    staging_dir = PROJECT_ROOT / "quantize_output" / job_id
     staging_dir.mkdir(parents=True, exist_ok=True)
 
     try:
         cmd = _build_docker_cmd(
-            hf_model_id, container_name, staging_dir, cfg.hf_home, hf_token, job["tp"],
+            hf_model_id, container_name, staging_dir, cfg.resolved_hf_home(), hf_token, job["tp"],
             job.get("upgrade_transformers", False),
         )
         _append_log(job, "$ " + " ".join(cmd))
@@ -285,7 +288,7 @@ async def _run_job(job: dict, hf_token: Optional[str]) -> None:
         _current_job_id = None
         return
 
-    dest = Path(project_root) / "models-quantized" / f"{_sanitize_name(hf_model_id)}-NVFP4"
+    dest = PROJECT_ROOT / "models-quantized" / f"{_sanitize_name(hf_model_id)}-NVFP4"
     if dest.exists():
         dest = dest.with_name(dest.name + f"-{job_id[:6]}")
     dest.parent.mkdir(parents=True, exist_ok=True)
@@ -301,7 +304,9 @@ async def _run_job(job: dict, hf_token: Optional[str]) -> None:
     finally:
         shutil.rmtree(staging_dir, ignore_errors=True)
 
-    model_path = str(dest)
+    # "./"-relativer Key statt absolutem Pfad, falls dest (wie hier immer)
+    # innerhalb PROJECT_ROOT liegt - siehe config.local_model_key_for.
+    model_path = local_model_key_for(dest)
     try:
         await config_editor.register_model_if_missing(
             model_path,
@@ -337,7 +342,7 @@ async def cancel_job(job_id: str) -> bool:
     job["finished_at"] = time.time()
     try:
         stop_proc = await asyncio.create_subprocess_exec(
-            "docker", "stop", f"vllm-manager-nvfp4-{job_id}",
+            "docker", "stop", f"llm-hub-nvfp4-{job_id}",
             stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL,
         )
         await asyncio.wait_for(stop_proc.wait(), timeout=15)

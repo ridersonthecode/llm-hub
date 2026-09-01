@@ -27,7 +27,7 @@ from qdrant_client.models import (
 from . import process_manager
 from .config import Config, get_config
 
-logger = logging.getLogger("vllm_manager.rag")
+logger = logging.getLogger("llm_hub.rag")
 
 # Qwen3-Embedding empfiehlt für SUCHANFRAGEN (nicht für Dokumente) ein
 # Instruktions-Prefix - laut Modellkarte 1-5% bessere Trefferqualität.
@@ -158,7 +158,7 @@ async def add_file(collection: str, path: str, metadata: Optional[dict] = None) 
     p = Path(path).expanduser()
     if not p.is_file():
         raise FileNotFoundError(
-            f"Datei nicht gefunden (Pfad gilt auf dem vLLM-Manager-Server, nicht "
+            f"Datei nicht gefunden (Pfad gilt auf dem LLM-Hub-Server, nicht "
             f"auf deinem Client!): {path}"
         )
     text = extract_text(p)
@@ -383,6 +383,72 @@ async def get_document_chunks(collection: str, document_id: str) -> list[dict]:
         return chunks
     finally:
         await client.close()
+
+
+async def rename_source(collection: str, document_id: str, new_source: str) -> dict:
+    """Benennt das "source"-Label eines Dokuments um (z.B. Anzeigename in der
+    Dashboard-Tabelle), ohne die Chunks/Embeddings anzufassen."""
+    cfg = get_config()
+    _require_rag(cfg)
+    client = _qdrant_client(cfg)
+    try:
+        await client.set_payload(
+            collection_name=collection,
+            payload={"source": new_source},
+            points=Filter(
+                must=[FieldCondition(key="document_id", match=MatchValue(value=document_id))]
+            ),
+        )
+    finally:
+        await client.close()
+    return {"status": "renamed", "document_id": document_id, "source": new_source}
+
+
+async def move_document(document_id: str, from_collection: str, to_collection: str) -> dict:
+    """Verschiebt ein komplettes Dokument (alle seine Chunks samt Embeddings)
+    von einer Collection in eine andere - liest die Punkte inkl. Vektoren aus
+    `from_collection`, schreibt sie nach `to_collection` (wird bei Bedarf mit
+    passender Vektor-Dimension neu angelegt) und löscht sie anschließend aus
+    `from_collection`."""
+    cfg = get_config()
+    _require_rag(cfg)
+    client = _qdrant_client(cfg)
+    try:
+        if not await client.collection_exists(from_collection):
+            raise ValueError(f"Collection '{from_collection}' existiert nicht.")
+        flt = Filter(must=[FieldCondition(key="document_id", match=MatchValue(value=document_id))])
+        points: list[PointStruct] = []
+        offset = None
+        while True:
+            batch, offset = await client.scroll(
+                collection_name=from_collection,
+                scroll_filter=flt,
+                limit=256,
+                offset=offset,
+                with_payload=True,
+                with_vectors=True,
+            )
+            points.extend(PointStruct(id=p.id, vector=p.vector, payload=p.payload) for p in batch)
+            if offset is None:
+                break
+        if not points:
+            return {"status": "not_found", "document_id": document_id}
+
+        if from_collection == to_collection:
+            return {
+                "status": "moved", "document_id": document_id,
+                "from": from_collection, "to": to_collection, "chunks_moved": len(points),
+            }
+
+        await _ensure_collection(client, to_collection, len(points[0].vector))
+        await client.upsert(collection_name=to_collection, points=points)
+        await client.delete(collection_name=from_collection, points_selector=flt)
+    finally:
+        await client.close()
+    return {
+        "status": "moved", "document_id": document_id,
+        "from": from_collection, "to": to_collection, "chunks_moved": len(points),
+    }
 
 
 async def delete_document(collection: str, document_id: str) -> dict:

@@ -24,7 +24,7 @@ Ollamas Decode-Geschwindigkeit bei fast identischer Dateigröße (18GB vs. 17.7G
 Nicht die quantisierte Version (z.B. `Qwen/Qwen3.8-27B-FP8`) verwenden, sondern
 das unquantisierte Original – nur daraus kann man sinnvoll neu quantisieren.
 
-Über den vLLM-Manager (nutzt den bestehenden `HF_HOME`-Cache, mit Fortschrittsanzeige):
+Über den LLM-Hub (nutzt den bestehenden `HF_HOME`-Cache, mit Fortschrittsanzeige):
 
 ```bash
 curl -X POST http://127.0.0.1:11434/models/pull \
@@ -36,7 +36,7 @@ curl -X POST http://127.0.0.1:11434/models/pull \
 curl http://127.0.0.1:11434/models/pull/<job_id>
 ```
 
-Alternativ ganz ohne vLLM-Manager, direkt mit `huggingface_hub`:
+Alternativ ganz ohne LLM-Hub, direkt mit `huggingface_hub`:
 
 ```bash
 python3 -c "
@@ -55,7 +55,7 @@ nutzt! `llm-compressor` verlangt eine andere `compressed-tensors`-Version als
 vLLM (Konflikt), das würde den laufenden Dienst kaputt machen.
 
 ```bash
-cd /home/mwagner/vllm
+cd /home/mwagner/llm-hub
 python3 -m venv .venv-quantize
 .venv-quantize/bin/pip install --upgrade pip
 .venv-quantize/bin/pip install llmcompressor torch transformers accelerate torchvision
@@ -74,7 +74,7 @@ ggf. anpassen.
 ```python
 """Einmaliges Quantisierungs-Skript: Qwen/Qwen3.8-27B (BF16, offiziell) -> AWQ
 INT4 (vLLM-kompatibel), mit llm-compressor. Läuft in der isolierten
-.venv-quantize (NICHT die produktive .venv von vllm.service!).
+.venv-quantize (NICHT die produktive .venv von llm-hub.service!).
 
 Hybrid-Architektur (Attention + Gated-Delta-Net/Mamba-Layer abwechselnd) - AWQ
 quantisiert generisch pro nn.Linear-Layer, unabhängig vom umgebenden Mechanismus.
@@ -87,7 +87,7 @@ import os
 # Zu spät gesetzt (nach den Imports) führt dazu, dass das bereits lokal
 # vorhandene 55GB-Modell komplett neu nach ~/.cache/huggingface heruntergeladen
 # wird, statt den vorhandenen Download in HF_HOME zu nutzen.
-os.environ["HF_HOME"] = "/home/mwagner/vllm/models"
+os.environ["HF_HOME"] = "/home/mwagner/llm-hub/models"
 
 import json
 from glob import glob
@@ -100,7 +100,7 @@ from llmcompressor.modifiers.transform.awq.mappings import AWQMapping
 from transformers import AutoModelForImageTextToText, AutoTokenizer
 
 MODEL_ID = "Qwen/Qwen3.8-27B"
-OUTPUT_DIR = "/home/mwagner/vllm/models-quantized/Qwen3.8-27B-AWQ-INT4-v2"
+OUTPUT_DIR = "/home/mwagner/llm-hub/models-quantized/Qwen3.8-27B-AWQ-INT4-v2"
 NUM_CALIBRATION_SAMPLES = 128
 MAX_SEQ_LEN = 2048
 
@@ -136,7 +136,7 @@ ds = ds.map(preprocess, remove_columns=ds.column_names)
 # linear_attention-Zuordnung: nur full_attention- und MLP-Layer werden per AWQ
 # "gesmoothed", die Mamba-Layer laufen unten über den QuantizationModifier ohne
 # Smoothing (siehe recipe weiter unten).
-cfg = json.load(open(glob("/home/mwagner/vllm/models/hub/models--Qwen--Qwen3.8-27B/snapshots/*/config.json")[0]))
+cfg = json.load(open(glob("/home/mwagner/llm-hub/models/hub/models--Qwen--Qwen3.8-27B/snapshots/*/config.json")[0]))
 layer_types = cfg["text_config"]["layer_types"]
 full_indices = [i for i, t in enumerate(layer_types) if t == "full_attention"]
 full_re = "|".join(str(i) for i in full_indices)
@@ -192,7 +192,7 @@ Läuft lange (Kalibrierung über 128 Beispiele + Quantisierung + Speichern,
 insgesamt ca. eine Stunde) – am besten im Hintergrund mit Logging:
 
 ```bash
-cd /home/mwagner/vllm
+cd /home/mwagner/llm-hub
 nohup .venv-quantize/bin/python .venv-quantize/quantize_qwen38.py > quantize.log 2>&1 &
 tail -f quantize.log
 ```
@@ -200,7 +200,7 @@ tail -f quantize.log
 Am Ende sollte in etwa stehen:
 
 ```
-Quantisierung fertig, speichere nach /home/mwagner/vllm/models-quantized/Qwen3.8-27B-AWQ-INT4-v2...
+Quantisierung fertig, speichere nach /home/mwagner/llm-hub/models-quantized/Qwen3.8-27B-AWQ-INT4-v2...
 Fertig gespeichert.
 ```
 
@@ -211,8 +211,8 @@ alle Hilfsdateien (Bild-/Video-Prozessor-Konfiguration, `vocab.json`,
 `merges.txt`), die für ein Vision-Language-Modell noch gebraucht werden:
 
 ```bash
-SRC=$(ls -d /home/mwagner/vllm/models/hub/models--Qwen--Qwen3.8-27B/snapshots/*/)
-OUT=/home/mwagner/vllm/models-quantized/Qwen3.8-27B-AWQ-INT4-v2
+SRC=$(ls -d /home/mwagner/llm-hub/models/hub/models--Qwen--Qwen3.8-27B/snapshots/*/)
+OUT=/home/mwagner/llm-hub/models-quantized/Qwen3.8-27B-AWQ-INT4-v2
 cp "${SRC}preprocessor_config.json" "${SRC}video_preprocessor_config.json" \
    "${SRC}vocab.json" "${SRC}merges.txt" "$OUT/"
 ```
@@ -231,11 +231,14 @@ print('format:', qc.get('format'), 'quant_method:', qc.get('quant_method'))
 
 ## Schritt 6: In vLLM registrieren und testen
 
-Im vLLM-Manager: neuen Eintrag in `config.json` unter `"models"`, **Pfad als
-Modell-Name** (kein HuggingFace-Repo, also lokaler Pfad):
+Im LLM-Hub: neuen Eintrag in `config.json` unter `"models"`, **Pfad als
+Modell-Name** (kein HuggingFace-Repo, also lokaler Pfad) - seit 2026-08-31
+"./"-relativ zum Projektordner statt absolut, damit `config.json` beim
+Kopieren auf eine andere Maschine/an einen anderen Ort portabel bleibt (siehe
+config.py, `resolve_local_model_path`):
 
 ```json
-"/home/mwagner/vllm/models-quantized/Qwen3.8-27B-AWQ-INT4-v2": {
+"./models-quantized/Qwen3.8-27B-AWQ-INT4-v2": {
   "tool_call_parser": "qwen3_xml",
   "max_model_len": 262144,
   "gpu_memory_utilization": 0.4,
@@ -249,21 +252,21 @@ Modell-Name** (kein HuggingFace-Repo, also lokaler Pfad):
 Dienst neu starten, laden, testen:
 
 ```bash
-sudo systemctl restart vllm
+sudo systemctl restart llm-hub
 
-curl -X POST "http://127.0.0.1:11434/models/%2Fhome%2Fmwagner%2Fvllm%2Fmodels-quantized%2FQwen3.8-27B-AWQ-INT4-v2/load"
+curl -X POST "http://127.0.0.1:11434/models/.%2Fmodels-quantized%2FQwen3.8-27B-AWQ-INT4-v2/load"
 
 curl http://127.0.0.1:11434/v1/chat/completions -H "Content-Type: application/json" -d '{
-  "model": "/home/mwagner/vllm/models-quantized/Qwen3.8-27B-AWQ-INT4-v2",
+  "model": "./models-quantized/Qwen3.8-27B-AWQ-INT4-v2",
   "messages": [{"role":"user","content":"Sag nur OK."}],
   "max_tokens": 10
 }'
 ```
 
-Ohne vLLM-Manager, direkt mit `vllm serve`:
+Ohne LLM-Hub, direkt mit `vllm serve`:
 
 ```bash
-vllm serve /home/mwagner/vllm/models-quantized/Qwen3.8-27B-AWQ-INT4-v2 \
+vllm serve /home/mwagner/llm-hub/models-quantized/Qwen3.8-27B-AWQ-INT4-v2 \
   --max-model-len 262144 --gpu-memory-utilization 0.4
 ```
 

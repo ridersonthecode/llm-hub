@@ -2,15 +2,60 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 import sys
 from pathlib import Path
-from typing import Optional
+from typing import Literal, Optional
 
 from pydantic import BaseModel, Field
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
-CONFIG_PATH = Path(os.environ.get("VLLM_MANAGER_CONFIG", PROJECT_ROOT / "config.json"))
+CONFIG_PATH = Path(os.environ.get("LLM_HUB_CONFIG", PROJECT_ROOT / "config.json"))
+
+
+# --- Portabilität: lokale Modellpfade relativ zu PROJECT_ROOT statt absolut -
+# Eigene lokale Modelle (z.B. selbst quantisierte AWQ/NVFP4-Varianten unter
+# models-quantized/, siehe catalog.py/nvfp4_quantizer.py) werden in
+# config.json als Dict-KEY unter "models" geführt - dort IST der Modellname
+# der Pfad (siehe catalog.cache_dir_for). Ein absoluter Pfad wie
+# "/home/user/vllm/models-quantized/Foo" macht die ganze config.json
+# maschinenspezifisch: kopiert man sie unverändert auf eine andere Maschine
+# oder installiert an einem anderen Ort, zeigt der Eintrag ins Leere (siehe
+# INSTALL.md, dort bisher als bewusst manueller Schritt dokumentiert).
+#
+# Fix: "./"-Präfix bedeutet "relativ zu PROJECT_ROOT" - übersteht jedes Kopieren
+# des Projektordners an einen beliebigen Ort, ohne dass irgendetwas in
+# config.json angepasst werden müsste (Chat vom 2026-08-31: "es muss nachher
+# so sein, dass alle Pfade exakt zum neuen System passen, egal wohin ich es
+# installiere"). Ein echter absoluter Pfad ("/...") bleibt zusätzlich
+# unterstützt, für den seltenen Fall eines Modells bewusst außerhalb des
+# Projektordners (z.B. andere/größere Platte) - der ist dann weiterhin
+# maschinenspezifisch, das lässt sich ohne Wissen über das Zielsystem nicht
+# auflösen.
+def resolve_local_model_path(model: str) -> Optional[Path]:
+    """Löst einen "model"-String zu einem lokalen Dateisystempfad auf, falls
+    es sich um ein lokales Modell handelt (./-relativ oder absolut) - None,
+    falls es ein HuggingFace-Hub-Repo-Name ("org/name") ist."""
+    if model.startswith("./") or model.startswith("../"):
+        return (PROJECT_ROOT / model).resolve()
+    if model.startswith("/"):
+        return Path(model)
+    return None
+
+
+def local_model_key_for(path: Path) -> str:
+    """Kehrt resolve_local_model_path() um: baut aus einem absoluten Pfad den
+    portablen "model"-Key fürs Registrieren in config.json (z.B. nach einer
+    NVFP4-Quantisierung, siehe nvfp4_quantizer.py). "./"-relativ, falls der
+    Pfad innerhalb PROJECT_ROOT liegt (der Normalfall - models-quantized/
+    liegt direkt im Projektordner), sonst absoluter Fallback."""
+    path = path.resolve()
+    try:
+        rel = path.relative_to(PROJECT_ROOT)
+    except ValueError:
+        return str(path)
+    return "./" + rel.as_posix()
 
 
 class ApiKeyConfig(BaseModel):
@@ -137,6 +182,19 @@ class ModelConfig(BaseModel):
     # Wird im Config-Editor per Drag-and-Drop-Liste gesetzt, nicht von Hand
     # gepflegt - siehe cfg.section.priority.
     priority: int = 0
+    # Welche Inference-Engine process_manager._build_command() für dieses
+    # Modell startet. "vllm" (Default) = bisheriges Verhalten (`vllm serve`).
+    # "sglang" = `<sglang_python> -m sglang.launch_server ...` (siehe
+    # Config.sglang_python) statt vLLM - für Modelle/Checkpoints, die (noch)
+    # keinen vLLM-Support haben, aber ein OpenAI-kompatibles API wie vLLM
+    # bereitstellen (z.B. NVFP4-Checkpoints für DGX Spark, die einen
+    # gepatchten SGLang-Fork brauchen). Bewusst schmal gehalten: Auto-detect
+    # Capabilities/Perf-Tuning (tool_call_parser, reasoning_parser,
+    # cudagraph_capture_sizes) sind vLLM-Flag-Namen und werden für "sglang"
+    # NICHT an die Engine übergeben (siehe process_manager._build_sglang_
+    # command) - bei Bedarf über extra_args selbst ergänzen (z.B.
+    # "--tool-call-parser", "qwen25").
+    engine: Literal["vllm", "sglang"] = "vllm"
 
 
 class RagConfig(BaseModel):
@@ -165,8 +223,26 @@ class Config(BaseModel):
     port: int = 11434
     engine_host: str = "127.0.0.1"
     engine_port: int = 18811
-    hf_home: str = str(PROJECT_ROOT / "models")
+    # None = automatisch PROJECT_ROOT/"models" (siehe resolved_hf_home()) -
+    # bewusst kein fest eingebrannter absoluter Pfad wie früher: Config.
+    # model_dump() (siehe config_editor.save_config) serialisiert bei JEDEM
+    # Speichern den kompletten Zustand nach config.json - ein String-Default
+    # würde also schon beim ersten Speichern überhaupt egal welchen anderen
+    # Feldes als absoluter Pfad DIESER Maschine eingefroren, selbst wenn nie
+    # bewusst gesetzt (Chat vom 2026-08-31, Portabilitäts-Analyse). Gleiches
+    # Muster wie vllm_bin/sglang_python unten - nur explizit gesetzt bedeutet
+    # "woanders als im Projektordner".
+    hf_home: Optional[str] = None
     vllm_bin: Optional[str] = None
+    # Pfad zum Python-Interpreter, der für Modelle mit ModelConfig.engine ==
+    # "sglang" `-m sglang.launch_server` ausführt (siehe process_manager.
+    # _build_sglang_command). Meist NICHT dasselbe venv wie der Manager
+    # selbst/vllm_bin - SGLang (erst recht ein gepatchter Fork für ein
+    # bestimmtes Checkpoint-Format) bringt eigene, teils inkompatible
+    # Abhängigkeiten mit und lebt üblicherweise in einem eigenen venv. None =
+    # Fallback auf sys.executable (nur sinnvoll, falls SGLang tatsächlich im
+    # selben venv wie der Manager installiert ist).
+    sglang_python: Optional[str] = None
     api_key: ApiKeyConfig = Field(default_factory=ApiKeyConfig)
     idle_timeout_seconds: Optional[int] = None
     # Anzahl gleichzeitig laufender vLLM-Engine-Prozesse ("Hot Pool"). Bei 1
@@ -225,10 +301,20 @@ class Config(BaseModel):
     # Modelle ohne eigenen models.<name>.pricing-Override.
     default_pricing: Pricing = Field(default_factory=Pricing)
 
+    def resolved_hf_home(self) -> str:
+        if self.hf_home:
+            return self.hf_home
+        return str(PROJECT_ROOT / "models")
+
     def resolved_vllm_bin(self) -> str:
         if self.vllm_bin:
             return self.vllm_bin
         return str(Path(sys.executable).parent / "vllm")
+
+    def resolved_sglang_python(self) -> str:
+        if self.sglang_python:
+            return self.sglang_python
+        return sys.executable
 
     def priority_for(self, model: str) -> int:
         """Siehe ModelConfig.priority - 0 (neutral) für unbekannte/nicht
@@ -263,12 +349,69 @@ def sort_models(cfg: Config) -> Config:
     return cfg
 
 
+def _migrate_local_model_keys(cfg: Config) -> bool:
+    """Schreibt Modell-Keys, die als absoluter Pfad INNERHALB PROJECT_ROOT
+    hinterlegt sind, auf die portable "./"-Form um (siehe local_model_key_for/
+    resolve_local_model_path oben) - heilt eine bestehende config.json aus der
+    Zeit vor dieser Umstellung automatisch mit, ohne manuellen Eingriff. Gibt
+    True zurück, falls sich dabei etwas geändert hat (load_config()
+    persistiert dann einmalig zurück auf die Platte)."""
+    changed = False
+    renamed: dict[str, "ModelConfig"] = {}
+    for key, mcfg in cfg.models.items():
+        if key.startswith("/") and Path(key).is_relative_to(PROJECT_ROOT):
+            new_key = local_model_key_for(Path(key))
+            if new_key != key and new_key not in cfg.models and new_key not in renamed:
+                renamed[new_key] = mcfg
+                changed = True
+                continue
+        renamed[key] = mcfg
+    if changed:
+        cfg.models = renamed
+    return changed
+
+
+def _migrate_hf_home(cfg: Config) -> bool:
+    """Setzt hf_home zurück auf None (= automatisch), falls es exakt dem
+    entspricht, was resolved_hf_home() ohnehin liefern würde - ein reiner
+    No-op für das LAUFENDE Verhalten (auf DIESER Maschine identisch), aber
+    entfernt den eingefrorenen absoluten Pfad aus config.json, bevor sie
+    z.B. auf eine andere Maschine kopiert wird (siehe hf_home-Docstring in
+    ModelConfig oben - jedes Speichern über den Config-Editor friert den
+    damals aufgelösten Wert sonst dauerhaft ein)."""
+    if cfg.hf_home and cfg.hf_home == str(PROJECT_ROOT / "models"):
+        cfg.hf_home = None
+        return True
+    return False
+
+
 def load_config(path: Path = CONFIG_PATH) -> Config:
     global _config
     with open(path, encoding="utf-8") as f:
         data = json.load(f)
-    _config = sort_models(Config(**data))
+    cfg = Config(**data)
+    migrated = _migrate_local_model_keys(cfg)
+    migrated = _migrate_hf_home(cfg) or migrated
+    _config = sort_models(cfg)
+    if migrated:
+        try:
+            _atomic_write_json(path, _config.model_dump())
+        except OSError:
+            logging.getLogger("llm_hub.config").exception(
+                "Konnte migrierte lokale Modellpfade nicht nach %s zurückschreiben - "
+                "wirkt trotzdem für die laufende Sitzung, nur nicht dauerhaft.", path,
+            )
     return _config
+
+
+def _atomic_write_json(path: Path, data: dict) -> None:
+    # Gleiches Format wie config_editor._atomic_write_json (bewusst identisch
+    # gehalten - beide schreiben dieselbe Datei).
+    tmp = path.with_suffix(path.suffix + ".tmp")
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(data, f, indent=2, ensure_ascii=False)
+        f.write("\n")
+    os.replace(tmp, path)
 
 
 def set_config(cfg: Config) -> Config:

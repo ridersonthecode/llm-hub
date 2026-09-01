@@ -23,7 +23,7 @@ from . import process_manager, rag, request_queue, telemetry
 from .catalog import list_cached_models
 from .config import Config, get_config
 
-logger = logging.getLogger("vllm_manager.ollama_compat")
+logger = logging.getLogger("llm_hub.ollama_compat")
 router = APIRouter()
 
 # Alte Ollama-Tags -> neue HuggingFace-Namen (siehe Anleitung.md, "Von Ollama
@@ -55,7 +55,7 @@ async def api_tags():
     damit, welche Modelle überhaupt verfügbar sind. Enthält sowohl die neuen
     HF-Namen als auch die alten Ollama-Aliase, sofern deren Ziel verfügbar ist."""
     cfg = get_config()
-    cached = set(await list_cached_models(cfg.hf_home))
+    cached = set(await list_cached_models(cfg.resolved_hf_home()))
     available = set(cfg.models.keys()) | cached
     names = set(available)
     for alias, target in OLLAMA_MODEL_ALIASES.items():
@@ -93,7 +93,7 @@ async def api_chat(request: Request):
     if not ollama_model:
         raise HTTPException(400, "'model' fehlt im Request-Body.")
 
-    cached = set(await list_cached_models(cfg.hf_home))
+    cached = set(await list_cached_models(cfg.resolved_hf_home()))
     model = _resolve_model(ollama_model, cfg, cached)
     if model not in cfg.models and model not in cached:
         raise HTTPException(

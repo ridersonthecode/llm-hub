@@ -8,7 +8,7 @@ einen Future nur VOR dem Start canceln, nicht während er läuft). Ein Kind-
 prozess dagegen lässt sich jederzeit sauber per SIGTERM/SIGKILL beenden -
 genau das braucht der "Download abbrechen"-Button im Dashboard.
 
-Aufruf (siehe downloader.py): python -m vllm_manager.download_worker <model>
+Aufruf (siehe downloader.py): python -m llm_hub.download_worker <model>
   [--revision REV] --cache-dir DIR
 HF-Token (falls gesetzt) kommt bewusst über die Umgebungsvariable HF_TOKEN,
 nicht als Kommandozeilenargument - der volle Kommandozeilenaufruf ist über

@@ -36,7 +36,7 @@ from . import capability_detector
 from . import config as config_module
 from .config import CONFIG_PATH, Config
 
-logger = logging.getLogger("vllm_manager.config_editor")
+logger = logging.getLogger("llm_hub.config_editor")
 
 # Schützt JEDEN Schreibzugriff auf config.json (save_config UND patch_config,
 # siehe unten) - threading.Lock statt asyncio.Lock, weil Aufrufer teils über
@@ -68,7 +68,7 @@ def config_fingerprint(cfg: Optional[Config] = None) -> str:
     return hashlib.sha256(canonical.encode()).hexdigest()[:16]
 
 # Neben der tatsächlich verwendeten config.json (nicht fest PROJECT_ROOT!) -
-# CONFIG_PATH kann über die Umgebungsvariable VLLM_MANAGER_CONFIG woanders
+# CONFIG_PATH kann über die Umgebungsvariable LLM_HUB_CONFIG woanders
 # hinzeigen (siehe config.py), die Backups sollen dem folgen.
 BACKUPS_DIR = CONFIG_PATH.parent / "config_backups"
 LAST_KNOWN_GOOD_PATH = BACKUPS_DIR / "last_known_good.json"
@@ -310,7 +310,7 @@ async def register_model_if_missing(model: str, note: str) -> bool:
     # das hier ist also nur eine Vorab-Optimierung, keine Korrektheitsannahme.
     current = config_module.get_config()
     try:
-        caps = await asyncio.to_thread(capability_detector.detect_capabilities, model, current.hf_home)
+        caps = await asyncio.to_thread(capability_detector.detect_capabilities, model, current.resolved_hf_home())
     except Exception:
         logger.exception(
             "Fähigkeiten-Erkennung für automatisch zu registrierendes Modell '%s' "
@@ -408,7 +408,7 @@ def restore_backup(filename: str) -> tuple[Config, Optional[str]]:
     return save_config(data)
 
 
-def restart_service(unit: str = "vllm") -> tuple[bool, str]:
+def restart_service(unit: str = "llm-hub") -> tuple[bool, str]:
     """Stößt 'sudo systemctl restart <unit>' an (fire-and-forget, detached -
     der eigene Prozess wird dabei selbst beendet). Erfordert passwortlosen
     sudo für genau diesen Befehl (vom Nutzer selbst einzurichten, siehe

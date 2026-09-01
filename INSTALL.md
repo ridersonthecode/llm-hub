@@ -1,4 +1,4 @@
-# vLLM-Manager auf einem neuen DGX Spark installieren
+# LLM-Hub auf einem neuen DGX Spark installieren
 
 Schritt-für-Schritt-Anleitung, um dieses Projekt (inkl. RAG/Qdrant) auf einem
 **zweiten** DGX Spark (NVIDIA GB10, Unified Memory) frisch aufzusetzen. Einfach
@@ -6,7 +6,7 @@ von oben nach unten durchgehen. Für Hintergrund/Details zu einzelnen Features
 siehe [Anleitung.md](Anleitung.md) - dieses Dokument ist bewusst nur die reine
 Installations-Checkliste.
 
-**Was im ZIP enthalten ist:** der komplette Code (`vllm_manager/`) als reiner
+**Was im ZIP enthalten ist:** der komplette Code (`llm_hub/`) als reiner
 Datei-Snapshot (**kein** `.git` - auf dem neuen Spark ist also keine
 Git-Anmeldung nötig, einfach entpacken und loslegen), Doku,
 `config.example.json` (mit den heute [2026-08-24] leergetesteten/getunten
@@ -20,9 +20,14 @@ Startwerten) und die systemd-Unit-Vorlage.
 - `models-quantized/` (eigene AWQ-INT4-Quantisierungen, ~43GB) - siehe
   [docs/anleitung-eigene-awq-quantisierung.md](docs/anleitung-eigene-awq-quantisierung.md)
   zum Nachbauen, oder einfach manuell auf den neuen Spark kopieren, falls
-  vorhanden (z.B. per `rsync`/USB) - danach die beiden Modell-Einträge aus
-  der alten `config.json` dieser Maschine übernehmen (in `config.example.json`
-  bewusst nicht enthalten, da absoluter Pfad + nicht portabel)
+  vorhanden (z.B. per `rsync`/USB). Die zugehörigen Modell-Einträge in
+  `config.json` sind seit 2026-08-31 "./"-relativ zu diesem Projektordner
+  (z.B. `./models-quantized/Qwen3-8B-NVFP4` statt absolutem Pfad) - einfach
+  die komplette `config.json` mitkopieren, kein manuelles Anpassen mehr
+  nötig, solange `models-quantized/` an derselben Stelle relativ zum
+  Projektordner landet (Normalfall bei einem einfachen Kopieren des ganzen
+  Ordners). Ältere, noch absolute Einträge heilen sich beim ersten Start
+  automatisch selbst auf die neue Form um.
 - `logs/`, `config.json` (die aktuell laufende, lokale Config dieser
   Maschine), `costs.jsonl`, `last_active_model.json`
 
@@ -57,30 +62,30 @@ df -h ~
 ## 2. Archiv übertragen und entpacken
 
 ```bash
-# Auf dieser Maschine schon erledigt: vllm-manager.zip liegt bereit.
+# Auf dieser Maschine schon erledigt: llm-hub.zip liegt bereit.
 # Auf den neuen Spark kopieren, z.B. per scp:
-scp vllm-manager.zip <user>@<neuer-spark>:~/
+scp llm-hub.zip <user>@<neuer-spark>:~/
 
 # Auf dem neuen Spark:
 cd ~
-unzip vllm-manager.zip -d vllm
-cd vllm
-ls    # sollte u.a. vllm_manager/, INSTALL.md, config.example.json, vllm.service zeigen
+unzip llm-hub.zip -d llm-hub
+cd llm-hub
+ls    # sollte u.a. llm_hub/, INSTALL.md, config.example.json, llm-hub.service zeigen
 ```
 
 ## 3. Python-Umgebung aufsetzen
 
 ```bash
-cd ~/vllm
+cd ~/llm-hub
 python3 -m venv .venv
 source .venv/bin/activate
 pip install --upgrade pip
-pip install vllm fastapi "uvicorn[standard]" httpx huggingface_hub "mcp[cli]" qdrant-client pypdf
+pip install vllm fastapi "uvicorn[standard]" httpx huggingface_hub "mcp[cli]<2" qdrant-client pypdf
 ```
 
 Dauert einige Minuten (vLLM zieht u.a. torch + CUDA-Runtime-Wheels,
 zusammen mehrere GB). Zur Referenz, diese Versionen laufen auf der
-Quell-Maschine stabil: `vllm==0.26.0`, `torch==2.11.0`.
+Quell-Maschine stabil: `vllm==0.28.0`, `torch==2.13.0` (Stand 2026-09-01).
 
 **Smoke-Test** (bricht früh ab, falls die GPU nicht sauber erkannt wird,
 statt erst bei einem echten Modell-Ladeversuch):
@@ -96,7 +101,7 @@ print(f'CUDA ok - {free/1024**3:.1f}/{total/1024**3:.1f} GiB frei')
 ## 4. Konfiguration anlegen
 
 ```bash
-cd ~/vllm
+cd ~/llm-hub
 cp config.example.json config.json
 ```
 
@@ -104,8 +109,13 @@ In `config.json` mindestens anpassen:
 
 | Feld | Wert |
 |---|---|
-| `hf_home` | absoluter Pfad auf dem NEUEN Spark, z.B. `/home/<user>/vllm/models` |
 | `default_model` | ein Modell, das du tatsächlich herunterladen willst (Default-Vorschlag: `NousResearch/Hermes-3-Llama-3.1-8B`, klein und bekannt funktionierend) |
+
+`hf_home` NICHT anpassen (bzw. auf `null` lassen) - `null` bedeutet
+automatisch "`<Projektordner>/models`", was auf dem neuen Spark schon von
+allein an der richtigen Stelle liegt, egal wohin du das Projekt entpackst.
+Nur bei explizitem Wunsch nach einem HF-Cache außerhalb des Projektordners
+(z.B. andere/größere Platte) hier einen absoluten Pfad setzen.
 
 Alles andere (Hot-Pool-Größe, GPU-Speicherbudget, Modell-Liste, RAG) ist
 bereits mit den heute getesteten/gefixten Werten vorbelegt - Details siehe
@@ -118,9 +128,9 @@ Optional, falls gated Modelle (z.B. Llama) genutzt werden sollen: siehe
 ## 5. Manueller Probe-Start (ohne systemd)
 
 ```bash
-cd ~/vllm
+cd ~/llm-hub
 source .venv/bin/activate
-python -m vllm_manager
+python -m llm_hub
 ```
 
 Erwartet: Der Prozess startet sofort (Modelle laden erst bei Bedarf), Logs
@@ -160,18 +170,18 @@ und diesen Schritt überspringen.
 ## 7. Als systemd-Dienst einrichten (Dauerbetrieb)
 
 ```bash
-cd ~/vllm
-cp vllm.service /tmp/vllm.service
+cd ~/llm-hub
+cp llm-hub.service /tmp/llm-hub.service
 # User/Group/WorkingDirectory/ExecStart-Pfad auf den eigenen Benutzernamen anpassen:
-sed -i "s#mwagner#$USER#g; s#/home/$USER/vllm#$HOME/vllm#g" /tmp/vllm.service
-cat /tmp/vllm.service   # kurz gegenprüfen, ob Pfade stimmen
+sed -i "s#mwagner#$USER#g; s#/home/$USER/vllm#$HOME/vllm#g" /tmp/llm-hub.service
+cat /tmp/llm-hub.service   # kurz gegenprüfen, ob Pfade stimmen
 
-sudo mv /tmp/vllm.service /etc/systemd/system/vllm.service
+sudo mv /tmp/llm-hub.service /etc/systemd/system/llm-hub.service
 sudo systemctl daemon-reload
 sudo systemctl enable --now vllm
 
 # Status prüfen:
-sudo systemctl status vllm
+sudo systemctl status llm-hub
 sudo journalctl -u vllm -f   # Live-Logs, Strg+C zum Beenden
 ```
 
@@ -182,7 +192,7 @@ sudo journalctl -u vllm -f   # Live-Logs, Strg+C zum Beenden
 ```bash
 sudo visudo -f /etc/sudoers.d/vllm-restart
 # Zeile einfügen (Benutzername anpassen):
-#   <user> ALL=(ALL) NOPASSWD: /usr/bin/systemctl restart vllm
+#   <user> ALL=(ALL) NOPASSWD: /usr/bin/systemctl restart llm-hub
 ```
 
 ## 8. Verifizieren
@@ -232,7 +242,7 @@ in `.vscode/mcp.json` die URL auf die LAN-IP des **neuen** Spark anpassen
 ```json
 {
   "servers": {
-    "vllm-manager": {
+    "llm-hub": {
       "type": "http",
       "url": "http://<neuer-spark>:11434/mcp"
     }

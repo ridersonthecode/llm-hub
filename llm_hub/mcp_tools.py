@@ -1,4 +1,4 @@
-"""MCP-Server (Streamable HTTP), damit eine KI den vLLM-Manager übers Netzwerk
+"""MCP-Server (Streamable HTTP), damit eine KI den LLM-Hub übers Netzwerk
 steuern kann: Modelle auflisten, herunterladen, laden/entladen, Status abfragen."""
 from __future__ import annotations
 
@@ -12,7 +12,7 @@ from .catalog import list_cached_models
 from .config import get_config
 
 mcp = FastMCP(
-    "vllm-manager",
+    "llm-hub",
     # Ohne dies registriert FastMCP seine Route selbst unter "/mcp"; gemountet
     # unter "/mcp" ergäbe das intern "/mcp/mcp" -> 404. Mit "/" hier + Mount auf
     # "/mcp" in main.py landet die Route korrekt auf "/mcp/".
@@ -39,7 +39,7 @@ mcp = FastMCP(
 async def list_models() -> dict:
     """Listet registrierte, lokal gecachte und aktuell geladene Modelle."""
     cfg = get_config()
-    cached = await list_cached_models(cfg.hf_home)
+    cached = await list_cached_models(cfg.resolved_hf_home())
     return {
         "registered": [
             {"model": name, "enabled": m.enabled, "notes": m.notes}
@@ -113,17 +113,6 @@ async def rag_add_text(text: str, collection: Optional[str] = None, source: str 
 
 
 @mcp.tool()
-async def rag_add_file(path: str, collection: Optional[str] = None) -> dict:
-    """Fügt eine Datei (PDF oder Text/Markdown) der RAG-Wissensdatenbank hinzu.
-    WICHTIG: `path` muss auf dem Server laufen, auf dem der vLLM-Manager läuft
-    (nicht auf deinem eigenen Rechner) - für Dateien von woanders stattdessen
-    den Inhalt lesen und rag_add_text() verwenden."""
-    cfg = get_config()
-    col = collection or cfg.rag.default_collection
-    return await rag.add_file(col, path)
-
-
-@mcp.tool()
 async def rag_search(query: str, collection: Optional[str] = None, top_k: int = 5) -> dict:
     """Sucht die relevantesten Text-Ausschnitte zu einer Anfrage in der RAG-
     Wissensdatenbank (semantische Ähnlichkeitssuche, kein reiner Stichwort-
@@ -160,4 +149,23 @@ async def rag_delete_document(document_id: str, collection: Optional[str] = None
 async def rag_delete_collection(collection: str) -> dict:
     """Löscht eine komplette RAG-Collection inkl. aller enthaltenen Dokumente."""
     return await rag.delete_collection(collection)
+
+
+@mcp.tool()
+async def rag_rename_source(document_id: str, new_source: str, collection: Optional[str] = None) -> dict:
+    """Benennt das "source"-Label eines Dokuments um (z.B. bessere Anzeige-
+    bezeichnung statt Dateipfad/"text") - ändert nur das Label, nicht den
+    Inhalt der Chunks."""
+    cfg = get_config()
+    col = collection or cfg.rag.default_collection
+    return await rag.rename_source(col, document_id, new_source)
+
+
+@mcp.tool()
+async def rag_move_document(document_id: str, to_collection: str, from_collection: Optional[str] = None) -> dict:
+    """Verschiebt ein Dokument (alle seine Chunks) von einer Collection in
+    eine andere. `to_collection` wird bei Bedarf automatisch angelegt."""
+    cfg = get_config()
+    src = from_collection or cfg.rag.default_collection
+    return await rag.move_document(document_id, src, to_collection)
 
