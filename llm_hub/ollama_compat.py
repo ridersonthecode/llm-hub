@@ -11,15 +11,19 @@ Ollama-Endpunkte (/api/generate, /api/pull, /api/show, ...) gibt es nicht -
 bei Bedarf hier nach demselben Muster ergänzen."""
 from __future__ import annotations
 
+import asyncio
+import contextlib
+import json
 import logging
 import time
 from datetime import datetime, timezone
+from typing import Optional
 
 import httpx
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import JSONResponse
 
-from . import process_manager, rag, request_queue, telemetry
+from . import active_streams, conversation_tracker, process_manager, rag, request_queue, telemetry
 from .catalog import list_cached_models
 from .config import Config, get_config
 
@@ -158,26 +162,108 @@ async def api_chat(request: Request):
 
     target = f"http://{cfg.engine_host}:{engine_status['port']}/v1/chat/completions"
     started = time.time()
+    # Bewusst NICHT mehr ein einziges blockierendes client.post() (wie vor
+    # dem 2026-09-01-Fix) - das registrierte nirgends eine abbrechbare
+    # Verbindung, weshalb der Dashboard-Cancel-Button hier immer mit "Keine
+    # aktive, abbrechbare Anfrage gefunden" scheiterte, sobald der
+    # aufrufende Alt-Client (z.B. Python mit eigenem Timeout) längst
+    # aufgegeben hatte, die Engine aber unbemerkt weiter generierte. Wie
+    # main.py proxy_v1()/gen(): client.send(..., stream=True) + manuelles
+    # Einlesen, dazwischen in active_streams registriert - macht sowohl den
+    # manuellen Cancel-Button als auch die automatische Disconnect-Erkennung
+    # (siehe disconnect_watcher unten) für diesen Pfad nutzbar.
+    client = httpx.AsyncClient(timeout=None)
+    req = client.build_request("POST", target, json=openai_body)
     try:
-        async with httpx.AsyncClient(timeout=None) as client:
-            upstream = await client.post(target, json=openai_body)
+        upstream = await client.send(req, stream=True)
     except Exception as e:
+        await client.aclose()
         request_queue.release()
         telemetry.finish_request(rid, "error")
         raise HTTPException(502, f"vLLM-Engine für '{model}' nicht erreichbar: {e}")
 
+    active_streams.register(rid, upstream)
+    disconnect_watcher = asyncio.create_task(active_streams.watch_disconnect(request, rid))
+    status = "ok"
+    read_error: Optional[Exception] = None
+
+    # Für /dashboard/conversations (conversation_tracker.py) - siehe dortigen
+    # Docstring: nur ab hier geloggt, weil die Anfrage jetzt tatsächlich an die
+    # Engine ging (die früheren Ablehnungen oben - unbekanntes Modell,
+    # ensure_loaded()-Fehlschlag, Engine unerreichbar - haben keinen echten
+    # "Konversationsinhalt"). openai_body["messages"] enthält bereits den
+    # evtl. per Auto-RAG injizierten Kontext (siehe rag.apply_auto_rag oben).
+    request_params = {k: v for k, v in openai_body.items() if k not in ("messages", "model")}
+
+    def _record_conversation(fin_status: str, output_content: str = "", output_reasoning: str = "",
+                              finish_reason: Optional[str] = None,
+                              prompt_tokens: Optional[int] = None, completion_tokens: Optional[int] = None) -> None:
+        conversation_tracker.record_conversation(
+            rid=rid, model=model, path="api/chat",
+            started_at=started, finished_at=time.time(), status=fin_status,
+            prompt_tokens=prompt_tokens, completion_tokens=completion_tokens,
+            user_agent=request.headers.get("user-agent"),
+            request_messages=openai_body.get("messages"), request_params=request_params,
+            output_content=output_content, output_reasoning=output_reasoning, finish_reason=finish_reason,
+        )
+    try:
+        full_body = bytearray()
+        async for chunk in upstream.aiter_raw():
+            full_body.extend(chunk)
+    except Exception as e:
+        # Verbindung zur Engine ist WÄHREND des Lesens abgebrochen - anders
+        # als beim alten client.post() (ein einziger Aufruf, ein einziger
+        # except-Block oben) kann das jetzt hier separat passieren, seit wir
+        # den Stream selbst einlesen. was_cancelled() unterscheidet das von
+        # unserem eigenen absichtlichen upstream.aclose() (Cancel-Button/
+        # Disconnect-Watcher) - dort ist der Abbruch das gewünschte Ergebnis,
+        # kein echter Fehler.
+        if active_streams.was_cancelled(rid):
+            status = "cancelled"
+        else:
+            status = "error"
+            read_error = e
+    finally:
+        disconnect_watcher.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await disconnect_watcher
+        active_streams.unregister(rid)
+        await upstream.aclose()
+        await client.aclose()
+
+    if status == "cancelled":
+        request_queue.release()
+        telemetry.finish_request(rid, "cancelled")
+        _record_conversation("cancelled")
+        # Client ist per Definition nicht mehr da (manueller Cancel oder
+        # erkannter Disconnect) - diese Response erreicht ihn ohnehin nicht
+        # mehr, der Status-Code ist nur fürs Log/evtl. Proxies relevant.
+        raise HTTPException(499, "Anfrage wurde abgebrochen (manuell oder Client-Disconnect erkannt).")
+    if status == "error":
+        request_queue.release()
+        telemetry.finish_request(rid, "error")
+        _record_conversation("error")
+        raise HTTPException(502, f"vLLM-Engine für '{model}' nicht erreichbar: {read_error}")
+
     if upstream.status_code >= 400:
         request_queue.release()
         telemetry.finish_request(rid, "error")
-        raise HTTPException(upstream.status_code, upstream.text)
+        _record_conversation("error", output_content=bytes(full_body).decode("utf-8", "replace"))
+        raise HTTPException(upstream.status_code, bytes(full_body).decode("utf-8", "replace"))
 
     telemetry.mark_first_token(rid)
-    data = upstream.json()
+    data = json.loads(bytes(full_body))
     choice = (data.get("choices") or [{}])[0]
-    content = (choice.get("message") or {}).get("content", "")
+    message = choice.get("message") or {}
+    content = message.get("content", "")
+    reasoning = message.get("reasoning") or message.get("reasoning_content") or ""
     usage = data.get("usage") or {}
     request_queue.release()
     telemetry.finish_request(rid, "ok", usage.get("prompt_tokens"), usage.get("completion_tokens"))
+    _record_conversation(
+        "ok", output_content=content, output_reasoning=reasoning, finish_reason=choice.get("finish_reason"),
+        prompt_tokens=usage.get("prompt_tokens"), completion_tokens=usage.get("completion_tokens"),
+    )
 
     duration_ns = int((time.time() - started) * 1e9)
     return JSONResponse({

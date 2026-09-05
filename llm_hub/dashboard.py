@@ -381,12 +381,12 @@ DASHBOARD_HTML = r"""<!doctype html>
     border-radius:8px; height:36px; padding:0 8px; font-size:13px; cursor:pointer; flex:0 0 auto;
   }
   #lang-select:hover { background:var(--panel-2); }
-  #rag-link, #config-link, #costs-link {
+  #rag-link, #config-link, #costs-link, #conversations-link {
     display:inline-flex; align-items:center; background:var(--panel); border:1px solid var(--border);
     color:var(--text); text-decoration:none; border-radius:8px; height:36px; padding:0 12px;
     font-size:13px; flex:0 0 auto; box-sizing:border-box;
   }
-  #rag-link:hover, #config-link:hover, #costs-link:hover { background:var(--panel-2); border-color: var(--accent); }
+  #rag-link:hover, #config-link:hover, #costs-link:hover, #conversations-link:hover { background:var(--panel-2); border-color: var(--accent); }
   .unload-btn {
     background:var(--panel-2); border:1px solid var(--border); color:var(--text);
     border-radius:6px; padding:4px 10px; font-size:12px; cursor:pointer;
@@ -584,6 +584,7 @@ DASHBOARD_HTML = r"""<!doctype html>
       <a href="/dashboard/config" id="config-link" data-i18n="nav.configLink">⚙️ Config →</a>
       <a href="/dashboard/costs" id="costs-link" data-i18n="nav.costsLink">💰 Costs →</a>
       <a href="/dashboard/rag" id="rag-link" data-i18n="nav.ragLink">RAG →</a>
+      <a href="/dashboard/conversations" id="conversations-link" data-i18n="nav.conversationsLink">🗨️ Conversations →</a>
       <select id="lang-select" data-i18n-title="lang.selectTitle" title="Language"></select>
       <button id="theme-toggle" data-i18n-title="theme.toggleTitle" title="Toggle theme">🌙</button>
     </div>

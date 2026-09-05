@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import logging
 import time
+import contextlib
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Optional
@@ -18,13 +19,14 @@ from fastapi.staticfiles import StaticFiles
 
 from pydantic import ValidationError
 
-from . import capability_detector, config_editor, cost_tracker, downloader, nvfp4_quantizer, perf_tuner, process_manager, rag, request_queue, telemetry
+from . import active_streams, capability_detector, config_editor, conversation_tracker, cost_tracker, downloader, nvfp4_quantizer, perf_tuner, process_manager, rag, request_queue, telemetry
 from .auth import ApiKeyMiddleware
 from . import catalog
 from .catalog import list_cached_models
 from .config import get_config
 from .chat_dashboard import router as chat_dashboard_router
 from .config_dashboard import router as config_dashboard_router
+from .conversations_dashboard import router as conversations_dashboard_router
 from .cost_dashboard import router as cost_dashboard_router
 from .dashboard import router as dashboard_router
 from .mcp_tools import mcp
@@ -167,6 +169,7 @@ app.include_router(rag_dashboard_router)
 app.include_router(config_dashboard_router)
 app.include_router(cost_dashboard_router)
 app.include_router(chat_dashboard_router)
+app.include_router(conversations_dashboard_router)
 # Reine ASGI-Middleware statt @app.middleware("http") - siehe auth.py
 # Docstring: BaseHTTPMiddleware bricht Streaming-Responses (stream: true).
 app.add_middleware(ApiKeyMiddleware)
@@ -601,6 +604,31 @@ async def reset_cost_records_endpoint():
     return {"ok": True, "removed": removed}
 
 
+# --- Konversations-Log (/dashboard/conversations) - siehe conversation_tracker.py -------
+
+@app.delete("/conversations/{record_id}")
+async def delete_conversation_record_endpoint(record_id: str):
+    removed = conversation_tracker.delete_records([record_id])
+    if not removed:
+        raise HTTPException(404, f"Konversations-Datensatz '{record_id}' nicht gefunden.")
+    return {"ok": True, "removed": removed}
+
+
+@app.post("/conversations/delete")
+async def delete_conversation_records_endpoint(body: dict):
+    ids = body.get("ids") or []
+    if not ids:
+        raise HTTPException(400, "'ids' fehlt oder ist leer im Request-Body.")
+    removed = conversation_tracker.delete_records(ids)
+    return {"ok": True, "removed": removed}
+
+
+@app.post("/conversations/reset")
+async def reset_conversation_records_endpoint():
+    removed = conversation_tracker.reset_all()
+    return {"ok": True, "removed": removed}
+
+
 # --- OpenAI-kompatibler Proxy mit Auto-Load -------------------------------
 
 HOP_BY_HOP = {"host", "authorization", "content-length", "connection"}
@@ -677,20 +705,16 @@ _REPETITION_MAX_PERIOD = 400
 # sichtbar, eine Notiz macht den Neuversuch kenntlich.
 _LOOP_RETRY_MAX = 2
 
-# Registry laufender Streams, damit POST /requests/{rid}/cancel (Dashboard-
-# Button "Abbrechen" bei Active Requests) eine hängende Anfrage manuell
-# beenden kann - z.B. wenn der eigentliche Client (VSCode o.ä.) längst nicht
-# mehr zuhört, die Engine aber unbemerkt weiter generiert (siehe Chat vom
-# 2026-08-26: genau dieser Fall trat beim "completely—"-Loop auf, wo die
-# automatische Erkennung nicht griff). Schließen der Upstream-Verbindung lässt
-# die Engine einen Client-Disconnect erkennen und die Generierung serverseitig
-# beenden - dieselbe Technik wie beim automatischen Loop-Abbruch unten, nur
-# von außen ausgelöst statt automatisch. rid -> httpx.Response (stream=True).
-_active_streams: dict[str, httpx.Response] = {}
-# rids, deren Abbruch WIR ausgelöst haben - unterscheidet im except-Block von
-# gen() einen echten Verbindungsfehler (weiter als "error" behandeln, Log +
-# re-raise wie bisher) von unserem eigenen absichtlichen upstream.aclose().
-_cancelled_rids: set[str] = set()
+# Registry laufender Streams (rid -> httpx.Response, stream=True), damit
+# POST /requests/{rid}/cancel (Dashboard-Button "Abbrechen" bei Active
+# Requests) eine hängende Anfrage manuell beenden kann - z.B. wenn der
+# eigentliche Client (VSCode o.ä.) längst nicht mehr zuhört, die Engine aber
+# unbemerkt weiter generiert (siehe Chat vom 2026-08-26: genau dieser Fall
+# trat beim "completely—"-Loop auf, wo die automatische Erkennung nicht
+# griff), sowie für die automatische Disconnect-Erkennung (siehe
+# active_streams.watch_disconnect(), Chat vom 2026-09-01). Ausgelagert in ein
+# eigenes Modul, damit ollama_compat.py (api_chat) dieselbe Registry nutzen
+# kann wie proxy_v1()/gen() hier - siehe active_streams.py-Docstring.
 
 
 def _min_repeats_for_period(period: int) -> int:
@@ -778,11 +802,31 @@ def _build_retry_body(parsed_body: Optional[dict], attempt: int) -> Optional[byt
     return json.dumps(retry_body).encode("utf-8")
 
 
-def _finish_and_record(rid: str, status: str, prompt_tokens=None, completion_tokens=None) -> None:
+def _finish_and_record(
+    rid: str,
+    status: str,
+    prompt_tokens=None,
+    completion_tokens=None,
+    *,
+    request_messages: Optional[list] = None,
+    request_prompt: Optional[str] = None,
+    request_params: Optional[dict] = None,
+    output_content: Optional[str] = None,
+    output_reasoning: Optional[str] = None,
+    finish_reason: Optional[str] = None,
+) -> None:
     """telemetry.finish_request() + Persistieren fürs fiktive Kostentracking
     (cost_tracker.py) in einem Rutsch - auch für früh abgebrochene Anfragen
     (unbekanntes Modell, Ladefehler), damit die Kostenseite wirklich jede
-    Anfrage zeigt (cost_usd bleibt dann None, siehe cost_tracker.compute_cost)."""
+    Anfrage zeigt (cost_usd bleibt dann None, siehe cost_tracker.compute_cost).
+
+    request_messages/request_prompt werden NUR vom einzigen Aufrufer übergeben,
+    der eine Anfrage tatsächlich bis zur Engine durchgereicht hat (gen() unten) -
+    daran hängt zusätzlich das Persistieren des echten Konversationsinhalts
+    (conversation_tracker.py, /dashboard/conversations). Alle anderen Aufrufer
+    (unbekanntes Modell, Engine-Start fehlgeschlagen, noch in der Warteschlange
+    abgebrochen) lassen diese Parameter bewusst weg - da wurde nie etwas
+    generiert, es gibt keinen "Konversationsinhalt" zum Zeigen."""
     finished = telemetry.finish_request(rid, status, prompt_tokens, completion_tokens)
     if finished is not None:
         cost_tracker.record_request(
@@ -795,29 +839,44 @@ def _finish_and_record(rid: str, status: str, prompt_tokens=None, completion_tok
             completion_tokens=finished.get("completion_tokens"),
             user_agent=finished.get("user_agent"),
         )
+        if request_messages is not None or request_prompt is not None:
+            conversation_tracker.record_conversation(
+                rid=rid,
+                model=finished["model"],
+                path=finished["path"],
+                started_at=finished["started_at"],
+                finished_at=finished["finished_at"],
+                status=finished["status"],
+                prompt_tokens=finished.get("prompt_tokens"),
+                completion_tokens=finished.get("completion_tokens"),
+                user_agent=finished.get("user_agent"),
+                request_messages=request_messages,
+                request_prompt=request_prompt,
+                request_params=request_params,
+                output_content=output_content or "",
+                output_reasoning=output_reasoning or "",
+                finish_reason=finish_reason,
+            )
 
 
 @app.post("/requests/{rid}/cancel")
 async def cancel_request_endpoint(rid: str):
-    """Bricht eine laufende, über proxy_v1() weitergeleitete Anfrage manuell ab
-    (Dashboard-Button "Abbrechen" bei Active Requests) - siehe _active_streams
-    oben. Deckt NICHT Anfragen über das Ollama-Kompatibilitäts-Layer
-    (ollama_compat.py /api/chat) ab, das nutzt keinen Streaming-Aufruf und
-    landet deshalb nie in dieser Registry; dort kommt dieselbe 404 wie bei
-    einer bereits beendeten Anfrage."""
-    upstream = _active_streams.get(rid)
-    if upstream is None:
-        # Noch nicht an ein Modell übergeben, sondern in der globalen
-        # Concurrency-Warteschlange (siehe request_queue.py) - ein anderer
-        # Abbruch-Pfad als bei einer bereits laufenden Anfrage, da hier noch
-        # keine Upstream-Verbindung existiert, die man schließen könnte.
-        if request_queue.cancel_waiting(rid):
-            _finish_and_record(rid, "cancelled")
-            return {"ok": True}
-        raise HTTPException(404, f"Keine aktive, abbrechbare Anfrage mit id '{rid}' gefunden (evtl. bereits beendet).")
-    _cancelled_rids.add(rid)
-    await upstream.aclose()
-    return {"ok": True}
+    """Bricht eine laufende Anfrage manuell ab (Dashboard-Button "Abbrechen"
+    bei Active Requests) - deckt sowohl über proxy_v1() weitergeleitete
+    Anfragen als auch das Ollama-Kompatibilitäts-Layer (ollama_compat.py
+    /api/chat) ab, siehe active_streams.py. Vor dem 2026-09-01-Fix landete
+    /api/chat nie in dieser Registry (kein Streaming-Aufruf dort) und der
+    Button lief hier immer in die 404 "bereits beendet"."""
+    if await active_streams.cancel(rid):
+        return {"ok": True}
+    # Noch nicht an ein Modell übergeben, sondern in der globalen
+    # Concurrency-Warteschlange (siehe request_queue.py) - ein anderer
+    # Abbruch-Pfad als bei einer bereits laufenden Anfrage, da hier noch
+    # keine Upstream-Verbindung existiert, die man schließen könnte.
+    if request_queue.cancel_waiting(rid):
+        _finish_and_record(rid, "cancelled")
+        return {"ok": True}
+    raise HTTPException(404, f"Keine aktive, abbrechbare Anfrage mit id '{rid}' gefunden (evtl. bereits beendet).")
 
 
 @app.api_route("/v1/{path:path}", methods=["GET", "POST"])
@@ -929,7 +988,21 @@ async def proxy_v1(path: str, request: Request):
         _finish_and_record(rid, "error")
         raise
     result_status = "ok" if upstream.status_code < 400 else "error"
-    _active_streams[rid] = upstream
+    active_streams.register(rid, upstream)
+
+    # Für /dashboard/conversations (conversation_tracker.py): "messages" bei
+    # chat/completions enthält bereits alle evtl. Änderungen von oben (Auto-
+    # RAG-Kontext, Default-max_tokens/-repetition_penalty landen dagegen in
+    # request_params, nicht in messages/prompt) - genau das, was tatsächlich
+    # an die Engine ging, nicht nur das, was der Client ursprünglich schickte.
+    # "prompt" deckt das ältere /v1/completions ab (kein messages-Array).
+    request_messages = parsed_body.get("messages") if parsed_body is not None and path == "chat/completions" else None
+    request_prompt = parsed_body.get("prompt") if parsed_body is not None and path == "completions" else None
+    request_params = (
+        {k: v for k, v in parsed_body.items() if k not in ("messages", "prompt", "model")}
+        if parsed_body is not None and (request_messages is not None or request_prompt is not None)
+        else None
+    )
 
     async def gen():
         first_chunk = True
@@ -937,6 +1010,14 @@ async def proxy_v1(path: str, request: Request):
         prompt_tokens = None
         completion_tokens = None
         status = result_status
+        # Vollständiger (nicht wie content_buf/reasoning_buf unten pro
+        # Retry-Versuch zurückgesetzter bzw. auf _REPETITION_LOOKBACK
+        # gekürzter) Mitschnitt des tatsächlich an den Client gestreamten
+        # Textes, fürs Konversations-Log (siehe _finish_and_record-Aufruf
+        # unten) - unabhängig von der Wiederholungsschleifen-Erkennung.
+        output_content_parts: list[str] = []
+        output_reasoning_parts: list[str] = []
+        finish_reason: Optional[str] = None
         # Wiederholungsschleifen-Erkennung (siehe _has_repetition_loop oben) -
         # nur bei gestreamten Antworten möglich, da wir sonst erst nach dem
         # kompletten (evtl. endlosen) Response irgendetwas sehen. mcfg ist
@@ -946,6 +1027,12 @@ async def proxy_v1(path: str, request: Request):
         detect_loop = is_stream and (mcfg.repetition_detection if mcfg is not None else True)
         current_upstream = upstream
         attempt = 0
+        # Automatische Erkennung "Client ist weg" (siehe active_streams.
+        # watch_disconnect() Docstring, Chat vom 2026-09-01) - läuft parallel
+        # zum eigentlichen Lesen der Engine-Antwort und bricht active_streams
+        # selbst ab, sobald uvicorn einen echten TCP-Disconnect meldet. Wird
+        # im finally unten wieder beendet.
+        disconnect_watcher = asyncio.create_task(active_streams.watch_disconnect(request, rid))
         try:
             # Äußere Schleife = automatische Neuversuche nach einer erkannten
             # Wiederholungsschleife (siehe _LOOP_RETRY_MAX oben) - jede
@@ -979,8 +1066,20 @@ async def proxy_v1(path: str, request: Request):
                                     continue
                                 choices = obj.get("choices") or []
                                 delta = (choices[0].get("delta") or {}) if choices else {}
+                                if choices and choices[0].get("finish_reason"):
+                                    finish_reason = choices[0]["finish_reason"]
+                                # Legacy /v1/completions-Chunks haben KEIN "delta"-
+                                # Wrapper, sondern direkt choices[0].text - delta
+                                # bleibt für die dort oben leer, die Wiederholungs-
+                                # schleifen-Erkennung greift für diesen alten
+                                # Endpunkt schon bisher nicht (siehe fehlendes
+                                # "delta" hier), fürs Konversations-Log wird der
+                                # Text trotzdem mitgeschnitten.
+                                if choices and choices[0].get("text"):
+                                    output_content_parts.append(choices[0]["text"])
                                 if delta.get("content"):
                                     telemetry.increment_tokens(rid)
+                                    output_content_parts.append(delta["content"])
                                     if detect_loop:
                                         content_buf = (content_buf + delta["content"])[-_REPETITION_LOOKBACK:]
                                         if _has_repetition_loop(content_buf):
@@ -1005,6 +1104,7 @@ async def proxy_v1(path: str, request: Request):
                                 reasoning_delta = delta.get("reasoning") or delta.get("reasoning_content")
                                 if reasoning_delta:
                                     telemetry.increment_reasoning_tokens(rid)
+                                    output_reasoning_parts.append(reasoning_delta)
                                     if detect_loop:
                                         reasoning_buf = (reasoning_buf + reasoning_delta)[-_REPETITION_LOOKBACK:]
                                         if _has_repetition_loop(reasoning_buf):
@@ -1043,7 +1143,7 @@ async def proxy_v1(path: str, request: Request):
                     await current_upstream.aclose()
                     retry_req = client.build_request(request.method, target, content=retry_body, headers=fwd_headers)
                     current_upstream = await client.send(retry_req, stream=True)
-                    _active_streams[rid] = current_upstream
+                    active_streams.register(rid, current_upstream)
                     continue
                 # Kein JSON-Body zum Modifizieren oder Neuversuche aufgebraucht -
                 # wie bisher mit sichtbarer Notiz endgültig abbrechen.
@@ -1061,6 +1161,15 @@ async def proxy_v1(path: str, request: Request):
                     usage = obj.get("usage") or {}
                     prompt_tokens = usage.get("prompt_tokens", prompt_tokens)
                     completion_tokens = usage.get("completion_tokens", completion_tokens)
+                    obj_choices = obj.get("choices") or []
+                    if obj_choices:
+                        finish_reason = obj_choices[0].get("finish_reason") or finish_reason
+                        msg = obj_choices[0].get("message")
+                        if msg is not None:
+                            output_content_parts.append(msg.get("content") or "")
+                            output_reasoning_parts.append(msg.get("reasoning") or msg.get("reasoning_content") or "")
+                        elif obj_choices[0].get("text"):
+                            output_content_parts.append(obj_choices[0]["text"])
                 except Exception:
                     pass
         except Exception:
@@ -1070,15 +1179,25 @@ async def proxy_v1(path: str, request: Request):
             # Fehler, sondern das gewünschte Ergebnis. Alles andere (echter
             # Verbindungsabbruch zur Engine etc.) bleibt wie bisher "error"
             # inkl. Log/re-raise.
-            if rid in _cancelled_rids:
+            if active_streams.was_cancelled(rid):
                 status = "cancelled"
             else:
                 status = "error"
                 raise
         finally:
-            _active_streams.pop(rid, None)
-            _cancelled_rids.discard(rid)
-            _finish_and_record(rid, status, prompt_tokens, completion_tokens)
+            disconnect_watcher.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await disconnect_watcher
+            active_streams.unregister(rid)
+            _finish_and_record(
+                rid, status, prompt_tokens, completion_tokens,
+                request_messages=request_messages,
+                request_prompt=request_prompt,
+                request_params=request_params,
+                output_content="".join(output_content_parts),
+                output_reasoning="".join(output_reasoning_parts),
+                finish_reason=finish_reason,
+            )
             request_queue.release()
             await current_upstream.aclose()
             await client.aclose()

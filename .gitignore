@@ -29,6 +29,12 @@ config_backups/
 costs.jsonl
 costs.jsonl.tmp
 
+# Persistente Konversations-Historie (llm_hub/conversation_tracker.py) - enthält
+# die tatsächlichen Prompts/Antworten dieser Maschine (siehe /dashboard/
+# conversations), erst recht nicht Teil des Projekts.
+conversations.jsonl
+conversations.jsonl.tmp
+
 # Zeiger aufs zuletzt genutzte Modell fürs automatische Nachladen beim
 # Dienststart (llm_hub/process_manager.py, config.auto_reload_last_model).
 last_active_model.json
