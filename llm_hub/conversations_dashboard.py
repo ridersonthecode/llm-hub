@@ -285,7 +285,7 @@ CONVERSATIONS_DASHBOARD_HTML = r"""<!doctype html>
   /* Tools-Liste: die vom Client mitgeschickten Function-Definitionen (bei
      Copilot z.B. 23 Stück) als Namens-Chips statt als ein einziger, riesiger
      JSON-Klumpen im Parameter-Bereich - siehe .param-chip-Kommentar oben. */
-  .tools-box { background:var(--panel-2); border:1px solid var(--border); border-radius:10px; margin-top:10px; }
+  .tools-box { background:var(--panel-2); border:1px solid var(--border); border-radius:10px; margin:10px 0 16px; }
   .tools-box summary {
     cursor:pointer; list-style:none; user-select:none; padding:8px 14px;
     font-size:12px; color:var(--text-dim); display:flex; align-items:center; gap:6px;
