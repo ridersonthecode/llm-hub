@@ -1,17 +1,26 @@
-"""Konversations-Log-Seite: /dashboard/conversations (HTML), /dashboard/
+"""Konversations-Log-Seiten: /dashboard/conversations (Tabelle, HTML), /dashboard/
 conversations/status (JSON-Snapshot), /dashboard/conversations/ws (WebSocket,
-Live-Push). Zeigt den tatsächlichen Inhalt abgeschlossener LLM-Anfragen
-(System-Prompt, Nachrichtenverlauf, generierte Antwort inkl. Denkprozess) -
-siehe conversation_tracker.py für die Aufzeichnung selbst (nur main.py gen()/
-ollama_compat.py api_chat() schreiben dort hinein, diese Seite hier ist reine
-Lese-/Live-Anzeige + Löschen, analog zum Muster in cost_dashboard.py).
+Live-Push), /dashboard/conversations/{id}/view (Detail-Ansicht EINER
+Konversation, eigener Tab). Zeigt den tatsächlichen Inhalt abgeschlossener
+LLM-Anfragen (System-Prompt, Nachrichtenverlauf, generierte Antwort inkl.
+Denkprozess) - siehe conversation_tracker.py für die Aufzeichnung selbst (nur
+main.py gen()/ollama_compat.py api_chat() schreiben dort hinein, diese Seiten
+hier sind reine Lese-/Live-Anzeige + Löschen, analog zum Muster in
+cost_dashboard.py).
 
-Tabelle + "Anzeigen"-Button-Modal exakt nach dem Muster von rag_dashboard.py
-(dortiges Text-Modal), nur mit einem zweiten Tab für die rohe JSON-Ansicht
-statt Rendered/Raw-Text, und der Bubble-/Markdown-Darstellung aus
-chat_dashboard.py für die eigentliche Konversation (eigene Kopie hier, siehe
-dortiger Kommentar zu "kein CDN/keine externe Bibliothek" - jede Dashboard-
-Seite ist bewusst ein einziges, unabhängiges HTML-Dokument)."""
+Der "Anzeigen"-Button der Tabelle öffnete früher ein Modal auf derselben
+Seite (Muster wie rag_dashboard.py) - bei den teils riesigen Konversationen
+(VS Code/Copilot: >40k Zeichen System-Prompt, 20+ Tools, oft XML-artig
+strukturierter Kontext in den Nachrichten selbst) war das trotz Kollaps-
+Mechanik zu eng. Der Button ist jetzt ein normaler Link (target="_blank") auf
+/dashboard/conversations/{id}/view - eine eigene, für eine einzelne
+Konversation optimierte Seite mit mehr Platz, vollständig ausgeklappten
+Tool-Schemas und automatischer Erkennung/Sonderdarstellung von XML-artigen
+Textblöcken (siehe CONVERSATION_VIEW_HTML/findXmlBlocks() dort unten). Beide
+Seiten teilen sich die Bubble-/Markdown-Darstellung aus chat_dashboard.py
+(eigene Kopie hier, siehe dortiger Kommentar zu "kein CDN/keine externe
+Bibliothek" - jede Dashboard-Seite ist bewusst ein einziges, unabhängiges
+HTML-Dokument)."""
 from __future__ import annotations
 
 import asyncio
@@ -76,15 +85,26 @@ async def conversations_ws(websocket: WebSocket):
 
 @router.get("/dashboard/conversations/{record_id}")
 async def conversation_detail(record_id: str):
-    """Voller Datensatz (messages/prompt/request_params/output_*) für das
-    Modal - siehe conversation_tracker.get_record()/list_records()-Kommentar,
-    die Tabelle selbst bekommt diese schweren Felder nicht mehr mit. Muss vor
-    der Seiten-Route (ohne {record_id}-Segment) stehen, aber NACH /status
-    (sonst würde "status" selbst als record_id interpretiert)."""
+    """Voller Datensatz (messages/prompt/request_params/output_*) für die
+    Detail-Ansicht (/dashboard/conversations/{id}/view) - siehe
+    conversation_tracker.get_record()/list_records()-Kommentar, die Tabelle
+    selbst bekommt diese schweren Felder nicht mehr mit. Muss vor der
+    Seiten-Route (ohne {record_id}-Segment) stehen, aber NACH /status (sonst
+    würde "status" selbst als record_id interpretiert)."""
     rec = conversation_tracker.get_record(record_id)
     if rec is None:
         raise HTTPException(404, f"Konversations-Datensatz '{record_id}' nicht gefunden.")
     return rec
+
+
+@router.get("/dashboard/conversations/{record_id}/view")
+async def conversation_view_page(record_id: str):
+    """Eigenständige Detail-Seite für EINE Konversation (eigener Tab, siehe
+    Modul-Docstring) - lädt ihren Datensatz selbst per fetch() gegen
+    conversation_detail() oben, das HTML hier ist unabhängig von record_id
+    (identisches Muster wie CONVERSATIONS_DASHBOARD_HTML: eine statische
+    Seite, record_id kommt zur Laufzeit aus location.pathname)."""
+    return HTMLResponse(CONVERSATION_VIEW_HTML)
 
 
 @router.get("/dashboard/conversations")
@@ -160,7 +180,7 @@ CONVERSATIONS_DASHBOARD_HTML = r"""<!doctype html>
   .badge.warn { background: var(--warn-bg); color: var(--warn); }
   .row-del { background:none; border:none; color:var(--text-dim); cursor:pointer; font-size:14px; padding:2px 6px; border-radius:6px; flex:0 0 auto; }
   .row-del:hover { color:var(--bad); background:var(--bad-bg); }
-  .row-view { background:none; border:none; color:var(--accent); cursor:pointer; font-size:13px; padding:2px 4px; flex:0 0 auto; }
+  .row-view { color:var(--accent); font-size:13px; padding:2px 4px; flex:0 0 auto; text-decoration:none; }
   .row-view:hover { text-decoration:underline; }
   /* Beide Buttons in EINER Zeile statt (bei knapper Spaltenbreite) untereinander
      umzubrechen - vorher standen sie als zwei separate Inline-Elemente mit
@@ -220,161 +240,6 @@ CONVERSATIONS_DASHBOARD_HTML = r"""<!doctype html>
   }
   .dt-paging-input input { width:3.5em; text-align:center; }
   table.dataTable tbody tr:hover td { background:var(--panel-2); }
-
-  /* Modal: bewusst groß & breit (siehe Anfrage) - deutlich mehr Platz als das
-     schmalere Text-Modal in rag_dashboard.py, damit eine ganze Konversation
-     inkl. System-Prompt übersichtlich nebeneinander/untereinander Platz hat.
-     Kopf (Titel/Meta/Params) + Tab-Umschalter bleiben als eigene Flex-Items
-     fix stehen, nur .modal-body scrollt - bei den teils riesigen Konversationen
-     (System-Prompts von >40k Zeichen sind keine Seltenheit, siehe Copilot)
-     musste man vorher bis ganz nach oben zurückscrollen, um Tab zu wechseln
-     oder das Modal zu schließen. */
-  .modal-overlay {
-    display:none; position:fixed; inset:0; background:rgba(0,0,0,.5);
-    align-items:center; justify-content:center; z-index:100; padding:20px;
-  }
-  .modal-overlay.open { display:flex; }
-  .modal {
-    position:relative; background:var(--panel); border:1px solid var(--border); border-radius:12px;
-    max-width:1200px; width:95vw; max-height:92vh; padding:24px 26px 0;
-    display:flex; flex-direction:column; overflow:hidden;
-  }
-  .modal .close-btn {
-    position:absolute; top:16px; right:20px; background:none; border:none;
-    color:var(--text-dim); font-size:20px; cursor:pointer; line-height:1; z-index:1;
-  }
-  .modal-head { margin-bottom:14px; padding-right:30px; flex:0 0 auto; }
-  .modal-head h3 { margin:0 0 8px; font-size:16px; }
-  .modal-meta { display:flex; flex-wrap:wrap; gap:8px 18px; font-size:12.5px; color:var(--text-dim); }
-  .modal-meta b { color:var(--text); font-weight:600; }
-  .modal-params { display:flex; flex-wrap:wrap; gap:6px; margin-top:10px; }
-  /* Werte werden in fmtParamValue() auf 60 Zeichen gekappt (voller Wert im
-     title) - ohne diese Kappung riss z.B. ein "tools"-Param mit vielen
-     Function-Definitionen (mehrere KB an JSON ohne ein einziges Leerzeichen,
-     also ohne Umbruchstelle) das ganze Modal in der Breite auf. "tools"/
-     "functions" selbst werden erst gar nicht als Chip gerendert, siehe
-     #conv-modal-tools weiter unten. */
-  .param-chip { background:var(--panel-2); border:1px solid var(--border); border-radius:20px; padding:2px 10px; font-size:11px; font-family:var(--mono); color:var(--text-dim); max-width:100%; overflow-wrap:anywhere; }
-
-  .view-toggle { display:flex; gap:6px; margin:14px 0; flex:0 0 auto; }
-  .view-toggle button {
-    background:var(--panel); border:1px solid var(--border); color:var(--text-dim);
-    border-radius:8px; height:30px; padding:0 12px; font-size:12px; cursor:pointer;
-  }
-  .view-toggle button.active { background:var(--accent); border-color:var(--accent); color:#fff; }
-
-  .modal-body { flex:1 1 auto; overflow-y:auto; padding-bottom:24px; }
-
-  /* System-Prompt: als <details> statt eines immer offenen, festen 220px-
-     Kästchens - bei über 40k Zeichen (siehe Copilot-System-Prompt) war das
-     nur ein winziges Scroll-Fenster voller kaum lesbarem Fließtext. Jetzt
-     per Default eingeklappt (Zeichenzahl im Summary), Monospace statt
-     Proportionalschrift (passt zu den <tag>-durchsetzten Prompts), eigener
-     Copy-Button - und erst beim Aufklappen bis zu 400px hoch scrollbar. */
-  .system-box {
-    background:var(--panel-2); border:1px solid var(--border); border-radius:10px;
-    margin-bottom:16px; overflow:hidden;
-  }
-  .system-box summary {
-    cursor:pointer; list-style:none; user-select:none;
-    display:flex; align-items:center; gap:10px; padding:10px 14px;
-  }
-  .system-box summary::-webkit-details-marker { display:none; }
-  .system-box summary::before { content:"▶"; font-size:9px; color:var(--text-dim); transition:transform .12s; flex:0 0 auto; }
-  .system-box[open] summary::before { transform:rotate(90deg); }
-  .system-box-label { font-size:11px; text-transform:uppercase; letter-spacing:.04em; color:var(--text-dim); font-weight:600; }
-  .system-box-size { font-size:11.5px; color:var(--text-dim); }
-  .system-box summary .mini-btn { margin-left:auto; }
-  .system-box-text {
-    margin:0; padding:0 14px 14px; font-family:var(--mono); font-size:12px;
-    white-space:pre-wrap; word-break:break-word; max-height:400px; overflow-y:auto;
-  }
-  .mini-btn {
-    background:var(--panel); border:1px solid var(--border); color:var(--text-dim);
-    border-radius:5px; padding:2px 9px; font-size:11px; cursor:pointer;
-  }
-  .mini-btn:hover { border-color:var(--accent); color:var(--accent); }
-
-  /* Tools-Liste: die vom Client mitgeschickten Function-Definitionen (bei
-     Copilot z.B. 23 Stück) als Namens-Chips statt als ein einziger, riesiger
-     JSON-Klumpen im Parameter-Bereich - siehe .param-chip-Kommentar oben. */
-  .tools-box { background:var(--panel-2); border:1px solid var(--border); border-radius:10px; margin:10px 0 16px; }
-  .tools-box summary {
-    cursor:pointer; list-style:none; user-select:none; padding:8px 14px;
-    font-size:12px; color:var(--text-dim); display:flex; align-items:center; gap:6px;
-  }
-  .tools-box summary::-webkit-details-marker { display:none; }
-  .tools-box summary::before { content:"▶"; font-size:9px; transition:transform .12s; }
-  .tools-box[open] summary::before { transform:rotate(90deg); }
-  .tools-list { padding:0 14px 12px; display:flex; flex-wrap:wrap; gap:6px; }
-  .tools-list-item {
-    background:var(--panel); border:1px solid var(--border); border-radius:6px;
-    padding:3px 8px; font-size:11.5px; font-family:var(--mono); color:var(--text); cursor:help;
-  }
-
-  .raw-json-bar { display:flex; justify-content:flex-end; margin-bottom:8px; }
-  .raw-json {
-    background:var(--panel-2); border:1px solid var(--border); border-radius:8px;
-    padding:12px; font-family:var(--mono); font-size:12px; white-space:pre-wrap; word-break:break-word; margin:0;
-  }
-
-  /* Sehr lange Nachrichten (z.B. der 19KB-Workspace-Kontext, den Copilot vor
-     die eigentliche Frage packt) sonst dominieren sie das ganze Modal - ab
-     LONG_MSG_THRESHOLD Zeichen (siehe JS) auf ~220px geklammert, mit
-     Verlaufs-Fade + "Mehr anzeigen"-Button zum Aufklappen. */
-  .msg-collapsible { position:relative; max-height:220px; overflow:hidden; }
-  .msg-collapsible.expanded { max-height:none; }
-  .msg-collapsible:not(.expanded)::after {
-    content:""; position:absolute; left:0; right:0; bottom:0; height:48px;
-    background:linear-gradient(to bottom, transparent, var(--bubble-assistant));
-  }
-  .msg-row.user .msg-collapsible:not(.expanded)::after { background:linear-gradient(to bottom, transparent, var(--bubble-user)); }
-  .msg-toggle {
-    display:block; margin-top:8px; background:none; border:none; color:inherit;
-    opacity:.85; text-decoration:underline; font-size:12px; cursor:pointer; padding:0;
-  }
-
-  /* Bubble-/Markdown-/Reasoning-/Code-Block-Darstellung, 1:1 aus chat_dashboard.py übernommen. */
-  .msg-row { display:flex; margin-bottom:14px; }
-  .msg-row.user { justify-content:flex-end; }
-  .msg-row.assistant, .msg-row.other { justify-content:flex-start; }
-  .bubble {
-    max-width: 85%; border-radius:14px; padding:10px 14px; font-size:14px; line-height:1.55;
-    overflow-wrap:anywhere;
-  }
-  .msg-row.user .bubble { background:var(--bubble-user); color:var(--bubble-user-text); border-bottom-right-radius:4px; white-space:pre-wrap; }
-  .msg-row.assistant .bubble, .msg-row.other .bubble { background:var(--bubble-assistant); border:1px solid var(--border); border-bottom-left-radius:4px; }
-  .bubble-role { font-size:10.5px; text-transform:uppercase; letter-spacing:.04em; color:var(--text-dim); margin-bottom:4px; font-weight:600; }
-  .msg-row.user .bubble-role { color:rgba(255,255,255,.75); }
-  .bubble p { margin: 0 0 8px; }
-  .bubble p:last-child { margin-bottom:0; }
-  .bubble ul, .bubble ol { margin: 4px 0 8px; padding-left: 22px; }
-  .bubble h3, .bubble h4, .bubble h5, .bubble h6 { margin: 10px 0 6px; }
-  .bubble code { font-family: var(--mono); background:var(--panel-2); border-radius:4px; padding:1px 5px; font-size:.92em; }
-  .msg-row.user .bubble code { background:rgba(255,255,255,.18); }
-
-  .reasoning { margin-bottom:8px; }
-  .reasoning summary {
-    cursor:pointer; font-size:12px; color:var(--text-dim); user-select:none;
-    display:flex; align-items:center; gap:6px; list-style:none;
-  }
-  .reasoning summary::-webkit-details-marker { display:none; }
-  .reasoning summary::before { content:"▶"; font-size:9px; transition:transform .12s; }
-  .reasoning[open] summary::before { transform:rotate(90deg); }
-  .reasoning .reasoning-body {
-    margin-top:6px; padding:8px 10px; border-left:2px solid var(--border);
-    color:var(--text-dim); font-size:12.5px; white-space:pre-wrap;
-  }
-
-  .code-block { margin: 8px 0; border-radius:8px; overflow:hidden; border:1px solid var(--border); }
-  .code-block-bar {
-    background:var(--code-bar); color:#9da5b4; font-family: var(--mono); font-size:11px;
-    padding:5px 10px; display:flex; align-items:center; justify-content:space-between;
-  }
-  .code-copy-btn { background:transparent; border:1px solid #30363d; color:#9da5b4; border-radius:5px; padding:2px 8px; font-size:11px; cursor:pointer; }
-  .code-copy-btn:hover { background:#30363d; color:#fff; }
-  .code-block pre { margin:0; background:var(--code-bg); color:var(--code-text); padding:12px; overflow-x:auto; }
-  .code-block code { font-family: var(--mono); font-size:12.5px; background:none; padding:0; }
 </style>
 </head>
 <body>
@@ -418,40 +283,6 @@ CONVERSATIONS_DASHBOARD_HTML = r"""<!doctype html>
       ✨ Entwickelt mit Claude Code
     </span>
   </footer>
-
-  <div class="modal-overlay" id="conv-modal-overlay">
-    <div class="modal">
-      <button class="close-btn" id="conv-modal-close">✕</button>
-      <div class="modal-head">
-        <h3 id="conv-modal-title">–</h3>
-        <div class="modal-meta" id="conv-modal-meta"></div>
-        <div class="modal-params" id="conv-modal-params"></div>
-      </div>
-      <div class="view-toggle" id="conv-modal-toggle">
-        <button id="conv-modal-view-chat" data-i18n="conversations.modal.tabConversation">Conversation</button>
-        <button id="conv-modal-view-raw" data-i18n="conversations.modal.tabRaw">Raw JSON</button>
-      </div>
-      <div class="modal-body">
-        <details id="conv-modal-system" class="system-box" style="display:none;">
-          <summary>
-            <span class="system-box-label" data-i18n="conversations.modal.systemPrompt">System Prompt</span>
-            <span class="system-box-size" id="conv-modal-system-size"></span>
-            <button type="button" class="mini-btn" id="conv-modal-system-copy" data-i18n="chat.action.copyCode">Copy</button>
-          </summary>
-          <pre id="conv-modal-system-text" class="system-box-text"></pre>
-        </details>
-        <details id="conv-modal-tools" class="tools-box" style="display:none;">
-          <summary id="conv-modal-tools-label"></summary>
-          <div class="tools-list" id="conv-modal-tools-list"></div>
-        </details>
-        <div id="conv-modal-chat"></div>
-        <div class="raw-json-wrap" id="conv-modal-raw-wrap" style="display:none;">
-          <div class="raw-json-bar"><button type="button" class="mini-btn" id="conv-modal-raw-copy" data-i18n="chat.action.copyCode">Copy</button></div>
-          <pre class="raw-json" id="conv-modal-raw"></pre>
-        </div>
-      </div>
-    </div>
-  </div>
 
 <script src="/static/vendor/datatables/dataTables.min.js"></script>
 <script src="/static/vendor/datatables/dataTables.dataTables.min.js"></script>
@@ -526,115 +357,6 @@ function authHeaders(extra) {
   return h;
 }
 
-function copyText(text) {
-  // Siehe chat_dashboard.py copyText() - navigator.clipboard nur in sicheren
-  // Kontexten, dieses Dashboard läuft absichtlich auch über reines HTTP/LAN.
-  if (navigator.clipboard && window.isSecureContext) return navigator.clipboard.writeText(text);
-  return new Promise((resolve, reject) => {
-    const ta = document.createElement("textarea");
-    ta.value = text; ta.style.position = "fixed"; ta.style.top = "-1000px"; ta.style.opacity = "0";
-    document.body.appendChild(ta); ta.focus(); ta.select();
-    try { const ok = document.execCommand("copy"); document.body.removeChild(ta); ok ? resolve() : reject(new Error("copy failed")); }
-    catch (e) { document.body.removeChild(ta); reject(e); }
-  });
-}
-
-// --- Mini-Markdown-Renderer (1:1 aus chat_dashboard.py, siehe dortigen Kommentar) --
-function escapeHtml(s) {
-  return (s ?? "").replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
-}
-function renderInline(text) {
-  // Platzhalter-Marker aus einem echten NUL-Zeichen, bewusst per
-  // fromCharCode statt eines Escapes direkt im Quelltext erzeugt (kommt in
-  // normalem Markdown/Code praktisch nie vor, kollidiert also nicht mit
-  // echtem Text - anders als z.B. Leerzeichen).
-  const NUL = String.fromCharCode(0);
-  const codes = [];
-  text = text.replace(/`([^`\n]+)`/g, (_, code) => { codes.push(`<code>${escapeHtml(code)}</code>`); return NUL + (codes.length - 1) + NUL; });
-  text = escapeHtml(text);
-  text = text.replace(/\[([^\]]+)\]\((https?:\/\/[^\s)]+)\)/g, '<a href="$2" target="_blank" rel="noopener noreferrer">$1</a>');
-  text = text.replace(/\*\*([^*\n]+)\*\*/g, "<strong>$1</strong>");
-  text = text.replace(/(^|[^*])\*([^*\n]+)\*(?!\*)/g, "$1<em>$2</em>");
-  text = text.replace(new RegExp(NUL + "(\\d+)" + NUL, "g"), (_, i) => codes[Number(i)]);
-  return text;
-}
-function renderMarkdownBlock(text) {
-  const lines = text.split("\n");
-  const htmlParts = [];
-  let listBuf = [], listType = null, paraBuf = [];
-  const flushList = () => {
-    if (listBuf.length) {
-      const tag = listType === "ol" ? "ol" : "ul";
-      htmlParts.push(`<${tag}>${listBuf.map(li => `<li>${renderInline(li)}</li>`).join("")}</${tag}>`);
-      listBuf = []; listType = null;
-    }
-  };
-  const flushPara = () => { if (paraBuf.length) { htmlParts.push(`<p>${renderInline(paraBuf.join(" "))}</p>`); paraBuf = []; } };
-  for (const line of lines) {
-    const heading = line.match(/^(#{1,4})\s+(.*)$/);
-    const ol = line.match(/^\s*\d+[.)]\s+(.*)$/);
-    const ul = line.match(/^\s*[-*]\s+(.*)$/);
-    if (line.trim() === "") { flushPara(); flushList(); continue; }
-    if (heading) { flushPara(); flushList(); const level = heading[1].length + 2; htmlParts.push(`<h${level}>${renderInline(heading[2])}</h${level}>`); }
-    else if (ol) { flushPara(); if (listType !== "ol") flushList(); listType = "ol"; listBuf.push(ol[1]); }
-    else if (ul) { flushPara(); if (listType !== "ul") flushList(); listType = "ul"; listBuf.push(ul[1]); }
-    else { flushList(); paraBuf.push(line); }
-  }
-  flushPara(); flushList();
-  return htmlParts.join("");
-}
-function renderCodeBlock(lang, code) {
-  const id = "code-" + Math.random().toString(36).slice(2, 9);
-  return `<div class="code-block">
-    <div class="code-block-bar">
-      <span>${esc(lang || "text")}</span>
-      <button class="code-copy-btn" data-target="${id}">${esc(t("chat.action.copyCode"))}</button>
-    </div>
-    <pre><code id="${id}">${escapeHtml(code)}</code></pre>
-  </div>`;
-}
-function renderMarkdown(text) {
-  const parts = (text || "").split("```");
-  let html = "";
-  for (let i = 0; i < parts.length; i++) {
-    if (i % 2 === 0) html += renderMarkdownBlock(parts[i]);
-    else {
-      const seg = parts[i];
-      const nl = seg.indexOf("\n");
-      const lang = nl === -1 ? seg.trim() : seg.slice(0, nl).trim();
-      const code = nl === -1 ? "" : seg.slice(nl + 1);
-      html += renderCodeBlock(lang, code);
-    }
-  }
-  return html;
-}
-// Delegiert auf das Modal statt pro Code-Block einen eigenen Listener zu binden -
-// das Modal wird bei jedem Öffnen komplett neu befüllt (innerHTML), siehe
-// chat_dashboard.py für dasselbe Muster/denselben Grund.
-$("conv-modal-chat").addEventListener("click", async (e) => {
-  const btn = e.target.closest(".code-copy-btn");
-  if (!btn) return;
-  const codeEl = $(btn.dataset.target);
-  if (!codeEl) return;
-  try {
-    await copyText(codeEl.textContent);
-    const original = btn.textContent;
-    btn.textContent = t("chat.action.copied");
-    setTimeout(() => { btn.textContent = original; }, 1500);
-  } catch (err) { /* kein Fallback mehr übrig - egal, nicht kritisch */ }
-});
-// "Mehr anzeigen"-Umschalter für sehr lange Nachrichten, siehe wrapCollapsible() -
-// gleiches Delegations-Muster wie oben, aus demselben Grund.
-$("conv-modal-chat").addEventListener("click", (e) => {
-  const btn = e.target.closest(".msg-toggle");
-  if (!btn) return;
-  const target = $(btn.dataset.target);
-  if (!target) return;
-  const expand = !target.classList.contains("expanded");
-  target.classList.toggle("expanded", expand);
-  btn.textContent = expand ? btn.dataset.less : btn.dataset.more;
-});
-
 // Welche App den Request geschickt hat (siehe cost_dashboard.py appCell) - unverändert, lang gekürzt mit vollem Wert im Tooltip.
 function appCell(userAgent) {
   if (!userAgent) return `<span class="hint">${esc(t("app.unknown"))}</span>`;
@@ -647,202 +369,9 @@ function statusBadge(status) {
   return `<span class="badge ${cls}">${esc(t(key))}</span>`;
 }
 
-// content kann bei Vision-Requests eine Liste aus Text-/Bild-Teilen statt
-// eines simplen Strings sein (OpenAI-Format, siehe conversation_tracker.py
-// _build_preview für dieselbe Behandlung server-seitig).
-function messageText(content) {
-  if (typeof content === "string") return content;
-  if (Array.isArray(content)) return content.filter(p => p && p.type === "text").map(p => p.text || "").join(" ");
-  return "";
-}
-
-// Ab dieser Rohtext-Länge wird eine Nachricht/Antwort per Default auf ~220px
-// geklammert (siehe .msg-collapsible) - sonst dominiert z.B. der 19KB-
-// Workspace-Kontext, den Copilot vor die eigentliche Frage packt, das ganze
-// Modal und die eigentliche (oft viel kürzere) Nachricht geht darüber unter.
-const LONG_MSG_THRESHOLD = 2000;
-let collapseIdCounter = 0;
-function wrapCollapsible(bodyHtml, rawLen) {
-  if (rawLen <= LONG_MSG_THRESHOLD) return bodyHtml;
-  const id = "msgc-" + (collapseIdCounter++);
-  const more = esc(t("conversations.modal.showMore", { n: rawLen.toLocaleString(localeFor(currentLang)) }));
-  const less = esc(t("conversations.modal.showLess"));
-  return `<div class="msg-collapsible" id="${id}">${bodyHtml}</div>` +
-    `<button type="button" class="msg-toggle" data-target="${id}" data-more="${more}" data-less="${less}">${more}</button>`;
-}
-
-function messageBubbleHtml(m) {
-  const role = m.role;
-  const rowCls = role === "user" ? "user" : (role === "assistant" ? "assistant" : "other");
-  const text = messageText(m.content);
-  let roleLabel = "";
-  if (role === "tool") roleLabel = "🔧 " + esc(m.name ? m.name : t("conversations.role.tool"));
-  else if (role !== "user" && role !== "assistant") roleLabel = esc(role);
-  // Assistant-Nachrichten aus vergangenen Runden ohne content, aber mit
-  // tool_calls (Function-Calling) - als kompakten Code-Block zeigen statt
-  // eine leere Bubble.
-  let body;
-  if (!text && Array.isArray(m.tool_calls) && m.tool_calls.length) {
-    body = renderCodeBlock("tool_calls", JSON.stringify(m.tool_calls, null, 2));
-  } else {
-    body = wrapCollapsible(renderMarkdown(text || `<span class="hint">${esc(t("conversations.modal.noContent"))}</span>`), text.length);
-  }
-  return `<div class="msg-row ${rowCls}"><div class="bubble">${roleLabel ? `<div class="bubble-role">${roleLabel}</div>` : ""}${body}</div></div>`;
-}
-
-function outputBubbleHtml(rec) {
-  if (!rec.output_content && !rec.output_reasoning) return "";
-  const reasoningHtml = rec.output_reasoning
-    ? `<details class="reasoning"><summary>${esc(t("chat.label.reasoning"))}</summary><div class="reasoning-body">${escapeHtml(rec.output_reasoning)}</div></details>`
-    : "";
-  const body = wrapCollapsible(renderMarkdown(rec.output_content || ""), (rec.output_content || "").length);
-  return `<div class="msg-row assistant"><div class="bubble">${reasoningHtml}${body}</div></div>`;
-}
-
-// Voller (unbeschnittener) Wert landet im title-Attribut des Chips, die
-// Kurzform hier direkt darin - siehe .param-chip-Kommentar für den Grund
-// (ein "tools"-Param mit vielen Function-Definitionen z.B. wäre sonst ein
-// mehrere-KB-Klumpen JSON ohne Umbruchstelle).
-function fmtParamValueFull(v) { return typeof v === "object" ? JSON.stringify(v) : String(v); }
-function fmtParamValue(v) {
-  const s = fmtParamValueFull(v);
-  return s.length > 60 ? s.slice(0, 57) + "…" : s;
-}
-
-// Die Tool-/Function-Definitionen, die der Client mitschickt (request_params.
-// tools bzw. das ältere .functions) - werden NICHT als Parameter-Chip
-// gerendert (siehe fmtParamValue-Kommentar), sondern extra als Namensliste
-// in #conv-modal-tools, aufklappbar mit der Beschreibung im Tooltip.
-const TOOLS_PARAM_KEYS = ["tools", "functions"];
-function extractToolNames(list) {
-  if (!Array.isArray(list)) return [];
-  return list.map(entry => {
-    if (entry && entry.type === "function" && entry.function) {
-      return { name: entry.function.name || "?", desc: entry.function.description || "" };
-    }
-    if (entry && typeof entry.name === "string") return { name: entry.name, desc: entry.description || "" };
-    return { name: fmtParamValue(entry), desc: "" };
-  });
-}
-
-// Grobe Größenangabe für die Meta-Zeile (Zeichen als Näherung für Bytes reicht
-// hier - geht nur darum, vor dem Lesen ein Gefühl für den Umfang zu geben).
-function fmtSize(chars) {
-  if (chars < 1000) return chars + " B";
-  if (chars < 1e6) return (chars / 1000).toFixed(1) + " KB";
-  return (chars / 1e6).toFixed(1) + " MB";
-}
 // 1000er-Trennzeichen fürs aktuelle Sprachgebiet (de-DE -> Punkt, en-US -> Komma)
 // - für Zähler, die mit der Zeit über die Tausendergrenze wachsen (Tokens).
 function fmtNum(n) { return (n === null || n === undefined) ? "–" : n.toLocaleString(localeFor(currentLang)); }
-function conversationSize(rec) {
-  let msgCount = 0, totalChars = 0;
-  if (Array.isArray(rec.messages)) {
-    msgCount = rec.messages.length;
-    for (const m of rec.messages) totalChars += messageText(m.content).length;
-  } else if (rec.prompt) {
-    const prompts = Array.isArray(rec.prompt) ? rec.prompt : [rec.prompt];
-    msgCount = prompts.length;
-    totalChars += prompts.join("").length;
-  }
-  totalChars += (rec.output_content || "").length + (rec.output_reasoning || "").length;
-  return { msgCount, totalChars };
-}
-
-let modalHasSystemPrompt = false; // siehe setModalView() weiter unten
-let modalHasTools = false;
-function openConversationModal(rec) {
-  $("conv-modal-title").textContent = rec.model || "–";
-  const finishedDate = new Date(rec.finished_at * 1000).toLocaleString(localeFor(currentLang));
-  const { msgCount, totalChars } = conversationSize(rec);
-  const metaParts = [
-    `<span><b>${esc(t("th.time"))}:</b> ${esc(finishedDate)}</span>`,
-    `<span><b>${esc(t("th.endpoint"))}:</b> ${esc(rec.path || "–")}</span>`,
-    `<span><b>${esc(t("th.duration"))}:</b> ${(rec.duration_ms / 1000).toFixed(2)}s</span>`,
-    `<span><b>${esc(t("th.status"))}:</b> ${statusBadge(rec.status)}</span>`,
-    `<span><b>${esc(t("th.promptTokens"))}:</b> ${fmtNum(rec.prompt_tokens)}</span>`,
-    `<span><b>${esc(t("th.complTokens"))}:</b> ${fmtNum(rec.completion_tokens)}</span>`,
-    `<span>${esc(t("conversations.modal.messages", { n: msgCount }))} · ${esc(fmtSize(totalChars))}</span>`,
-  ];
-  if (rec.finish_reason) metaParts.push(`<span><b>${esc(t("th.finishReason"))}:</b> ${esc(rec.finish_reason)}</span>`);
-  $("conv-modal-meta").innerHTML = metaParts.join("");
-
-  const params = rec.request_params || {};
-  const toolsKey = TOOLS_PARAM_KEYS.find(k => Array.isArray(params[k]) && params[k].length);
-  const paramKeys = Object.keys(params).filter(k => k !== toolsKey && params[k] !== undefined && params[k] !== null && params[k] !== false);
-  $("conv-modal-params").innerHTML = paramKeys.map(k =>
-    `<span class="param-chip" title="${esc(k)}=${esc(fmtParamValueFull(params[k]))}">${esc(k)}=${esc(fmtParamValue(params[k]))}</span>`
-  ).join("");
-
-  modalHasTools = !!toolsKey;
-  if (toolsKey) {
-    const tools = extractToolNames(params[toolsKey]);
-    $("conv-modal-tools-label").textContent = "🔧 " + t("conversations.modal.toolsAvailable", { n: tools.length });
-    $("conv-modal-tools-list").innerHTML = tools.map(tl => `<span class="tools-list-item" title="${esc(tl.desc)}">${esc(tl.name)}</span>`).join("");
-  }
-  $("conv-modal-tools").open = false;
-
-  const messages = rec.messages || null;
-  const systemMsg = messages ? messages.find(m => m.role === "system") : null;
-  // modalHasSystemPrompt statt direkt hier den display-Wert zu setzen - siehe
-  // setModalView() unten, das beim Tab-Wechsel dieselbe Sichtbarkeit erneut
-  // anwenden muss. Vorher stand dort fälschlich eine Prüfung auf den
-  // (unter Umständen vom vorigen Modal-Aufruf stehengebliebenen) Textinhalt
-  // von #conv-modal-system-text - ein Datensatz ohne System-Prompt zeigte
-  // dadurch den System-Prompt des zuletzt geöffneten Datensatzes an.
-  modalHasSystemPrompt = !!systemMsg;
-  const systemText = systemMsg ? messageText(systemMsg.content) : "";
-  $("conv-modal-system-text").textContent = systemText;
-  $("conv-modal-system-size").textContent = systemText ? t("conversations.modal.chars", { n: systemText.length.toLocaleString(localeFor(currentLang)) }) : "";
-  $("conv-modal-system").open = false; // per Default eingeklappt, siehe .system-box-Kommentar im CSS
-
-  let chatHtml;
-  if (messages) {
-    chatHtml = messages.filter(m => m.role !== "system").map(messageBubbleHtml).join("") + outputBubbleHtml(rec);
-  } else {
-    // Legacy /v1/completions - kein messages-Array, nur ein roher Prompt-String (oder eine Liste davon).
-    const promptText = Array.isArray(rec.prompt) ? rec.prompt.join("\n\n") : (rec.prompt || "");
-    const promptBody = wrapCollapsible(escapeHtml(promptText).replace(/\n/g, "<br>"), promptText.length);
-    chatHtml = `<div class="msg-row user"><div class="bubble"><div class="bubble-role">${esc(t("conversations.modal.prompt"))}</div>${promptBody}</div></div>` + outputBubbleHtml(rec);
-  }
-  $("conv-modal-chat").innerHTML = chatHtml || `<div class="empty">${esc(t("conversations.modal.noContent"))}</div>`;
-  $("conv-modal-raw").textContent = JSON.stringify(rec, null, 2);
-
-  setModalView("chat");
-  $("conv-modal-overlay").classList.add("open");
-}
-function closeConversationModal() { $("conv-modal-overlay").classList.remove("open"); }
-$("conv-modal-close").addEventListener("click", closeConversationModal);
-$("conv-modal-overlay").addEventListener("click", (e) => { if (e.target.id === "conv-modal-overlay") closeConversationModal(); });
-// Copy-Buttons für System-Prompt und Raw-JSON - stehen jeweils in einem
-// <summary>/Balken, e.stopPropagation() verhindert dass der Klick zusätzlich
-// das umgebende <details> auf-/zuklappt.
-async function copyWithFeedback(btn, text) {
-  try {
-    await copyText(text);
-    const original = btn.textContent;
-    btn.textContent = t("chat.action.copied");
-    setTimeout(() => { btn.textContent = original; }, 1500);
-  } catch (err) { /* kein Fallback mehr übrig - egal, nicht kritisch */ }
-}
-$("conv-modal-system-copy").addEventListener("click", (e) => {
-  e.preventDefault();
-  e.stopPropagation();
-  copyWithFeedback(e.currentTarget, $("conv-modal-system-text").textContent);
-});
-$("conv-modal-raw-copy").addEventListener("click", (e) => {
-  copyWithFeedback(e.currentTarget, $("conv-modal-raw").textContent);
-});
-function setModalView(view) {
-  $("conv-modal-view-chat").classList.toggle("active", view === "chat");
-  $("conv-modal-view-raw").classList.toggle("active", view === "raw");
-  $("conv-modal-system").style.display = (view === "chat" && modalHasSystemPrompt) ? "" : "none";
-  $("conv-modal-tools").style.display = (view === "chat" && modalHasTools) ? "" : "none";
-  $("conv-modal-chat").style.display = view === "chat" ? "" : "none";
-  $("conv-modal-raw-wrap").style.display = view === "raw" ? "" : "none";
-}
-$("conv-modal-view-chat").addEventListener("click", () => setModalView("chat"));
-$("conv-modal-view-raw").addEventListener("click", () => setModalView("raw"));
 
 // --- State -------------------------------------------------------------
 let latestSnapshot = null;
@@ -891,8 +420,14 @@ function initRecordsTable() {
         render: (r, type) => type !== "display" ? r.status : statusBadge(r.status),
       },
       {
+        // row-view: ein normaler Link statt Button+JS - öffnet die Detail-
+        // Seite (siehe conversation_view_page()/CONVERSATION_VIEW_HTML in
+        // conversations_dashboard.py) per target="_blank" in einem neuen Tab,
+        // dadurch funktionieren auch Strg/Cmd+Klick, Mittelklick und "Link in
+        // neuem Tab öffnen" aus dem Browser-Kontextmenü - ganz ohne eigenen
+        // Klick-Handler.
         title: "", data: null, orderable: false,
-        render: (r) => `<div class="row-actions"><button class="row-view" data-id="${esc(r.id)}">${esc(t("action.select"))}</button><button class="row-del" data-id="${esc(r.id)}" title="${esc(t('action.delete'))}">🗑</button></div>`,
+        render: (r) => `<div class="row-actions"><a class="row-view" href="/dashboard/conversations/${encodeURIComponent(r.id)}/view" target="_blank" rel="noopener">${esc(t("action.select"))}</a><button class="row-del" data-id="${esc(r.id)}" title="${esc(t('action.delete'))}">🗑</button></div>`,
       },
     ],
   });
@@ -915,9 +450,6 @@ function initRecordsTable() {
     });
     document.querySelectorAll("#records-table tbody .row-del").forEach(btn => {
       btn.addEventListener("click", () => deleteOne(btn.dataset.id));
-    });
-    document.querySelectorAll("#records-table tbody .row-view").forEach(btn => {
-      btn.addEventListener("click", () => viewConversation(btn));
     });
   });
 }
@@ -946,30 +478,13 @@ function render(data) {
 // --- Aktionen --------------------------------------------------------------
 // Die Tabellenzeilen (currentRecords) enthalten seit dem Perf-Fix nur noch
 // die schlanken Felder (siehe conversation_tracker._LIST_FIELDS) - messages/
-// prompt/request_params/output_* werden erst hier, beim tatsächlichen
-// Öffnen des Modals, einzeln nachgeladen (GET /dashboard/conversations/{id}).
-// Vorher steckten diese teils riesigen Felder in JEDEM Datensatz JEDES
-// WebSocket-Snapshots (alle 5s, für die komplette Historie) - mit
-// wachsender Konversations-Zahl wurde das Laden der Seite dadurch immer
-// langsamer, obwohl die Tabelle selbst nur Zeit/Modell/Preview/Tokens/etc.
-// anzeigt.
-async function viewConversation(btn) {
-  const id = btn.dataset.id;
-  const original = btn.textContent;
-  btn.disabled = true;
-  btn.textContent = "…";
-  try {
-    const res = await fetch(`/dashboard/conversations/${encodeURIComponent(id)}`, { headers: authHeaders() });
-    if (!res.ok) throw new Error(await res.text());
-    const rec = await res.json();
-    openConversationModal(rec);
-  } catch (e) {
-    $("records-status").textContent = t("error.generic", { msg: e.message });
-  } finally {
-    btn.disabled = false;
-    btn.textContent = original;
-  }
-}
+// prompt/request_params/output_* lädt die Detail-Seite (siehe row-view-<a>
+// in initRecordsTable()) erst für sich selbst nach, per fetch gegen GET
+// /dashboard/conversations/{id}. Vorher steckten diese teils riesigen Felder
+// in JEDEM Datensatz JEDES WebSocket-Snapshots (alle 5s, für die komplette
+// Historie) - mit wachsender Konversations-Zahl wurde das Laden dieser Seite
+// hier dadurch immer langsamer, obwohl die Tabelle selbst nur Zeit/Modell/
+// Preview/Tokens/etc. anzeigt.
 
 async function deleteOne(id) {
   try {
@@ -1066,3 +581,901 @@ connect();
 """
 
 CONVERSATIONS_DASHBOARD_HTML = CONVERSATIONS_DASHBOARD_HTML.replace("__TRANSLATIONS_JSON__", _LANGUAGES_JS)
+
+
+# Detail-Seite für EINE Konversation (siehe conversation_view_page() oben) -
+# eigenständiges HTML-Dokument, record_id kommt zur Laufzeit aus
+# location.pathname (siehe recordId-Konstante im <script> unten), der
+# Datensatz selbst per fetch() gegen GET /dashboard/conversations/{id}.
+#
+# Zusätzlich zur reinen Bubble-/Markdown-Darstellung (1:1 aus
+# CONVERSATIONS_DASHBOARD_HTML/chat_dashboard.py übernommen) erkennt diese
+# Seite XML-artige Textblöcke innerhalb von System-Prompt/Nachrichten/Prompt
+# (siehe findXmlBlocks() im Skript unten) - bei VS Code/Copilot & Co. steckt
+# der eigentliche Kontext (Workspace-Dateien, Instructions, etc.) oft als
+# <tag>...</tag>-strukturierter Text MITTEN im Message-Content, nicht als
+# separates JSON-Feld. Erkannte Blöcke werden aus dem Fließtext
+# herausgelöst, eingerückt/syntax-highlighted und in einer eigenen,
+# aufklappbaren Karte dargestellt statt als unformatierter Zeichenklumpen
+# in der Chat-Bubble unterzugehen.
+CONVERSATION_VIEW_HTML = r"""<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>LLM Hub – Conversation</title>
+<style>
+  :root {
+    --bg:#f5f6f8; --panel:#ffffff; --panel-2:#eef0f4; --border:#dfe3ea;
+    --text:#161922; --text-dim:#4b5363; --mono: "SF Mono", Consolas, "Liberation Mono", monospace;
+    --accent:#2563eb; --good:#15803d; --warn:#b45309; --bad:#dc2626;
+    --accent-bg:rgba(37,99,235,.10); --good-bg:rgba(21,128,61,.10); --bad-bg:rgba(220,38,38,.10); --warn-bg:rgba(180,83,9,.12);
+    --bubble-user:var(--accent); --bubble-user-text:#fff; --bubble-assistant:var(--panel-2);
+    --code-bg:#0d1117; --code-text:#e6edf3; --code-bar:#161b22;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --bg:#0b0e14; --panel:#131722; --panel-2:#1a2030; --border:#2a3142;
+      --text:#eef1f6; --text-dim:#a3acc2;
+      --accent:#7aa8ff; --good:#4ade80; --warn:#fbbf24; --bad:#f87171;
+      --accent-bg:rgba(122,168,255,.15); --good-bg:rgba(74,222,128,.15); --bad-bg:rgba(248,113,113,.15); --warn-bg:rgba(251,191,36,.15);
+      --bubble-user:var(--accent); --bubble-user-text:#0b0e14; --bubble-assistant:var(--panel-2);
+    }
+  }
+  :root[data-theme="dark"] {
+    --bg:#0b0e14; --panel:#131722; --panel-2:#1a2030; --border:#2a3142;
+    --text:#eef1f6; --text-dim:#a3acc2;
+    --accent:#7aa8ff; --good:#4ade80; --warn:#fbbf24; --bad:#f87171;
+    --accent-bg:rgba(122,168,255,.15); --good-bg:rgba(74,222,128,.15); --bad-bg:rgba(248,113,113,.15);
+    --bubble-user:var(--accent); --bubble-user-text:#0b0e14; --bubble-assistant:var(--panel-2);
+  }
+  * { box-sizing: border-box; }
+  body { margin:0; background:var(--bg); color:var(--text); font-family: -apple-system, "Segoe UI", Roboto, sans-serif; padding: 24px; }
+  a { color: var(--accent); }
+  .view-container { max-width: 1040px; margin: 0 auto; }
+  .topbar { display:flex; align-items:flex-start; justify-content:space-between; margin-bottom: 18px; gap:16px; }
+  .topbar h1 { font-size: 17px; margin: 0 0 4px; overflow-wrap:anywhere; }
+  .sub { color: var(--text-dim); font-size: 13px; }
+  .topbar-actions { display:flex; gap:8px; align-items:flex-start; flex:0 0 auto; }
+  #theme-toggle, #lang-select { background:var(--panel); border:1px solid var(--border); color:var(--text); border-radius:8px; height:36px; padding:0 12px; font-size:13px; cursor:pointer; }
+  #theme-toggle { width:36px; padding:0; font-size:16px; }
+  #theme-toggle:hover, #lang-select:hover { background:var(--panel-2); }
+
+  .state-box { color:var(--text-dim); font-size:14px; padding: 40px 14px; text-align:center; background:var(--panel); border:1px solid var(--border); border-radius:12px; }
+  .state-box.error { color:var(--bad); }
+
+  .badge { display:inline-block; padding:2px 8px; border-radius:20px; font-size:11px; font-weight:600; }
+  .badge.ok { background: var(--good-bg); color: var(--good); }
+  .badge.error { background: var(--bad-bg); color: var(--bad); }
+  .badge.warn { background: var(--warn-bg); color: var(--warn); }
+
+  .meta-card {
+    background:var(--panel); border:1px solid var(--border); border-radius:12px;
+    padding:16px 20px; margin-bottom:18px;
+  }
+  .meta-grid { display:flex; flex-wrap:wrap; gap:8px 22px; font-size:12.5px; color:var(--text-dim); }
+  .meta-grid b { color:var(--text); font-weight:600; }
+  .params-row { display:flex; flex-wrap:wrap; gap:6px; margin-top:12px; }
+  /* Werte werden in fmtParamValue() auf 60 Zeichen gekappt (voller Wert im
+     title) - ohne diese Kappung riss z.B. ein "tools"-Param mit vielen
+     Function-Definitionen (mehrere KB an JSON ohne ein einziges Leerzeichen,
+     also ohne Umbruchstelle) die Zeile in der Breite auf. "tools"/
+     "functions" selbst werden erst gar nicht als Chip gerendert, siehe
+     .tools-section weiter unten. */
+  .param-chip { background:var(--panel-2); border:1px solid var(--border); border-radius:20px; padding:2px 10px; font-size:11px; font-family:var(--mono); color:var(--text-dim); max-width:100%; overflow-wrap:anywhere; }
+
+  .view-toggle { display:flex; gap:6px; margin:0 0 16px; }
+  .view-toggle button {
+    background:var(--panel); border:1px solid var(--border); color:var(--text-dim);
+    border-radius:8px; height:32px; padding:0 14px; font-size:12.5px; cursor:pointer;
+  }
+  .view-toggle button.active { background:var(--accent); border-color:var(--accent); color:#fff; }
+
+  .mini-btn {
+    background:var(--panel); border:1px solid var(--border); color:var(--text-dim);
+    border-radius:5px; padding:2px 9px; font-size:11px; cursor:pointer; flex:0 0 auto;
+  }
+  .mini-btn:hover { border-color:var(--accent); color:var(--accent); }
+
+  /* System-Prompt: als <details>, per Default eingeklappt (Zeichenzahl im
+     Summary) - bei über 40k Zeichen (siehe Copilot-System-Prompt) ist selbst
+     auf einer eigenen Seite ein permanent offener Block unpraktisch. Inhalt
+     geht über renderMessageBody() (Markdown + XML-Erkennung), nicht mehr nur
+     als roher Monospace-Text. */
+  .system-box, .tool-card, .xml-block {
+    background:var(--panel-2); border:1px solid var(--border); border-radius:10px;
+    margin-bottom:14px; overflow:hidden;
+  }
+  .system-box summary, .tool-card summary, .xml-block summary {
+    cursor:pointer; list-style:none; user-select:none;
+    display:flex; align-items:center; gap:10px; padding:10px 14px; flex-wrap:wrap;
+  }
+  .system-box summary::-webkit-details-marker, .tool-card summary::-webkit-details-marker, .xml-block summary::-webkit-details-marker { display:none; }
+  .system-box summary::before, .tool-card summary::before, .xml-block summary::before {
+    content:"▶"; font-size:9px; color:var(--text-dim); transition:transform .12s; flex:0 0 auto;
+  }
+  .system-box[open] summary::before, .tool-card[open] summary::before, .xml-block[open] summary::before { transform:rotate(90deg); }
+  .box-label { font-size:11px; text-transform:uppercase; letter-spacing:.04em; color:var(--text-dim); font-weight:600; }
+  .box-size { font-size:11.5px; color:var(--text-dim); }
+  .system-box summary .mini-btn, .xml-block summary .mini-btn { margin-left:auto; }
+  .system-box-body { padding:0 14px 14px; max-height:520px; overflow-y:auto; }
+
+  .tools-section { margin-bottom:18px; }
+  .tools-section > .box-label { display:block; margin-bottom:8px; }
+  .tool-card-name { font-family:var(--mono); font-weight:600; font-size:13px; }
+  .tool-card-desc { font-size:12px; color:var(--text-dim); margin-left:auto; text-align:right; max-width:55%; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+  .tool-card-body { padding:0 14px 14px; }
+  .tool-card-full-desc { font-size:12.5px; color:var(--text-dim); margin:0 0 10px; white-space:pre-wrap; }
+  .tool-card-schema-label { font-size:11px; text-transform:uppercase; letter-spacing:.04em; color:var(--text-dim); font-weight:600; margin-bottom:6px; }
+
+  /* XML-Block: eigene Karte für einen erkannten <tag>...</tag>-Abschnitt
+     innerhalb eines Nachrichtentexts (siehe findXmlBlocks() im Skript) -
+     fester dunkler Code-Hintergrund unabhängig vom Seiten-Theme (wie
+     .code-block), damit die Syntax-Highlighting-Farben immer passen. */
+  .xml-tag-badge { background:var(--accent-bg); color:var(--accent); border-radius:5px; padding:1px 7px; font-family:var(--mono); font-size:11.5px; font-weight:600; }
+  .xml-pretty {
+    margin:0; padding:12px 14px; font-family:var(--mono); font-size:12px; line-height:1.5;
+    white-space:pre; overflow-x:auto; max-height:480px; overflow-y:auto;
+    background:var(--code-bg); color:var(--code-text); border-top:1px solid var(--border);
+  }
+  .xml-tag { color:#7ee787; }
+  .xml-attr { color:#79c0ff; }
+  .xml-str { color:#a5d6ff; }
+  .xml-punc { color:#8b949e; }
+
+  /* Sehr lange Nachrichten (z.B. der 19KB-Workspace-Kontext, den Copilot vor
+     die eigentliche Frage packt) dominieren sonst die ganze Seite - ab
+     LONG_MSG_THRESHOLD Zeichen (siehe JS) auf ~260px geklammert, mit
+     Verlaufs-Fade + "Mehr anzeigen"-Button zum Aufklappen. */
+  .msg-collapsible { position:relative; max-height:260px; overflow:hidden; }
+  .msg-collapsible.expanded { max-height:none; }
+  .msg-collapsible:not(.expanded)::after {
+    content:""; position:absolute; left:0; right:0; bottom:0; height:52px;
+    background:linear-gradient(to bottom, transparent, var(--bubble-assistant));
+  }
+  .msg-row.user .msg-collapsible:not(.expanded)::after { background:linear-gradient(to bottom, transparent, var(--bubble-user)); }
+  .msg-toggle {
+    display:block; margin-top:8px; background:none; border:none; color:inherit;
+    opacity:.85; text-decoration:underline; font-size:12px; cursor:pointer; padding:0;
+  }
+
+  /* Bubble-/Markdown-/Reasoning-/Code-Block-Darstellung, 1:1 aus chat_dashboard.py übernommen. */
+  .msg-row { display:flex; margin-bottom:14px; }
+  .msg-row.user { justify-content:flex-end; }
+  .msg-row.assistant, .msg-row.other { justify-content:flex-start; }
+  .bubble {
+    max-width: 85%; border-radius:14px; padding:10px 14px; font-size:14px; line-height:1.55;
+    overflow-wrap:anywhere;
+  }
+  .msg-row.user .bubble { background:var(--bubble-user); color:var(--bubble-user-text); border-bottom-right-radius:4px; white-space:pre-wrap; }
+  .msg-row.assistant .bubble, .msg-row.other .bubble { background:var(--bubble-assistant); border:1px solid var(--border); border-bottom-left-radius:4px; }
+  .bubble-role { font-size:10.5px; text-transform:uppercase; letter-spacing:.04em; color:var(--text-dim); margin-bottom:4px; font-weight:600; }
+  .msg-row.user .bubble-role { color:rgba(255,255,255,.75); }
+  .bubble p { margin: 0 0 8px; }
+  .bubble p:last-child { margin-bottom:0; }
+  .bubble ul, .bubble ol { margin: 4px 0 8px; padding-left: 22px; }
+  .bubble h3, .bubble h4, .bubble h5, .bubble h6 { margin: 10px 0 6px; }
+  .bubble code { font-family: var(--mono); background:var(--panel-2); border-radius:4px; padding:1px 5px; font-size:.92em; }
+  .msg-row.user .bubble code { background:rgba(255,255,255,.18); }
+  .bubble .xml-block, .bubble .system-box { margin: 8px 0; }
+  .msg-row.user .bubble .xml-block { text-align:left; }
+
+  .reasoning { margin-bottom:8px; }
+  .reasoning summary {
+    cursor:pointer; font-size:12px; color:var(--text-dim); user-select:none;
+    display:flex; align-items:center; gap:6px; list-style:none;
+  }
+  .reasoning summary::-webkit-details-marker { display:none; }
+  .reasoning summary::before { content:"▶"; font-size:9px; transition:transform .12s; }
+  .reasoning[open] summary::before { transform:rotate(90deg); }
+  .reasoning .reasoning-body {
+    margin-top:6px; padding:8px 10px; border-left:2px solid var(--border);
+    color:var(--text-dim); font-size:12.5px; white-space:pre-wrap;
+  }
+
+  .code-block { margin: 8px 0; border-radius:8px; overflow:hidden; border:1px solid var(--border); }
+  .code-block-bar {
+    background:var(--code-bar); color:#9da5b4; font-family: var(--mono); font-size:11px;
+    padding:5px 10px; display:flex; align-items:center; justify-content:space-between;
+  }
+  .code-copy-btn { background:transparent; border:1px solid #30363d; color:#9da5b4; border-radius:5px; padding:2px 8px; font-size:11px; cursor:pointer; }
+  .code-copy-btn:hover { background:#30363d; color:#fff; }
+  .code-block pre { margin:0; background:var(--code-bg); color:var(--code-text); padding:12px; overflow-x:auto; max-height:480px; overflow-y:auto; }
+  .code-block code { font-family: var(--mono); font-size:12.5px; background:none; padding:0; }
+
+  .raw-json-bar { display:flex; justify-content:flex-end; margin-bottom:8px; }
+  .raw-json {
+    background:var(--panel-2); border:1px solid var(--border); border-radius:8px;
+    padding:12px; font-family:var(--mono); font-size:12px; white-space:pre-wrap; word-break:break-word; margin:0;
+  }
+
+  .app-footer {
+    margin-top:32px; padding-top:16px; border-top:1px solid var(--border);
+    display:flex; align-items:center; justify-content:center; gap:6px;
+    font-size:12px; color:var(--text-dim); flex-wrap:wrap;
+  }
+  .app-footer a { display:inline-flex; align-items:center; gap:4px; color:var(--text-dim); text-decoration:none; }
+  .app-footer a:hover { color:var(--accent); }
+  .app-footer img { width:16px; height:16px; border-radius:50%; object-fit:cover; flex:0 0 auto; }
+
+  /* Scroll-to-top: bei den teils sehr langen Konversationen (siehe Modul-
+     Docstring) ist die Seite selbst der einzige Scroll-Container (anders als
+     früher das Modal mit eigenem .modal-body-Scroll) - ohne diesen Button
+     führt "zurück zum Anfang" sonst nur über manuelles Hochscrollen. Per
+     Default unsichtbar (opacity/pointer-events), JS schaltet .visible um,
+     sobald über SCROLL_TOP_THRESHOLD_PX hinaus gescrollt wurde. */
+  .scroll-top-btn {
+    position: fixed; right: 24px; bottom: 24px; width: 44px; height: 44px;
+    border-radius: 50%; background: var(--accent); color: #fff; border: none;
+    font-size: 18px; line-height: 1; cursor: pointer;
+    box-shadow: 0 2px 10px rgba(0,0,0,.25);
+    display: flex; align-items: center; justify-content: center;
+    opacity: 0; pointer-events: none; transform: translateY(8px);
+    transition: opacity .18s ease, transform .18s ease;
+    z-index: 50;
+  }
+  .scroll-top-btn.visible { opacity: 1; pointer-events: auto; transform: translateY(0); }
+  .scroll-top-btn:hover { filter: brightness(1.1); }
+</style>
+</head>
+<body>
+  <div class="view-container">
+    <div class="topbar">
+      <div>
+        <h1 id="view-title">–</h1>
+        <div class="sub"><a href="/dashboard/conversations" data-i18n="conversations.view.back">← All Conversations</a></div>
+      </div>
+      <div class="topbar-actions">
+        <select id="lang-select" data-i18n-title="lang.selectTitle" title="Language"></select>
+        <button id="theme-toggle" data-i18n-title="theme.toggleTitle" title="Toggle theme">🌙</button>
+      </div>
+    </div>
+
+    <div id="view-loading" class="state-box" data-i18n="conversations.view.loading">Loading…</div>
+    <div id="view-error" class="state-box error" style="display:none;"></div>
+
+    <div id="view-content" style="display:none;">
+      <div class="meta-card">
+        <div class="meta-grid" id="view-meta"></div>
+        <div class="params-row" id="view-params"></div>
+      </div>
+
+      <div class="tools-section" id="view-tools" style="display:none;">
+        <span class="box-label" id="view-tools-label"></span>
+        <div id="view-tools-list"></div>
+      </div>
+
+      <div class="view-toggle" id="view-toggle">
+        <button id="view-tab-chat" data-i18n="conversations.view.tabConversation">Conversation</button>
+        <button id="view-tab-raw" data-i18n="conversations.view.tabRaw">Raw JSON</button>
+      </div>
+
+      <div id="view-chat-pane">
+        <details id="view-system" class="system-box" style="display:none;">
+          <summary>
+            <span class="box-label" data-i18n="conversations.view.systemPrompt">System Prompt</span>
+            <span class="box-size" id="view-system-size"></span>
+            <button type="button" class="mini-btn" id="view-system-copy" data-i18n="chat.action.copyCode">Copy</button>
+          </summary>
+          <div class="system-box-body" id="view-system-text"></div>
+        </details>
+        <div id="view-chat"></div>
+      </div>
+      <div id="view-raw-pane" style="display:none;">
+        <div class="raw-json-bar"><button type="button" class="mini-btn" id="view-raw-copy" data-i18n="chat.action.copyCode">Copy</button></div>
+        <pre class="raw-json" id="view-raw"></pre>
+      </div>
+    </div>
+
+    <footer class="app-footer">
+      <span>© 2026</span>
+      <a href="https://github.com/ridersonthecode" target="_blank" rel="noopener noreferrer" title="ridersonthecode on GitHub">
+        <img src="https://github.com/ridersonthecode.png?s=64" alt="ridersonthecode" loading="lazy">
+        ridersonthecode
+      </a>
+      <span class="sep">·</span>
+      <span class="claude-mark" title="Entwickelt mit Claude Code">
+        ✨ Entwickelt mit Claude Code
+      </span>
+    </footer>
+  </div>
+
+  <button id="scroll-top-btn" class="scroll-top-btn" data-i18n-title="conversations.view.scrollTop" title="Scroll to top">▲</button>
+
+<script>
+const $ = (id) => document.getElementById(id);
+
+// --- i18n (identisch zu den übrigen Dashboard-Seiten) ---------------------
+const TRANSLATIONS = __TRANSLATIONS_JSON__;
+const DEFAULT_LANG = "en";
+const LANG_NAMES = { en: "English", de: "Deutsch" };
+let currentLang = localStorage.getItem("vllm_dashboard_lang");
+if (!currentLang || !TRANSLATIONS[currentLang]) currentLang = DEFAULT_LANG;
+
+function t(key, vars) {
+  const table = TRANSLATIONS[currentLang] || {};
+  const fallback = TRANSLATIONS[DEFAULT_LANG] || {};
+  let s = table[key] ?? fallback[key] ?? key;
+  if (vars) for (const k in vars) s = s.split("{" + k + "}").join(vars[k]);
+  return s;
+}
+function localeFor(lang) { return lang === "de" ? "de-DE" : "en-US"; }
+function esc(s) { return (s ?? "").toString().replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c])); }
+
+function populateLangSelect() {
+  const sel = $("lang-select");
+  sel.innerHTML = Object.keys(TRANSLATIONS).sort().map(code =>
+    `<option value="${code}">${LANG_NAMES[code] || code}</option>`
+  ).join("");
+  sel.value = currentLang;
+}
+function applyStaticI18n() {
+  document.documentElement.lang = currentLang;
+  document.querySelectorAll("[data-i18n]").forEach(el => { el.textContent = t(el.dataset.i18n); });
+  document.querySelectorAll("[data-i18n-title]").forEach(el => { el.title = t(el.dataset.i18nTitle); });
+}
+$("lang-select").addEventListener("change", (e) => {
+  currentLang = e.target.value;
+  localStorage.setItem("vllm_dashboard_lang", currentLang);
+  applyStaticI18n();
+  if (lastRecord) renderRecord(lastRecord);
+});
+
+// --- Theme -----------------------------------------------------------------
+function updateToggleIcon(theme) { $("theme-toggle").textContent = theme === "dark" ? "☀️" : "🌙"; }
+function currentTheme() {
+  return document.documentElement.getAttribute("data-theme")
+    || (matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light");
+}
+(function initTheme() {
+  const saved = localStorage.getItem("vllm_dashboard_theme");
+  if (saved === "dark" || saved === "light") document.documentElement.setAttribute("data-theme", saved);
+  updateToggleIcon(currentTheme());
+})();
+$("theme-toggle").addEventListener("click", () => {
+  const next = currentTheme() === "dark" ? "light" : "dark";
+  document.documentElement.setAttribute("data-theme", next);
+  localStorage.setItem("vllm_dashboard_theme", next);
+  updateToggleIcon(next);
+});
+
+// --- API-Key (falls aktiviert, gleicher Key wie die übrigen Dashboard-Seiten) --
+let apiKey = sessionStorage.getItem("vllm_dashboard_key") || "";
+function authHeaders(extra) {
+  const h = Object.assign({}, extra || {});
+  if (apiKey) h["Authorization"] = "Bearer " + apiKey;
+  return h;
+}
+
+function copyText(text) {
+  // Siehe chat_dashboard.py copyText() - navigator.clipboard nur in sicheren
+  // Kontexten, dieses Dashboard läuft absichtlich auch über reines HTTP/LAN.
+  if (navigator.clipboard && window.isSecureContext) return navigator.clipboard.writeText(text);
+  return new Promise((resolve, reject) => {
+    const ta = document.createElement("textarea");
+    ta.value = text; ta.style.position = "fixed"; ta.style.top = "-1000px"; ta.style.opacity = "0";
+    document.body.appendChild(ta); ta.focus(); ta.select();
+    try { const ok = document.execCommand("copy"); document.body.removeChild(ta); ok ? resolve() : reject(new Error("copy failed")); }
+    catch (e) { document.body.removeChild(ta); reject(e); }
+  });
+}
+async function copyWithFeedback(btn, text) {
+  try {
+    await copyText(text);
+    const original = btn.textContent;
+    btn.textContent = t("chat.action.copied");
+    setTimeout(() => { btn.textContent = original; }, 1500);
+  } catch (err) { /* kein Fallback mehr übrig - egal, nicht kritisch */ }
+}
+
+// --- Mini-Markdown-Renderer (1:1 aus chat_dashboard.py, siehe dortigen Kommentar) --
+function escapeHtml(s) {
+  return (s ?? "").replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
+}
+function renderInline(text) {
+  const NUL = String.fromCharCode(0);
+  const codes = [];
+  text = text.replace(/`([^`\n]+)`/g, (_, code) => { codes.push(`<code>${escapeHtml(code)}</code>`); return NUL + (codes.length - 1) + NUL; });
+  text = escapeHtml(text);
+  text = text.replace(/\[([^\]]+)\]\((https?:\/\/[^\s)]+)\)/g, '<a href="$2" target="_blank" rel="noopener noreferrer">$1</a>');
+  text = text.replace(/\*\*([^*\n]+)\*\*/g, "<strong>$1</strong>");
+  text = text.replace(/(^|[^*])\*([^*\n]+)\*(?!\*)/g, "$1<em>$2</em>");
+  text = text.replace(new RegExp(NUL + "(\\d+)" + NUL, "g"), (_, i) => codes[Number(i)]);
+  return text;
+}
+function renderMarkdownBlock(text) {
+  const lines = text.split("\n");
+  const htmlParts = [];
+  let listBuf = [], listType = null, paraBuf = [];
+  const flushList = () => {
+    if (listBuf.length) {
+      const tag = listType === "ol" ? "ol" : "ul";
+      htmlParts.push(`<${tag}>${listBuf.map(li => `<li>${renderInline(li)}</li>`).join("")}</${tag}>`);
+      listBuf = []; listType = null;
+    }
+  };
+  const flushPara = () => { if (paraBuf.length) { htmlParts.push(`<p>${renderInline(paraBuf.join(" "))}</p>`); paraBuf = []; } };
+  for (const line of lines) {
+    const heading = line.match(/^(#{1,4})\s+(.*)$/);
+    const ol = line.match(/^\s*\d+[.)]\s+(.*)$/);
+    const ul = line.match(/^\s*[-*]\s+(.*)$/);
+    if (line.trim() === "") { flushPara(); flushList(); continue; }
+    if (heading) { flushPara(); flushList(); const level = heading[1].length + 2; htmlParts.push(`<h${level}>${renderInline(heading[2])}</h${level}>`); }
+    else if (ol) { flushPara(); if (listType !== "ol") flushList(); listType = "ol"; listBuf.push(ol[1]); }
+    else if (ul) { flushPara(); if (listType !== "ul") flushList(); listType = "ul"; listBuf.push(ul[1]); }
+    else { flushList(); paraBuf.push(line); }
+  }
+  flushPara(); flushList();
+  return htmlParts.join("");
+}
+function renderCodeBlock(lang, code) {
+  const id = "code-" + Math.random().toString(36).slice(2, 9);
+  return `<div class="code-block">
+    <div class="code-block-bar">
+      <span>${esc(lang || "text")}</span>
+      <button class="code-copy-btn" data-target="${id}">${esc(t("chat.action.copyCode"))}</button>
+    </div>
+    <pre><code id="${id}">${escapeHtml(code)}</code></pre>
+  </div>`;
+}
+
+// --- XML-Erkennung ----------------------------------------------------------
+// VS Code/Copilot & Co. packen den eigentlichen Kontext (Workspace-Dateien,
+// Instructions, Reminders, ...) oft als <tag>...</tag>-strukturierten Text
+// MITTEN in System-Prompt/Message-Content statt als separates Feld. Diese
+// Funktion löst top-level <tag>...</tag>-Paare (und einzelne selbstschließende
+// <tag/>) aus einem Text heraus, damit renderMessageBody() sie getrennt vom
+// übrigen Fließtext in einer eigenen, formatierten Karte darstellen kann.
+//
+// Bewusst ein einfacher Stack-Scanner statt eines echten XML-Parsers - der
+// Text ist selten wohlgeformtes XML (Attribute mit Sonderzeichen, nicht
+// escapte "&", teils unbalancierte Tags). Ein nicht schließender Tag bleibt
+// dadurch einfach auf dem Stack liegen und erzeugt keinen Block statt einen
+// Fehler zu werfen - im Zweifel wird der Text also ganz normal als Markdown
+// gerendert, nie kaputt dargestellt.
+const XML_TAG_RE = /<(\/?)([A-Za-z][\w:.-]*)\b[^<>]*?(\/?)>/g;
+function findXmlBlocks(text) {
+  const blocks = [];
+  const stack = [];
+  XML_TAG_RE.lastIndex = 0;
+  let m;
+  let guard = 0;
+  while ((m = XML_TAG_RE.exec(text))) {
+    if (++guard > 20000) break; // Notbremse gegen pathologische Eingaben
+    const [full, isClosingSlash, tagName, selfClosingSlash] = m;
+    const isClosing = isClosingSlash === "/";
+    const isSelfClosing = selfClosingSlash === "/" || /\/>$/.test(full);
+    if (isClosing) {
+      for (let i = stack.length - 1; i >= 0; i--) {
+        if (stack[i].tag === tagName) {
+          const opened = stack.splice(i)[0];
+          if (stack.length === 0) {
+            blocks.push({ tag: tagName, start: opened.start, end: XML_TAG_RE.lastIndex });
+          }
+          break;
+        }
+      }
+    } else if (isSelfClosing) {
+      if (stack.length === 0) blocks.push({ tag: tagName, start: m.index, end: XML_TAG_RE.lastIndex });
+    } else {
+      stack.push({ tag: tagName, start: m.index });
+    }
+  }
+  return blocks.map(b => ({ ...b, raw: text.slice(b.start, b.end) }));
+}
+function safeFindXmlBlocks(text) {
+  try { return findXmlBlocks(text); } catch (e) { return []; }
+}
+// Naiver Einrücker: läuft noch einmal über dieselben Tag-Grenzen, öffnende
+// Tags erhöhen die Einrückung nachfolgender Zeilen, schließende senken sie -
+// kein echtes XML-Parsing (siehe findXmlBlocks-Kommentar), reicht aber für
+// die meist recht sauber generierten Blöcke, die Tools wie Copilot erzeugen.
+const XML_SPLIT_RE = /(<\/?[A-Za-z][\w:.-]*\b[^<>]*?\/?>)/g;
+function prettyPrintXml(xml) {
+  const parts = xml.split(XML_SPLIT_RE).filter(p => p !== "");
+  let indent = 0;
+  const lines = [];
+  for (const part of parts) {
+    if (/^<\/[A-Za-z]/.test(part)) {
+      indent = Math.max(0, indent - 1);
+      lines.push("  ".repeat(indent) + part);
+    } else if (/^<[A-Za-z][^<>]*\/>$/.test(part)) {
+      lines.push("  ".repeat(indent) + part);
+    } else if (/^<[A-Za-z]/.test(part)) {
+      lines.push("  ".repeat(indent) + part);
+      indent++;
+    } else {
+      const trimmed = part.trim();
+      if (trimmed) lines.push("  ".repeat(indent) + trimmed);
+    }
+  }
+  return lines.join("\n");
+}
+// Arbeitet auf dem UNescapten Text (jede Zeile aus prettyPrintXml ist entweder
+// GENAU ein Tag oder reiner Text, siehe dortigen Kommentar) - escaped erst
+// beim Zusammenbauen der einzelnen Segmente, nie den ganzen Tag auf einmal
+// (sonst müsste die Tag-Erkennung selbst auf bereits escaptem &lt;/&gt; laufen).
+function highlightXmlLine(line) {
+  const m = line.match(/^(\s*)(<\/?)([\w:.-]+)([^<>]*?)(\/?>)$/);
+  if (!m) return escapeHtml(line);
+  const [, indent, open, tag, attrsRaw, close] = m;
+  const attrsHtml = escapeHtml(attrsRaw).replace(
+    /([\w:.-]+)(=)(&quot;[^&]*&quot;|&#39;[^&]*&#39;)/g,
+    '<span class="xml-attr">$1</span>$2<span class="xml-str">$3</span>'
+  );
+  return `${indent}<span class="xml-punc">${escapeHtml(open)}</span><span class="xml-tag">${escapeHtml(tag)}</span>${attrsHtml}<span class="xml-punc">${escapeHtml(close)}</span>`;
+}
+function highlightXmlPretty(pretty) { return pretty.split("\n").map(highlightXmlLine).join("\n"); }
+
+let xmlBlockIdCounter = 0;
+function renderXmlBlockCard(tag, raw) {
+  const id = "xmlb-" + (xmlBlockIdCounter++);
+  const pretty = prettyPrintXml(raw);
+  return `<details class="xml-block" open>
+    <summary>
+      <span class="xml-tag-badge">&lt;${esc(tag)}&gt;</span>
+      <span class="box-size" title="${esc(t('conversations.view.xmlDetected'))}">🏷️ ${esc(fmtSize(raw.length))}</span>
+      <button type="button" class="mini-btn xml-format-toggle" data-target="${id}">Raw</button>
+      <button type="button" class="mini-btn xml-copy-btn" data-target="${id}-raw">${esc(t('chat.action.copyCode'))}</button>
+    </summary>
+    <pre class="xml-pretty" id="${id}-pretty">${highlightXmlPretty(pretty)}</pre>
+    <pre class="xml-pretty" id="${id}-raw" style="display:none;">${escapeHtml(raw)}</pre>
+  </details>`;
+}
+
+// Zieht erkannte XML-Blöcke aus dem Text und rendert sie separat, den Rest
+// weiterhin als normales Markdown - der Kern der "alles was wie XML aussieht
+// extra darstellen"-Anforderung (siehe Modul-Docstring oben).
+function renderMessageBody(text) {
+  if (!text) return "";
+  const blocks = safeFindXmlBlocks(text);
+  if (!blocks.length) return renderMarkdown(text);
+  let html = "";
+  let cursor = 0;
+  for (const b of blocks) {
+    if (b.start > cursor) {
+      const before = text.slice(cursor, b.start);
+      if (before.trim()) html += renderMarkdown(before);
+    }
+    html += renderXmlBlockCard(b.tag, b.raw);
+    cursor = b.end;
+  }
+  if (cursor < text.length) {
+    const after = text.slice(cursor);
+    if (after.trim()) html += renderMarkdown(after);
+  }
+  return html;
+}
+function renderMarkdown(text) {
+  const parts = (text || "").split("```");
+  let html = "";
+  for (let i = 0; i < parts.length; i++) {
+    if (i % 2 === 0) html += renderMarkdownBlock(parts[i]);
+    else {
+      const seg = parts[i];
+      const nl = seg.indexOf("\n");
+      const lang = nl === -1 ? seg.trim() : seg.slice(0, nl).trim();
+      const code = nl === -1 ? "" : seg.slice(nl + 1);
+      html += renderCodeBlock(lang, code);
+    }
+  }
+  return html;
+}
+
+// Klick-Delegation auf das ganze Dokument statt pro Element einen eigenen
+// Listener zu binden - der Seiteninhalt wird bei jedem (Sprach-)Neu-Rendern
+// komplett neu befüllt (innerHTML), siehe chat_dashboard.py für dasselbe
+// Muster/denselben Grund.
+document.addEventListener("click", async (e) => {
+  const copyBtn = e.target.closest(".code-copy-btn");
+  if (copyBtn) {
+    const codeEl = $(copyBtn.dataset.target);
+    if (codeEl) {
+      await copyText(codeEl.textContent);
+      const original = copyBtn.textContent;
+      copyBtn.textContent = t("chat.action.copied");
+      setTimeout(() => { copyBtn.textContent = original; }, 1500);
+    }
+    return;
+  }
+  const toggleBtn = e.target.closest(".msg-toggle");
+  if (toggleBtn) {
+    const target = $(toggleBtn.dataset.target);
+    if (target) {
+      const expand = !target.classList.contains("expanded");
+      target.classList.toggle("expanded", expand);
+      toggleBtn.textContent = expand ? toggleBtn.dataset.less : toggleBtn.dataset.more;
+    }
+    return;
+  }
+  const xmlCopyBtn = e.target.closest(".xml-copy-btn");
+  if (xmlCopyBtn) {
+    e.preventDefault(); e.stopPropagation();
+    const rawEl = $(xmlCopyBtn.dataset.target);
+    if (rawEl) copyWithFeedback(xmlCopyBtn, rawEl.textContent);
+    return;
+  }
+  const xmlToggleBtn = e.target.closest(".xml-format-toggle");
+  if (xmlToggleBtn) {
+    e.preventDefault(); e.stopPropagation();
+    const id = xmlToggleBtn.dataset.target;
+    const prettyEl = $(id + "-pretty"), rawEl = $(id + "-raw");
+    const showingRaw = rawEl.style.display !== "none";
+    prettyEl.style.display = showingRaw ? "" : "none";
+    rawEl.style.display = showingRaw ? "none" : "";
+    xmlToggleBtn.textContent = showingRaw ? "Raw" : "Pretty";
+    return;
+  }
+});
+
+// Welche App den Request geschickt hat (siehe cost_dashboard.py appCell).
+function appCell(userAgent) {
+  if (!userAgent) return esc(t("app.unknown"));
+  return esc(userAgent);
+}
+function statusBadge(status) {
+  const map = { ok: ["ok", "status.ok"], error: ["error", "status.error"], cancelled: ["warn", "status.cancelled"], aborted_loop: ["warn", "status.abortedLoop"] };
+  const [cls, key] = map[status] || ["error", "status.error"];
+  return `<span class="badge ${cls}">${esc(t(key))}</span>`;
+}
+// content kann bei Vision-Requests eine Liste aus Text-/Bild-Teilen statt
+// eines simplen Strings sein (OpenAI-Format, siehe conversation_tracker.py
+// _build_preview für dieselbe Behandlung server-seitig).
+function messageText(content) {
+  if (typeof content === "string") return content;
+  if (Array.isArray(content)) return content.filter(p => p && p.type === "text").map(p => p.text || "").join(" ");
+  return "";
+}
+const LONG_MSG_THRESHOLD = 2000;
+let collapseIdCounter = 0;
+function wrapCollapsible(bodyHtml, rawLen) {
+  if (rawLen <= LONG_MSG_THRESHOLD) return bodyHtml;
+  const id = "msgc-" + (collapseIdCounter++);
+  const more = esc(t("conversations.view.showMore", { n: rawLen.toLocaleString(localeFor(currentLang)) }));
+  const less = esc(t("conversations.view.showLess"));
+  return `<div class="msg-collapsible" id="${id}">${bodyHtml}</div>` +
+    `<button type="button" class="msg-toggle" data-target="${id}" data-more="${more}" data-less="${less}">${more}</button>`;
+}
+function messageBubbleHtml(m) {
+  const role = m.role;
+  const rowCls = role === "user" ? "user" : (role === "assistant" ? "assistant" : "other");
+  const text = messageText(m.content);
+  let roleLabel = "";
+  if (role === "tool") roleLabel = "🔧 " + esc(m.name ? m.name : t("conversations.role.tool"));
+  else if (role !== "user" && role !== "assistant") roleLabel = esc(role);
+  let body;
+  if (!text && Array.isArray(m.tool_calls) && m.tool_calls.length) {
+    body = renderCodeBlock("tool_calls", JSON.stringify(m.tool_calls, null, 2));
+  } else {
+    body = wrapCollapsible(renderMessageBody(text) || `<span class="hint">${esc(t("conversations.view.noContent"))}</span>`, text.length);
+  }
+  return `<div class="msg-row ${rowCls}"><div class="bubble">${roleLabel ? `<div class="bubble-role">${roleLabel}</div>` : ""}${body}</div></div>`;
+}
+function outputBubbleHtml(rec) {
+  if (!rec.output_content && !rec.output_reasoning) return "";
+  const reasoningHtml = rec.output_reasoning
+    ? `<details class="reasoning"><summary>${esc(t("chat.label.reasoning"))}</summary><div class="reasoning-body">${escapeHtml(rec.output_reasoning)}</div></details>`
+    : "";
+  const body = wrapCollapsible(renderMessageBody(rec.output_content || ""), (rec.output_content || "").length);
+  return `<div class="msg-row assistant"><div class="bubble">${reasoningHtml}${body}</div></div>`;
+}
+
+// Voller (unbeschnittener) Wert landet im title-Attribut des Chips, die
+// Kurzform hier direkt darin.
+function fmtParamValueFull(v) { return typeof v === "object" ? JSON.stringify(v) : String(v); }
+function fmtParamValue(v) {
+  const s = fmtParamValueFull(v);
+  return s.length > 60 ? s.slice(0, 57) + "…" : s;
+}
+// Die Tool-/Function-Definitionen, die der Client mitschickt (request_params.
+// tools bzw. das ältere .functions) - werden NICHT als Parameter-Chip
+// gerendert (siehe fmtParamValue-Kommentar), sondern als eigene, aufklappbare
+// Karten MIT vollem Parameter-Schema (anders als die reine Namensliste, die
+// hier früher im Modal stand - siehe Modul-Docstring).
+const TOOLS_PARAM_KEYS = ["tools", "functions"];
+function extractToolDefs(list) {
+  if (!Array.isArray(list)) return [];
+  return list.map(entry => {
+    if (entry && entry.type === "function" && entry.function) {
+      const fn = entry.function;
+      const { name, description, ...rest } = fn;
+      return { name: name || "?", desc: description || "", schema: Object.keys(rest).length ? rest : fn };
+    }
+    if (entry && typeof entry.name === "string") {
+      const { name, description, ...rest } = entry;
+      return { name, desc: description || "", schema: Object.keys(rest).length ? rest : entry };
+    }
+    return { name: fmtParamValue(entry), desc: "", schema: entry };
+  });
+}
+function toolCardHtml(tl) {
+  const descHtml = tl.desc ? `<p class="tool-card-full-desc">${esc(tl.desc)}</p>` : "";
+  return `<details class="tool-card">
+    <summary>
+      <span class="tool-card-name">🔧 ${esc(tl.name)}</span>
+      <span class="tool-card-desc" title="${esc(tl.desc)}">${esc(tl.desc || t("conversations.view.noDescription"))}</span>
+    </summary>
+    <div class="tool-card-body">
+      ${descHtml}
+      <div class="tool-card-schema-label">${esc(t("conversations.view.toolSchema"))}</div>
+      ${renderCodeBlock("json", JSON.stringify(tl.schema, null, 2))}
+    </div>
+  </details>`;
+}
+
+// Grobe Größenangabe (Zeichen als Näherung für Bytes reicht hier - geht nur
+// darum, vor dem Lesen ein Gefühl für den Umfang zu geben).
+function fmtSize(chars) {
+  if (chars < 1000) return chars + " B";
+  if (chars < 1e6) return (chars / 1000).toFixed(1) + " KB";
+  return (chars / 1e6).toFixed(1) + " MB";
+}
+function fmtNum(n) { return (n === null || n === undefined) ? "–" : n.toLocaleString(localeFor(currentLang)); }
+function conversationSize(rec) {
+  let msgCount = 0, totalChars = 0;
+  if (Array.isArray(rec.messages)) {
+    msgCount = rec.messages.length;
+    for (const m of rec.messages) totalChars += messageText(m.content).length;
+  } else if (rec.prompt) {
+    const prompts = Array.isArray(rec.prompt) ? rec.prompt : [rec.prompt];
+    msgCount = prompts.length;
+    totalChars += prompts.join("").length;
+  }
+  totalChars += (rec.output_content || "").length + (rec.output_reasoning || "").length;
+  return { msgCount, totalChars };
+}
+
+// --- Record laden & rendern --------------------------------------------
+const pathParts = location.pathname.split("/").filter(Boolean);
+const recordId = decodeURIComponent(pathParts[pathParts.length - 2] || "");
+let lastRecord = null;
+
+async function fetchRecord(allowKeyPrompt) {
+  const res = await fetch(`/dashboard/conversations/${encodeURIComponent(recordId)}`, { headers: authHeaders() });
+  if (res.status === 401 && allowKeyPrompt) {
+    const key = prompt(t("auth.apiKeyPrompt"));
+    if (!key) throw new Error("unauthorized");
+    apiKey = key;
+    sessionStorage.setItem("vllm_dashboard_key", key);
+    return fetchRecord(false);
+  }
+  if (res.status === 404) return null;
+  if (!res.ok) throw new Error(await res.text());
+  return res.json();
+}
+
+let activeTab = "chat";
+function setTab(tab) {
+  activeTab = tab;
+  $("view-tab-chat").classList.toggle("active", tab === "chat");
+  $("view-tab-raw").classList.toggle("active", tab === "raw");
+  $("view-chat-pane").style.display = tab === "chat" ? "" : "none";
+  $("view-tools").style.display = (tab === "chat" && lastRecord && toolsCountFor(lastRecord) > 0) ? "" : "none";
+  $("view-raw-pane").style.display = tab === "raw" ? "" : "none";
+}
+$("view-tab-chat").addEventListener("click", () => setTab("chat"));
+$("view-tab-raw").addEventListener("click", () => setTab("raw"));
+
+function toolsCountFor(rec) {
+  const params = rec.request_params || {};
+  const key = TOOLS_PARAM_KEYS.find(k => Array.isArray(params[k]) && params[k].length);
+  return key ? params[key].length : 0;
+}
+
+function renderRecord(rec) {
+  lastRecord = rec;
+  const finishedDate = new Date(rec.finished_at * 1000).toLocaleString(localeFor(currentLang));
+  document.title = (rec.model || "Conversation") + " · LLM Hub";
+  $("view-title").textContent = rec.model || "–";
+
+  const { msgCount, totalChars } = conversationSize(rec);
+  const metaParts = [
+    `<span><b>${esc(t("th.time"))}:</b> ${esc(finishedDate)}</span>`,
+    `<span><b>${esc(t("th.app"))}:</b> ${appCell(rec.user_agent)}</span>`,
+    `<span><b>${esc(t("th.endpoint"))}:</b> ${esc(rec.path || "–")}</span>`,
+    `<span><b>${esc(t("th.duration"))}:</b> ${(rec.duration_ms / 1000).toFixed(2)}s</span>`,
+    `<span><b>${esc(t("th.status"))}:</b> ${statusBadge(rec.status)}</span>`,
+    `<span><b>${esc(t("th.promptTokens"))}:</b> ${fmtNum(rec.prompt_tokens)}</span>`,
+    `<span><b>${esc(t("th.complTokens"))}:</b> ${fmtNum(rec.completion_tokens)}</span>`,
+    `<span>${esc(t("conversations.view.messages", { n: msgCount }))} · ${esc(fmtSize(totalChars))}</span>`,
+  ];
+  if (rec.finish_reason) metaParts.push(`<span><b>${esc(t("th.finishReason"))}:</b> ${esc(rec.finish_reason)}</span>`);
+  $("view-meta").innerHTML = metaParts.join("");
+
+  const params = rec.request_params || {};
+  const toolsKey = TOOLS_PARAM_KEYS.find(k => Array.isArray(params[k]) && params[k].length);
+  const paramKeys = Object.keys(params).filter(k => k !== toolsKey && params[k] !== undefined && params[k] !== null && params[k] !== false);
+  $("view-params").innerHTML = paramKeys.map(k =>
+    `<span class="param-chip" title="${esc(k)}=${esc(fmtParamValueFull(params[k]))}">${esc(k)}=${esc(fmtParamValue(params[k]))}</span>`
+  ).join("");
+
+  if (toolsKey) {
+    const tools = extractToolDefs(params[toolsKey]);
+    $("view-tools-label").textContent = "🔧 " + t("conversations.view.toolsAvailable", { n: tools.length });
+    $("view-tools-list").innerHTML = tools.map(toolCardHtml).join("");
+    $("view-tools").style.display = "";
+  } else {
+    $("view-tools").style.display = "none";
+  }
+
+  const messages = rec.messages || null;
+  const systemMsg = messages ? messages.find(m => m.role === "system") : null;
+  if (systemMsg) {
+    const systemText = messageText(systemMsg.content);
+    $("view-system-text").innerHTML = renderMessageBody(systemText);
+    $("view-system-size").textContent = t("conversations.view.chars", { n: systemText.length.toLocaleString(localeFor(currentLang)) });
+    $("view-system").style.display = "";
+    $("view-system").open = systemText.length <= LONG_MSG_THRESHOLD;
+  } else {
+    $("view-system").style.display = "none";
+  }
+
+  let chatHtml;
+  if (messages) {
+    chatHtml = messages.filter(m => m.role !== "system").map(messageBubbleHtml).join("") + outputBubbleHtml(rec);
+  } else {
+    // Legacy /v1/completions - kein messages-Array, nur ein roher Prompt-String (oder eine Liste davon).
+    const promptText = Array.isArray(rec.prompt) ? rec.prompt.join("\n\n") : (rec.prompt || "");
+    const promptBody = wrapCollapsible(renderMessageBody(promptText), promptText.length);
+    chatHtml = `<div class="msg-row user"><div class="bubble"><div class="bubble-role">${esc(t("conversations.view.prompt"))}</div>${promptBody}</div></div>` + outputBubbleHtml(rec);
+  }
+  $("view-chat").innerHTML = chatHtml || `<div class="hint">${esc(t("conversations.view.noContent"))}</div>`;
+  $("view-raw").textContent = JSON.stringify(rec, null, 2);
+
+  $("view-loading").style.display = "none";
+  $("view-error").style.display = "none";
+  $("view-content").style.display = "";
+  setTab(activeTab);
+}
+
+$("view-system-copy").addEventListener("click", (e) => {
+  e.preventDefault();
+  e.stopPropagation();
+  copyWithFeedback(e.currentTarget, $("view-system-text").textContent);
+});
+$("view-raw-copy").addEventListener("click", (e) => {
+  copyWithFeedback(e.currentTarget, $("view-raw").textContent);
+});
+
+async function load() {
+  if (!recordId) {
+    $("view-loading").style.display = "none";
+    $("view-error").textContent = t("conversations.view.notFound");
+    $("view-error").style.display = "";
+    return;
+  }
+  try {
+    const rec = await fetchRecord(true);
+    if (!rec) {
+      $("view-loading").style.display = "none";
+      $("view-error").textContent = t("conversations.view.notFound");
+      $("view-error").style.display = "";
+      return;
+    }
+    renderRecord(rec);
+  } catch (e) {
+    $("view-loading").style.display = "none";
+    $("view-error").textContent = t("error.generic", { msg: e.message });
+    $("view-error").style.display = "";
+  }
+}
+
+// --- Scroll-to-top-Button (rechts unten, siehe .scroll-top-btn-Kommentar) --
+const SCROLL_TOP_THRESHOLD_PX = 400;
+const scrollTopBtn = $("scroll-top-btn");
+function updateScrollTopBtn() {
+  scrollTopBtn.classList.toggle("visible", window.scrollY > SCROLL_TOP_THRESHOLD_PX);
+}
+window.addEventListener("scroll", updateScrollTopBtn, { passive: true });
+scrollTopBtn.addEventListener("click", () => window.scrollTo({ top: 0, behavior: "smooth" }));
+updateScrollTopBtn();
+
+populateLangSelect();
+applyStaticI18n();
+load();
+</script>
+</body>
+</html>
+"""
+
+CONVERSATION_VIEW_HTML = CONVERSATION_VIEW_HTML.replace("__TRANSLATIONS_JSON__", _LANGUAGES_JS)
