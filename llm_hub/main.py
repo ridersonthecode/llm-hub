@@ -14,13 +14,14 @@ import asyncio
 import random
 import httpx
 from fastapi import FastAPI, Header, HTTPException, Request
-from fastapi.responses import StreamingResponse
+from fastapi.responses import Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 
 from pydantic import ValidationError
 
 from . import active_streams, capability_detector, config_editor, conversation_tracker, cost_tracker, downloader, nvfp4_quantizer, perf_tuner, process_manager, rag, request_queue, telemetry
 from .auth import ApiKeyMiddleware
+from .web_auth import WebAuthMiddleware
 from . import catalog
 from .catalog import list_cached_models
 from .config import get_config
@@ -163,6 +164,22 @@ app.mount("/mcp", mcp.streamable_http_app())
 # Vendorte Frontend-Bibliotheken (siehe static/vendor/datatables/README.md) -
 # lokal statt CDN, damit die Dashboards auch ohne Internetzugang funktionieren.
 app.mount("/static", StaticFiles(directory=Path(__file__).resolve().parent / "static"), name="static")
+
+# Kein <link rel="icon"> auf den Dashboard-Seiten - Browser fragen trotzdem
+# automatisch GET /favicon.ico an und loggen ohne diese Route bei jedem
+# Seitenaufruf ein 404 in der Konsole. Statisches SVG statt Datei unter
+# static/, damit dafür kein eigenes Icon-Asset gepflegt werden muss.
+_FAVICON_SVG = b"""<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32">
+<rect width="32" height="32" rx="7" fill="#2563eb"/>
+<text x="16" y="23" font-family="-apple-system,Segoe UI,Roboto,sans-serif" font-size="18" font-weight="700" fill="#fff" text-anchor="middle">H</text>
+</svg>"""
+
+
+@app.get("/favicon.ico", include_in_schema=False)
+async def favicon():
+    return Response(content=_FAVICON_SVG, media_type="image/svg+xml")
+
+
 app.include_router(dashboard_router)
 app.include_router(ollama_router)
 app.include_router(rag_dashboard_router)
@@ -173,6 +190,11 @@ app.include_router(conversations_dashboard_router)
 # Reine ASGI-Middleware statt @app.middleware("http") - siehe auth.py
 # Docstring: BaseHTTPMiddleware bricht Streaming-Responses (stream: true).
 app.add_middleware(ApiKeyMiddleware)
+# Website-Login (Dashboard) per users.json - siehe web_auth.py. Zuletzt
+# hinzugefügt, damit sie in der Middleware-Kette außen liegt (Starlette baut
+# den Stack in umgekehrter add_middleware()-Reihenfolge) und so auch
+# unautorisierte WebSocket-Handshakes VOR jeder anderen Prüfung abfängt.
+app.add_middleware(WebAuthMiddleware)
 
 
 @app.get("/health")

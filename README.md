@@ -52,8 +52,12 @@ von 0 auf laufenden Dienst inkl. RAG/Qdrant: siehe [INSTALL.md](INSTALL.md).
   (Default: Claude-Sonnet-5-Standardpreise) zum Vergleich "was hätte das über
   eine Cloud-API gekostet" - persistent, live per WebSocket, mit
   Einzel-/Mehrfach-Löschen und Reset
-- **Optionaler API-Key** (standardmäßig deaktiviert), zentrale `config.json`
-  (kein `sudo` zum Ändern nötig)
+- **Optionaler API-Key** für `/v1/*` (standardmäßig deaktiviert), zentrale
+  `config.json` (kein `sudo` zum Ändern nötig)
+- **Website-Login**: Dashboard per Benutzername/Passwort schützen, ganz ohne
+  Datenbank (`users.json`, verwaltet per `python -m llm_hub.manage_users`) –
+  betrifft nur die Weboberfläche, `/v1`/`/api`/`/mcp` bleiben ohne
+  Zugangsdaten nutzbar (siehe [Anleitung.md](Anleitung.md#website-login-dashboard-per-benutzernamepasswort-schützen))
 
 ## Setup
 

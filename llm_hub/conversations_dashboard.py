@@ -16,7 +16,7 @@ from __future__ import annotations
 
 import asyncio
 
-from fastapi import APIRouter, WebSocket, WebSocketDisconnect
+from fastapi import APIRouter, HTTPException, WebSocket, WebSocketDisconnect
 from fastapi.responses import HTMLResponse
 
 from . import conversation_tracker
@@ -72,6 +72,19 @@ async def conversations_ws(websocket: WebSocket):
             raise
     finally:
         conversation_tracker.unsubscribe(q)
+
+
+@router.get("/dashboard/conversations/{record_id}")
+async def conversation_detail(record_id: str):
+    """Voller Datensatz (messages/prompt/request_params/output_*) für das
+    Modal - siehe conversation_tracker.get_record()/list_records()-Kommentar,
+    die Tabelle selbst bekommt diese schweren Felder nicht mehr mit. Muss vor
+    der Seiten-Route (ohne {record_id}-Segment) stehen, aber NACH /status
+    (sonst würde "status" selbst als record_id interpretiert)."""
+    rec = conversation_tracker.get_record(record_id)
+    if rec is None:
+        raise HTTPException(404, f"Konversations-Datensatz '{record_id}' nicht gefunden.")
+    return rec
 
 
 @router.get("/dashboard/conversations")
@@ -402,8 +415,7 @@ CONVERSATIONS_DASHBOARD_HTML = r"""<!doctype html>
     </a>
     <span class="sep">·</span>
     <span class="claude-mark" title="Entwickelt mit Claude Code">
-      <img src="https://claude.ai/images/claude_app_icon.png" alt="Claude" loading="lazy">
-      Entwickelt mit Claude Code
+      ✨ Entwickelt mit Claude Code
     </span>
   </footer>
 
@@ -720,6 +732,9 @@ function fmtSize(chars) {
   if (chars < 1e6) return (chars / 1000).toFixed(1) + " KB";
   return (chars / 1e6).toFixed(1) + " MB";
 }
+// 1000er-Trennzeichen fürs aktuelle Sprachgebiet (de-DE -> Punkt, en-US -> Komma)
+// - für Zähler, die mit der Zeit über die Tausendergrenze wachsen (Tokens).
+function fmtNum(n) { return (n === null || n === undefined) ? "–" : n.toLocaleString(localeFor(currentLang)); }
 function conversationSize(rec) {
   let msgCount = 0, totalChars = 0;
   if (Array.isArray(rec.messages)) {
@@ -745,8 +760,8 @@ function openConversationModal(rec) {
     `<span><b>${esc(t("th.endpoint"))}:</b> ${esc(rec.path || "–")}</span>`,
     `<span><b>${esc(t("th.duration"))}:</b> ${(rec.duration_ms / 1000).toFixed(2)}s</span>`,
     `<span><b>${esc(t("th.status"))}:</b> ${statusBadge(rec.status)}</span>`,
-    `<span><b>${esc(t("th.promptTokens"))}:</b> ${rec.prompt_tokens ?? "–"}</span>`,
-    `<span><b>${esc(t("th.complTokens"))}:</b> ${rec.completion_tokens ?? "–"}</span>`,
+    `<span><b>${esc(t("th.promptTokens"))}:</b> ${fmtNum(rec.prompt_tokens)}</span>`,
+    `<span><b>${esc(t("th.complTokens"))}:</b> ${fmtNum(rec.completion_tokens)}</span>`,
     `<span>${esc(t("conversations.modal.messages", { n: msgCount }))} · ${esc(fmtSize(totalChars))}</span>`,
   ];
   if (rec.finish_reason) metaParts.push(`<span><b>${esc(t("th.finishReason"))}:</b> ${esc(rec.finish_reason)}</span>`);
@@ -832,7 +847,6 @@ $("conv-modal-view-raw").addEventListener("click", () => setModalView("raw"));
 // --- State -------------------------------------------------------------
 let latestSnapshot = null;
 let selected = new Set();
-let recordsById = new Map();
 
 function updateDeleteBtn() {
   const btn = $("delete-selected-btn");
@@ -869,7 +883,7 @@ function initRecordsTable() {
         // "X / Y"-Format wie die Engine-Tabelle im Haupt-Dashboard (siehe dortiges
         // th.tokensPromptGen), spart Spaltenbreite ohne Informationsverlust.
         title: t("th.tokensPromptGen"), data: null, orderable: false,
-        render: (r) => (r.prompt_tokens ?? "–") + " / " + (r.completion_tokens ?? "–"),
+        render: (r) => fmtNum(r.prompt_tokens) + " / " + fmtNum(r.completion_tokens),
       },
       { title: t("th.duration"), data: null, render: (r, type) => type !== "display" ? r.duration_ms : (r.duration_ms / 1000).toFixed(2) + "s" },
       {
@@ -903,10 +917,7 @@ function initRecordsTable() {
       btn.addEventListener("click", () => deleteOne(btn.dataset.id));
     });
     document.querySelectorAll("#records-table tbody .row-view").forEach(btn => {
-      btn.addEventListener("click", () => {
-        const rec = recordsById.get(btn.dataset.id);
-        if (rec) openConversationModal(rec);
-      });
+      btn.addEventListener("click", () => viewConversation(btn));
     });
   });
 }
@@ -915,7 +926,6 @@ function updateRecordsTable(records) {
   const stillThere = new Set(records.map(r => r.id));
   selected = new Set([...selected].filter(id => stillThere.has(id)));
   currentRecords = records;
-  recordsById = new Map(records.map(r => [r.id, r]));
 
   $("select-all-cb").checked = records.length > 0 && records.every(r => selected.has(r.id));
   updateDeleteBtn();
@@ -934,6 +944,33 @@ function render(data) {
 }
 
 // --- Aktionen --------------------------------------------------------------
+// Die Tabellenzeilen (currentRecords) enthalten seit dem Perf-Fix nur noch
+// die schlanken Felder (siehe conversation_tracker._LIST_FIELDS) - messages/
+// prompt/request_params/output_* werden erst hier, beim tatsächlichen
+// Öffnen des Modals, einzeln nachgeladen (GET /dashboard/conversations/{id}).
+// Vorher steckten diese teils riesigen Felder in JEDEM Datensatz JEDES
+// WebSocket-Snapshots (alle 5s, für die komplette Historie) - mit
+// wachsender Konversations-Zahl wurde das Laden der Seite dadurch immer
+// langsamer, obwohl die Tabelle selbst nur Zeit/Modell/Preview/Tokens/etc.
+// anzeigt.
+async function viewConversation(btn) {
+  const id = btn.dataset.id;
+  const original = btn.textContent;
+  btn.disabled = true;
+  btn.textContent = "…";
+  try {
+    const res = await fetch(`/dashboard/conversations/${encodeURIComponent(id)}`, { headers: authHeaders() });
+    if (!res.ok) throw new Error(await res.text());
+    const rec = await res.json();
+    openConversationModal(rec);
+  } catch (e) {
+    $("records-status").textContent = t("error.generic", { msg: e.message });
+  } finally {
+    btn.disabled = false;
+    btn.textContent = original;
+  }
+}
+
 async function deleteOne(id) {
   try {
     const res = await fetch(`/conversations/${encodeURIComponent(id)}`, { method: "DELETE", headers: authHeaders() });

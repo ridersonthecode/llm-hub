@@ -716,8 +716,7 @@ DASHBOARD_HTML = r"""<!doctype html>
     </a>
     <span class="sep">·</span>
     <span class="claude-mark" title="Entwickelt mit Claude Code">
-      <img src="https://claude.ai/images/claude_app_icon.png" alt="Claude" loading="lazy">
-      Entwickelt mit Claude Code
+      ✨ Entwickelt mit Claude Code
     </span>
   </footer>
 
@@ -800,6 +799,11 @@ function fmtAgo(seconds) {
 }
 function fmtMs(ms) { return (ms === null || ms === undefined) ? "–" : (ms < 1000 ? Math.round(ms) + " ms" : (ms/1000).toFixed(2) + " s"); }
 function fmtPct(x) { return (x === null || x === undefined) ? "–" : Math.round(x*100) + "%"; }
+// 1000er-Trennzeichen fürs aktuelle Sprachgebiet (de-DE -> Punkt, en-US -> Komma)
+// - für Zähler, die mit der Zeit über die Tausendergrenze wachsen (Tokens,
+// Request-Zahlen), reine Millisekunden/Prozent/Bytes-Werte (siehe fmtMs/fmtPct/
+// fmtGb oben) bleiben unter dieser Grenze und brauchen das nicht.
+function fmtNum(n) { return (n === null || n === undefined) ? "–" : n.toLocaleString(localeFor(currentLang)); }
 // Belegter Speicherplatz eines Modells auf der Platte (catalog.get_cached_size_bytes).
 function fmtGb(bytes) { return (bytes === null || bytes === undefined) ? "–" : (bytes/1e9).toFixed(1) + " GB"; }
 // Fiktive Kosten (siehe cost_tracker.py) - kleine Beträge brauchen mehr
@@ -1045,8 +1049,8 @@ function initRecentTable() {
       { title: t("th.loadTime"), data: null, render: (r, type) => type !== "display" ? (r.queued_ms ?? 0) : (r.queued_ms ? fmtMs(r.queued_ms) : "–") },
       { title: t("th.duration"), data: null, render: (r, type) => type !== "display" ? (r.duration_ms ?? 0) : fmtMs(r.duration_ms) },
       { title: t("th.ttft"), data: null, render: (r, type) => type !== "display" ? (r.ttft_ms ?? 0) : fmtMs(r.ttft_ms) },
-      { title: t("th.promptTokens"), data: null, render: (r, type) => type !== "display" ? (r.prompt_tokens ?? -1) : (r.prompt_tokens ?? "–") },
-      { title: t("th.complTokens"), data: null, render: (r, type) => type !== "display" ? (r.completion_tokens ?? -1) : (r.completion_tokens ?? "–") },
+      { title: t("th.promptTokens"), data: null, render: (r, type) => type !== "display" ? (r.prompt_tokens ?? -1) : fmtNum(r.prompt_tokens) },
+      { title: t("th.complTokens"), data: null, render: (r, type) => type !== "display" ? (r.completion_tokens ?? -1) : fmtNum(r.completion_tokens) },
       {
         title: t("th.throughput"), data: null,
         render: (r, type) => {
@@ -1211,7 +1215,7 @@ function render(data) {
           <td class="mono">${fmtPct(m.kv_cache_usage_perc)}</td>
           <td class="mono">${fmtMs(m.avg_ttft_ms)}</td>
           <td class="mono">${fmtMs(m.avg_tpot_ms)}</td>
-          <td class="mono">${(m.prompt_tokens_total ?? "–") + " / " + (m.generation_tokens_total ?? "–")}</td>
+          <td class="mono">${fmtNum(m.prompt_tokens_total) + " / " + fmtNum(m.generation_tokens_total)}</td>
           <td>
             <button class="logs-btn" data-model="${esc(e.loaded_model)}">${t("action.viewLogs")}</button>
             <button class="unload-btn" data-model="${esc(e.loaded_model)}">${t("action.unload")}</button>

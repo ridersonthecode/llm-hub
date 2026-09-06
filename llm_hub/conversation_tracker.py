@@ -161,9 +161,41 @@ def record_conversation(
     return rec
 
 
+# Felder für die Tabellen-/Snapshot-Ansicht (/dashboard/conversations/status,
+# /dashboard/conversations/ws) - bewusst OHNE messages/prompt/request_params/
+# output_content/output_reasoning. Diese können bei umfangreichen Tool-Calling-
+# Konversationen (System-Prompt + kompletter Verlauf, siehe Copilot-Beispiele
+# in conversations_dashboard.py) mehrere hundert KB pro Datensatz ausmachen -
+# wurden bisher bei JEDEM WebSocket-Heartbeat (alle 5s) für ALLE Datensätze neu
+# serialisiert und an den Client geschickt, obwohl die Tabelle nur Zeit/Modell/
+# App/Endpoint/Preview/Tokens/Dauer/Status anzeigt. Der eigentliche Inhalt wird
+# jetzt erst bei Bedarf per get_record() nachgeladen, wenn ein Datensatz im
+# Modal geöffnet wird (siehe /dashboard/conversations/{id} in
+# conversations_dashboard.py) - mit wachsender Historie skaliert die
+# Tabellenansicht dadurch nicht mehr mit der Gesamtgröße aller je geführten
+# Konversationen, sondern nur noch mit der Anzahl der Datensätze.
+_LIST_FIELDS = (
+    "id", "rid", "model", "path", "user_agent", "started_at", "finished_at",
+    "duration_ms", "status", "prompt_tokens", "completion_tokens",
+    "finish_reason", "preview",
+)
+
+
 def list_records() -> list[dict]:
+    """Schlanke Übersicht für die Tabelle (siehe _LIST_FIELDS) - neueste zuerst."""
     _ensure_loaded()
-    return list(reversed(records))  # neueste zuerst
+    return [{k: r.get(k) for k in _LIST_FIELDS} for r in reversed(records)]
+
+
+def get_record(record_id: str) -> Optional[dict]:
+    """Voller Datensatz inkl. messages/prompt/request_params/output_* für das
+    Konversations-Modal - erst hier, nicht in list_records() (siehe dortigen
+    Kommentar)."""
+    _ensure_loaded()
+    for r in records:
+        if r["id"] == record_id:
+            return r
+    return None
 
 
 def delete_records(ids: list[str]) -> int:

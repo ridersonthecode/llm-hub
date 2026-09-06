@@ -24,6 +24,10 @@ config.json
 # enthalten dieselben sensiblen Daten wie config.json.
 config_backups/
 
+# Dashboard-Login (llm_hub/web_auth.py, siehe manage_users.py) - enthält
+# Salt+PBKDF2-Hash je Nutzer, maschinenspezifisch wie config.json.
+users.json
+
 # Persistente Kostentracking-Historie (llm_hub/cost_tracker.py) - reine
 # Nutzungsdaten dieser Maschine, nicht Teil des Projekts.
 costs.jsonl

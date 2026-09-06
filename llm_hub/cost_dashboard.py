@@ -260,8 +260,7 @@ COST_DASHBOARD_HTML = r"""<!doctype html>
     </a>
     <span class="sep">·</span>
     <span class="claude-mark" title="Entwickelt mit Claude Code">
-      <img src="https://claude.ai/images/claude_app_icon.png" alt="Claude" loading="lazy">
-      Entwickelt mit Claude Code
+      ✨ Entwickelt mit Claude Code
     </span>
   </footer>
 
@@ -359,6 +358,10 @@ function fmtUsd(x) {
   if (x < 0.01) return "$" + x.toFixed(6);
   return "$" + x.toFixed(4);
 }
+// 1000er-Trennzeichen fürs aktuelle Sprachgebiet (de-DE -> Punkt, en-US -> Komma)
+// - für Zähler, die mit der Zeit über die Tausendergrenze wachsen (Tokens,
+// Request-Zahlen).
+function fmtNum(n) { return (n === null || n === undefined) ? "–" : n.toLocaleString(localeFor(currentLang)); }
 
 // Welche App den Request geschickt hat, aus dem rohen User-Agent-Header
 // (siehe telemetry.start_request) - unverändert angezeigt, lang truncated
@@ -406,8 +409,8 @@ function initRecordsTable() {
       { title: t("th.model"), data: null, render: (r, type) => type === "display" ? esc(r.model) : (r.model || "") },
       { title: t("th.app"), data: null, orderable: false, render: (r) => appCell(r.user_agent) },
       { title: t("th.endpoint"), data: null, render: (r, type) => type === "display" ? esc(r.path || "–") : (r.path || "") },
-      { title: t("th.promptTokens"), data: null, render: (r, type) => type !== "display" ? (r.prompt_tokens ?? -1) : (r.prompt_tokens ?? "–") },
-      { title: t("th.complTokens"), data: null, render: (r, type) => type !== "display" ? (r.completion_tokens ?? -1) : (r.completion_tokens ?? "–") },
+      { title: t("th.promptTokens"), data: null, render: (r, type) => type !== "display" ? (r.prompt_tokens ?? -1) : fmtNum(r.prompt_tokens) },
+      { title: t("th.complTokens"), data: null, render: (r, type) => type !== "display" ? (r.completion_tokens ?? -1) : fmtNum(r.completion_tokens) },
       {
         title: t("th.cost"), data: null,
         render: (r, type) => {
@@ -478,8 +481,8 @@ function render(data) {
 
   $("total-cost").textContent = fmtUsd(summary.total_cost_usd) ?? "$0.00";
   $("total-cost-hint").textContent = t("cost.hint.vsClaudeSonnet5");
-  $("total-requests").textContent = summary.total_requests ?? 0;
-  $("priced-requests").textContent = (summary.priced_requests ?? 0) + " / " + (summary.total_requests ?? 0);
+  $("total-requests").textContent = fmtNum(summary.total_requests ?? 0);
+  $("priced-requests").textContent = fmtNum(summary.priced_requests ?? 0) + " / " + fmtNum(summary.total_requests ?? 0);
 
   const byModel = summary.by_model || [];
   if (byModel.length === 0) {
@@ -489,8 +492,8 @@ function render(data) {
       <th>${t("th.model")}</th><th class="num">${t("th.requests")}</th><th class="num">${t("cost.card.pricedRequests")}</th><th class="num">${t("th.cost")}</th>
       </tr></thead><tbody>` + byModel.map(m => `<tr>
         <td>${esc(m.model)}</td>
-        <td class="mono num">${m.requests}</td>
-        <td class="mono num">${m.priced_requests}</td>
+        <td class="mono num">${fmtNum(m.requests)}</td>
+        <td class="mono num">${fmtNum(m.priced_requests)}</td>
         <td class="mono num">${fmtUsd(m.cost_usd) ?? "$0.00"}</td>
       </tr>`).join("") + `</tbody></table>`);
   }

@@ -799,6 +799,33 @@ setzen und neu starten.
   über localhost (`127.0.0.1:18811`), die Authentifizierung passiert ausschließlich
   im Manager.
 
+### Website-Login (Dashboard per Benutzername/Passwort schützen)
+
+Unabhängig vom API-Key (der nur `/v1` betrifft) lässt sich die gesamte
+Weboberfläche – alle `/dashboard/*`-Seiten inkl. WebSockets sowie deren
+Backend-Endpoints (`/models`, `/config`, `/costs`, `/conversations`, `/rag`,
+`/requests`, `/static`) – per HTTP Basic Auth gegen eine lokale `users.json`
+schützen (kein Datenbank, keine Session-Verwaltung nötig – der Browser cached
+die Zugangsdaten selbst für die gesamte Seite). `/v1/*` (OpenAI-kompatibler
+Proxy), `/api/*` (Ollama-Kompatibilität), `/mcp` und `/health` bleiben davon
+**unberührt** – die API soll ohne Zugangsdaten nutzbar bleiben.
+
+Nutzer verwalten (kein Web-UI dafür, bewusst nur per CLI):
+
+```bash
+python -m llm_hub.manage_users add admin      # anlegen oder Passwort ändern (fragt interaktiv ab)
+python -m llm_hub.manage_users list           # konfigurierte Nutzer auflisten
+python -m llm_hub.manage_users remove admin   # entfernen
+```
+
+Sobald `users.json` mindestens einen Nutzer enthält, verlangt jeder Zugriff
+auf die Website den Login-Dialog des Browsers (Anmeldung wird vom Browser
+gecacht, kein erneutes Eintippen bei jedem Request). Ist `users.json` nicht
+vorhanden oder leer, bleibt die Website wie bisher offen. Die Datei liegt
+neben `config.json` im Projektordner, ist `chmod 600` und **nicht** Teil des
+Repos (siehe `.gitignore`) – enthält Salt+PBKDF2-Hash je Nutzer, keine
+Klartext-Passwörter.
+
 ## Neues Modell hinzufügen (nicht aus obiger Liste)
 
 In `config.json` unter `"models"` einen neuen Eintrag anlegen (siehe bestehende als

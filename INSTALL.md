@@ -256,6 +256,22 @@ Standardmäßig: kein API-Key, `0.0.0.0:11434` - erreichbar für jeden mit
 Netzwerkroute zu dieser Maschine, keine Firewall-Regel aktiv. Details und
 wie man das einschränkt: [Anleitung.md, Abschnitt "Sicherheit"](Anleitung.md#sicherheit).
 
+Das Dashboard (die Weboberfläche) lässt sich zusätzlich per Benutzername/
+Passwort-Login schützen, unabhängig vom API-Key (der nur `/v1` betrifft) -
+`/v1`/`/api`/`/mcp` bleiben davon unberührt. Dafür einen Nutzer anlegen:
+
+```bash
+source .venv/bin/activate
+python -m llm_hub.manage_users add admin
+# fragt interaktiv nach Passwort (mind. 4 Zeichen, mit Bestätigung)
+```
+
+Sobald `users.json` mindestens einen Nutzer enthält, verlangt jeder
+`/dashboard`-Aufruf den Login-Dialog des Browsers (kein Dienst-Neustart
+nötig - greift sofort beim nächsten Request). Details, weitere Befehle
+(`list`/`remove`) und was genau geschützt wird: [Anleitung.md, Abschnitt
+"Website-Login"](Anleitung.md#website-login-dashboard-per-benutzernamepasswort-schützen).
+
 ---
 
 **Fertig.** Ab hier gilt die normale [Anleitung.md](Anleitung.md) für den

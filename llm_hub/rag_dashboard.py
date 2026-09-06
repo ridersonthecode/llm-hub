@@ -314,8 +314,7 @@ RAG_DASHBOARD_HTML = r"""<!doctype html>
     </a>
     <span class="sep">·</span>
     <span class="claude-mark" title="Entwickelt mit Claude Code">
-      <img src="https://claude.ai/images/claude_app_icon.png" alt="Claude" loading="lazy">
-      Entwickelt mit Claude Code
+      ✨ Entwickelt mit Claude Code
     </span>
   </footer>
 
