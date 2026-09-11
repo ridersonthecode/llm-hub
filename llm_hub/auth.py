@@ -20,7 +20,7 @@ from .config import get_config
 
 EXEMPT_PATHS = {
     "/health", "/dashboard", "/dashboard/rag", "/dashboard/config", "/dashboard/costs",
-    "/dashboard/chat", "/dashboard/conversations",
+    "/dashboard/chat", "/dashboard/conversations", "/dashboard/users", "/login", "/logout",
 }
 
 

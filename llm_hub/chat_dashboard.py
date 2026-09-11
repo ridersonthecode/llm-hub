@@ -25,17 +25,18 @@ Internetzugriff des Browsers funktioniert) als eigener, monospaced Block mit
 Sprache + Kopieren-Button dargestellt."""
 from __future__ import annotations
 
-from fastapi import APIRouter
+from fastapi import APIRouter, Request
 from fastapi.responses import HTMLResponse
 
 from .dashboard import _LANGUAGES_JS
+from .web_auth import render_nav_user_html
 
 router = APIRouter()
 
 
 @router.get("/dashboard/chat")
-async def chat_dashboard_page():
-    return HTMLResponse(CHAT_DASHBOARD_HTML)
+async def chat_dashboard_page(request: Request):
+    return HTMLResponse(CHAT_DASHBOARD_HTML.replace("<!--NAV_USER-->", render_nav_user_html(request)))
 
 
 CHAT_DASHBOARD_HTML = r"""<!doctype html>
@@ -193,6 +194,7 @@ CHAT_DASHBOARD_HTML = r"""<!doctype html>
     <div class="topbar-actions">
       <select id="lang-select" data-i18n-title="lang.selectTitle" title="Language"></select>
       <button id="theme-toggle" data-i18n-title="theme.toggleTitle" title="Toggle theme">🌙</button>
+      <!--NAV_USER-->
     </div>
   </div>
 
@@ -225,7 +227,7 @@ const $ = (id) => document.getElementById(id);
 // --- i18n --------------------------------------------------------------
 const TRANSLATIONS = __TRANSLATIONS_JSON__;
 const DEFAULT_LANG = "en";
-const LANG_NAMES = { en: "English", de: "Deutsch" };
+const LANG_NAMES = { en: "English", de: "Deutsch", sk: "Slovenčina" };
 let currentLang = localStorage.getItem("vllm_dashboard_lang");
 if (!currentLang || !TRANSLATIONS[currentLang]) currentLang = DEFAULT_LANG;
 

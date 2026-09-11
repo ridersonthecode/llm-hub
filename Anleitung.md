@@ -804,27 +804,60 @@ setzen und neu starten.
 Unabhängig vom API-Key (der nur `/v1` betrifft) lässt sich die gesamte
 Weboberfläche – alle `/dashboard/*`-Seiten inkl. WebSockets sowie deren
 Backend-Endpoints (`/models`, `/config`, `/costs`, `/conversations`, `/rag`,
-`/requests`, `/static`) – per HTTP Basic Auth gegen eine lokale `users.json`
-schützen (kein Datenbank, keine Session-Verwaltung nötig – der Browser cached
-die Zugangsdaten selbst für die gesamte Seite). `/v1/*` (OpenAI-kompatibler
-Proxy), `/api/*` (Ollama-Kompatibilität), `/mcp` und `/health` bleiben davon
-**unberührt** – die API soll ohne Zugangsdaten nutzbar bleiben.
+`/requests`, `/static`) – über eine eigene `/login`-Seite mit echten,
+signierten Session-Cookies schützen (kein HTTP Basic Auth mehr, kein
+Datenbank-Zwang). `/v1/*` (OpenAI-kompatibler Proxy), `/api/*`
+(Ollama-Kompatibilität), `/mcp` und `/health` bleiben davon **unberührt** –
+die API soll ohne Zugangsdaten nutzbar bleiben.
 
-Nutzer verwalten (kein Web-UI dafür, bewusst nur per CLI):
+Zwei Nutzerklassen:
+
+- **Admin** = jeder lokale Linux-Nutzer dieser Maschine, der sich per Shell
+  anmelden darf (siehe `/etc/shells`) – egal ob `root` oder ein normaler
+  Account wie der, unter dem `llm-hub.service` läuft. Anmeldung mit dem
+  normalen Linux-Passwort, live per PAM geprüft (kein Root-Zugriff auf
+  `/etc/shadow` nötig – siehe `llm_hub/system_users.py`, PAM delegiert an das
+  setgid-Hilfsprogramm `unix_chkpwd`). Admins verwalten unter
+  `/dashboard/users` die zweite Nutzerklasse.
+- **User** = zusätzliche Dashboard-Nutzer ohne Shell-Zugang auf der Maschine,
+  angelegt von einem Admin über `/dashboard/users` (Formular: Benutzername +
+  Passwort, mind. 8 Zeichen). Kein Terminal-Zugriff nötig.
+
+  ⚠️ Achtung bei der Admin-Regel: **jeder** Systemaccount mit einer "echten"
+  Shell (siehe `/etc/shells`, typischerweise `/bin/bash`) zählt – nicht nur
+  menschliche Logins. Auf manchen Distros haben auch Service-Accounts wie
+  `postgres` eine Bash-Shell (für `sudo -u postgres -i` o.ä.) und werden damit
+  ebenfalls automatisch zu Dashboard-Admins. Kurz mit
+  `awk -F: '$7 ~ /bash$|sh$/' /etc/passwd` prüfen, wer das auf der eigenen
+  Maschine betrifft, und bei Bedarf die Shell des jeweiligen Accounts auf
+  `/usr/sbin/nologin` setzen, falls das nicht gewünscht ist.
+
+Benötigt zusätzlich das Paket `python-pam` (`pip install python-pam`, siehe
+Setup oben) – ohne das Paket ist der Systemnutzer-Login-Weg deaktiviert (Logs
+weisen darauf hin), der users.json-Weg funktioniert trotzdem weiter.
+
+CLI-Fallback (z.B. falls sich mal niemand mehr einloggen kann):
 
 ```bash
-python -m llm_hub.manage_users add admin      # anlegen oder Passwort ändern (fragt interaktiv ab)
-python -m llm_hub.manage_users list           # konfigurierte Nutzer auflisten
-python -m llm_hub.manage_users remove admin   # entfernen
+python -m llm_hub.manage_users add jemand     # anlegen oder Passwort ändern (fragt interaktiv ab)
+python -m llm_hub.manage_users list           # konfigurierte users.json-Nutzer auflisten
+python -m llm_hub.manage_users remove jemand  # entfernen
 ```
 
-Sobald `users.json` mindestens einen Nutzer enthält, verlangt jeder Zugriff
-auf die Website den Login-Dialog des Browsers (Anmeldung wird vom Browser
-gecacht, kein erneutes Eintippen bei jedem Request). Ist `users.json` nicht
-vorhanden oder leer, bleibt die Website wie bisher offen. Die Datei liegt
-neben `config.json` im Projektordner, ist `chmod 600` und **nicht** Teil des
-Repos (siehe `.gitignore`) – enthält Salt+PBKDF2-Hash je Nutzer, keine
-Klartext-Passwörter.
+Sobald `users.json` mindestens einen Nutzer enthält ODER mindestens ein
+Systemnutzer sich qualifiziert (praktisch: fast immer, `root` zählt ja schon),
+verlangt jeder Zugriff auf die Website die Anmeldung auf `/login` – die
+Session hält sich per Cookie 14 Tage (HttpOnly, `SameSite=Lax`, zusätzlich
+`Secure` bei HTTPS-Zugriff). Ein geändertes oder gelöschtes users.json-Passwort
+loggt eine laufende Session dieses Nutzers sofort aus (keine Wartezeit bis zum
+Ablauf). Ist weder `users.json` vorhanden/befüllt noch ein Systemnutzer
+qualifiziert, bleibt die Website wie bisher offen. `users.json` liegt neben
+`config.json` im Projektordner, ist `chmod 600` und **nicht** Teil des Repos
+(siehe `.gitignore`) – enthält Salt+PBKDF2-Hash je Nutzer, keine
+Klartext-Passwörter. Das Signier-Secret für die Session-Cookies liegt in
+`.session_secret` (ebenfalls `chmod 600`, ebenfalls nicht im Repo) und wird
+beim ersten Start automatisch erzeugt – wer die Datei löscht, loggt damit
+alle Nutzer aus.
 
 ## Neues Modell hinzufügen (nicht aus obiger Liste)
 

@@ -1,23 +1,29 @@
-"""CLI zur Verwaltung von users.json (Website-Login fürs Dashboard, siehe
-web_auth.py) - bewusst kein Web-UI dafür: Nutzer anlegen/löschen ist ein
-seltener, administrativer Vorgang, den man genauso gut vom Terminal aus
-erledigt, ohne dafür eine eigene Signup-/Verwaltungsseite mit eigener
-Angriffsfläche zu bauen.
+"""CLI-Fallback zur Verwaltung von users.json (Website-Login fürs Dashboard,
+siehe web_auth.py). Der normale Weg ist inzwischen die Nutzerverwaltung im
+Dashboard selbst (/dashboard/users, nur für Admins - siehe users_dashboard.py);
+dieses Skript bleibt als Notfall-Zugang bestehen, z.B. falls sich mal niemand
+mehr einloggen kann.
 
 Nutzung:
     python -m llm_hub.manage_users add <username>      # legt an oder ändert Passwort
     python -m llm_hub.manage_users remove <username>
     python -m llm_hub.manage_users list
 
-Solange users.json fehlt oder leer ist, bleibt die Website ungeschützt
-(siehe web_auth.py) - der erste 'add'-Aufruf aktiviert den Login-Zwang."""
+Hinweis: Nutzer, die sich per Shell an dieser Maschine anmelden dürfen (siehe
+system_users.py, z.B. root oder der Betriebssystem-Nutzer des llm-hub-Dienstes)
+sind im Dashboard automatisch Admin und brauchen KEINEN users.json-Eintrag -
+'add' verweigert einen Benutzernamen, der mit einem solchen Systemnutzer
+kollidiert.
+
+Solange users.json fehlt oder leer ist UND kein Systemnutzer sich qualifiziert,
+bleibt die Website ungeschützt (siehe web_auth.py)."""
 from __future__ import annotations
 
 import argparse
 import getpass
 import sys
 
-from .web_auth import USERS_PATH, hash_password, read_users, write_users
+from .web_auth import USERS_PATH, build_user_entry, read_users, username_conflicts_with_system_user, write_users
 
 
 def _prompt_password() -> str:
@@ -33,11 +39,17 @@ def _prompt_password() -> str:
 
 
 def cmd_add(username: str) -> None:
+    if username_conflicts_with_system_user(username):
+        print(
+            f"'{username}' ist ein Systemnutzer mit Shell-Login und dadurch bereits "
+            "automatisch Admin im Dashboard - dafür braucht es keinen users.json-Eintrag.",
+            file=sys.stderr,
+        )
+        sys.exit(1)
     users = read_users()
     action = "geändert" if username in users else "angelegt"
     password = _prompt_password()
-    salt_hex, hash_hex = hash_password(password)
-    users[username] = {"salt": salt_hex, "hash": hash_hex}
+    users[username] = build_user_entry(password, previous=users.get(username), created_by="cli")
     write_users(users)
     print(f"Nutzer '{username}' {action} ({USERS_PATH}).")
 

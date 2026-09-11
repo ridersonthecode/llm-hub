@@ -54,10 +54,12 @@ von 0 auf laufenden Dienst inkl. RAG/Qdrant: siehe [INSTALL.md](INSTALL.md).
   Einzel-/Mehrfach-Löschen und Reset
 - **Optionaler API-Key** für `/v1/*` (standardmäßig deaktiviert), zentrale
   `config.json` (kein `sudo` zum Ändern nötig)
-- **Website-Login**: Dashboard per Benutzername/Passwort schützen, ganz ohne
-  Datenbank (`users.json`, verwaltet per `python -m llm_hub.manage_users`) –
-  betrifft nur die Weboberfläche, `/v1`/`/api`/`/mcp` bleiben ohne
-  Zugangsdaten nutzbar (siehe [Anleitung.md](Anleitung.md#website-login-dashboard-per-benutzernamepasswort-schützen))
+- **Website-Login** mit echten Sessions (eigene `/login`-Seite, signiertes
+  Cookie, kein Basic Auth): Linux-Systemnutzer mit Shell-Login (z.B. `root`
+  oder der eigene Account) sind automatisch Admin (Passwort = Linux-Passwort,
+  per PAM geprüft) und verwalten zusätzliche Dashboard-Nutzer unter
+  `/dashboard/users` – betrifft nur die Weboberfläche, `/v1`/`/api`/`/mcp`
+  bleiben ohne Zugangsdaten nutzbar (siehe [Anleitung.md](Anleitung.md#website-login-dashboard-per-benutzernamepasswort-schützen))
 
 ## Setup
 
@@ -67,7 +69,7 @@ source .venv/bin/activate
 # "mcp[cli]<2" ist Pflicht, kein Nice-to-have: mcp 2.x hat FastMCP (siehe
 # mcp_tools.py) ersatzlos in MCPServer umbenannt, der Dienst startet mit
 # mcp>=2 gar nicht erst (live erlebt beim 2026-09-01-Umzug dieses Ordners).
-pip install vllm fastapi "uvicorn[standard]" httpx huggingface_hub "mcp[cli]<2" qdrant-client pypdf
+pip install vllm fastapi "uvicorn[standard]" httpx huggingface_hub "mcp[cli]<2" qdrant-client pypdf python-pam
 
 cp config.example.json config.json
 # config.json anpassen: hf_home-Pfad, ggf. Modelle/Parameter

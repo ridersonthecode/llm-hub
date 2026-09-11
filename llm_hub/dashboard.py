@@ -14,12 +14,13 @@ import json
 import time
 from pathlib import Path
 
-from fastapi import APIRouter, WebSocket, WebSocketDisconnect
+from fastapi import APIRouter, Request, WebSocket, WebSocketDisconnect
 from fastapi.responses import HTMLResponse
 
 from . import catalog, cost_tracker, downloader, process_manager, system_metrics, telemetry
 from .catalog import list_cached_models
 from .config import get_config
+from .web_auth import render_nav_user_html
 
 router = APIRouter()
 
@@ -329,8 +330,8 @@ async def dashboard_logs_ws(websocket: WebSocket):
 
 
 @router.get("/dashboard")
-async def dashboard_page():
-    return HTMLResponse(DASHBOARD_HTML)
+async def dashboard_page(request: Request):
+    return HTMLResponse(DASHBOARD_HTML.replace("<!--NAV_USER-->", render_nav_user_html(request)))
 
 
 DASHBOARD_HTML = r"""<!doctype html>
@@ -587,6 +588,7 @@ DASHBOARD_HTML = r"""<!doctype html>
       <a href="/dashboard/conversations" id="conversations-link" data-i18n="nav.conversationsLink">🗨️ Conversations →</a>
       <select id="lang-select" data-i18n-title="lang.selectTitle" title="Language"></select>
       <button id="theme-toggle" data-i18n-title="theme.toggleTitle" title="Toggle theme">🌙</button>
+      <!--NAV_USER-->
     </div>
   </div>
 
@@ -752,7 +754,7 @@ function safeSetHTML(el, html) {
 // seitig hier als JS-Objekt eingebettet - kein Extra-Request nötig.
 const TRANSLATIONS = __TRANSLATIONS_JSON__;
 const DEFAULT_LANG = "en";
-const LANG_NAMES = { en: "English", de: "Deutsch" };
+const LANG_NAMES = { en: "English", de: "Deutsch", sk: "Slovenčina" };
 let currentLang = localStorage.getItem("vllm_dashboard_lang");
 if (!currentLang || !TRANSLATIONS[currentLang]) currentLang = DEFAULT_LANG;
 
@@ -765,7 +767,7 @@ function t(key, vars) {
   }
   return s;
 }
-function localeFor(lang) { return lang === "de" ? "de-DE" : "en-US"; }
+function localeFor(lang) { return lang === "de" ? "de-DE" : lang === "sk" ? "sk-SK" : "en-US"; }
 
 function populateLangSelect() {
   const sel = $("lang-select");

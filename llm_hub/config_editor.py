@@ -23,6 +23,7 @@ import asyncio
 import hashlib
 import json
 import logging
+import os
 import shutil
 import subprocess
 import threading
@@ -115,6 +116,68 @@ def _quarantine_broken_config(error: Exception) -> Optional[str]:
         return None
 
 
+# Felder, die vLLM als Python-Konstante in einen @support_torch_compile-
+# Graphen einbacken (z.B. num_speculative_tokens in NgramGPUKernel.forward,
+# siehe vllm/v1/spec_decode/ngram_proposer_gpu.py) statt sie als Tensor-Input
+# zu behandeln - vLLMs persistenter Compile-Cache unter
+# ~/.cache/vllm/torch_compile_cache/ invalidiert sich dabei NICHT zuverlässig,
+# wenn sich nur so ein Feld ändert. Live beobachtet 2026-09-11: num_speculative_
+# tokens im speculative-config-Eintrag (Teil von extra_args) von 7 auf 4
+# geändert, Neustart hat einen alten kompilierten Graphen mit dem alten Wert
+# wiederverwendet -> RuntimeError "The size of tensor a (4) must match the
+# size of tensor b (7) at non-singleton dimension 1" bei jedem Request mit
+# längerem Prompt (Chunked Prefill + ngram_gpu-Speculative-Decoding). cudagraph_
+# capture_sizes hat dasselbe Risiko, da es ebenfalls die aufgezeichneten CUDA-
+# Graphen bestimmt. Fix: bei jeder Änderung dieser Felder automatisch den
+# kompletten Compile-Cache löschen statt auf manuelles Aufräumen zu hoffen -
+# kostet nur einen einmaligen Rekompilierungs-Kaltstart beim nächsten Laden
+# (auch für andere Modelle, die sich denselben Cache-Ordner teilen).
+_COMPILE_CACHE_SENSITIVE_FIELDS = ("extra_args", "cudagraph_capture_sizes")
+
+
+def _vllm_compile_cache_dir() -> Path:
+    """Wie vllm.envs.VLLM_CACHE_ROOT - respektiert dieselbe Umgebungsvariable,
+    damit wir denselben Ordner treffen, den vLLM selbst tatsächlich benutzt."""
+    cache_root = os.environ.get("VLLM_CACHE_ROOT") or os.path.expanduser("~/.cache/vllm")
+    return Path(cache_root) / "torch_compile_cache"
+
+
+def _clear_stale_vllm_compile_cache(old_cfg: Optional[Config], new_cfg: Config) -> None:
+    """Löscht vLLMs Compile-Cache automatisch, wenn sich bei einem vllm-Modell
+    ein Feld geändert hat, das laut obigem Kommentar zu stale kompilierten
+    Graphen führen kann. Wird sowohl von save_config() (manuelle Dashboard-
+    Edits) als auch patch_config() (automatische Hintergrund-Schreiber)
+    aufgerufen, damit KEIN Schreibpfad diese Falle umgehen kann."""
+    if old_cfg is None:
+        return
+    changed_models = [
+        name
+        for name, new_model in new_cfg.models.items()
+        if new_model.engine == "vllm"
+        and (old_model := old_cfg.models.get(name)) is not None
+        and any(
+            getattr(old_model, field) != getattr(new_model, field)
+            for field in _COMPILE_CACHE_SENSITIVE_FIELDS
+        )
+    ]
+    if not changed_models:
+        return
+    cache_dir = _vllm_compile_cache_dir()
+    if not cache_dir.exists():
+        return
+    try:
+        shutil.rmtree(cache_dir)
+        logger.warning(
+            "vLLM-Compile-Cache '%s' automatisch geleert, weil sich extra_args "
+            "und/oder cudagraph_capture_sizes geändert hat bei: %s "
+            "(vermeidet stale kompilierte Graphen mit alten Werten, siehe "
+            "Kommentar bei _COMPILE_CACHE_SENSITIVE_FIELDS).",
+            cache_dir, ", ".join(changed_models),
+        )
+    except OSError:
+        logger.exception("Konnte vLLM-Compile-Cache '%s' nicht automatisch löschen", cache_dir)
+
+
 def _read_last_known_good() -> Optional[Config]:
     if not LAST_KNOWN_GOOD_PATH.exists():
         return None
@@ -200,6 +263,7 @@ def save_config(
     frisch von der Platte liest, statt einen Snapshot zu überschreiben."""
     new_cfg = Config(**new_data)  # wirft ValidationError, wenn ungültig
     config_module.sort_models(new_cfg)  # Modelle alphabetisch, bevor geschrieben/übernommen wird
+    old_cfg = config_module.get_config()  # vor dem Schreiben, für _clear_stale_vllm_compile_cache
 
     with _config_write_lock:
         if expected_fingerprint is not None:
@@ -224,6 +288,7 @@ def save_config(
         _snapshot_last_known_good(new_cfg)
         global startup_warning
         startup_warning = None  # ein erfolgreicher manueller Save entschärft die Startup-Warnung
+    _clear_stale_vllm_compile_cache(old_cfg, new_cfg)
     return new_cfg, backup_name
 
 
@@ -274,6 +339,7 @@ def patch_config(mutate: Callable[[dict], object]) -> Optional[tuple[Config, Opt
         _snapshot_last_known_good(new_cfg)
         global startup_warning
         startup_warning = None
+    _clear_stale_vllm_compile_cache(current, new_cfg)
     return new_cfg, backup_name
 
 

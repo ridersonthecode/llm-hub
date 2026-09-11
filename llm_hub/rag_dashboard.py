@@ -4,17 +4,18 @@ nicht sekündlich, ein Neuladen per REST bei jeder Aktion reicht). Nutzt
 dieselben Übersetzungen wie das Haupt-Dashboard (siehe dashboard.py)."""
 from __future__ import annotations
 
-from fastapi import APIRouter
+from fastapi import APIRouter, Request
 from fastapi.responses import HTMLResponse
 
 from .dashboard import _LANGUAGES_JS
+from .web_auth import render_nav_user_html
 
 router = APIRouter()
 
 
 @router.get("/dashboard/rag")
-async def rag_dashboard_page():
-    return HTMLResponse(RAG_DASHBOARD_HTML)
+async def rag_dashboard_page(request: Request):
+    return HTMLResponse(RAG_DASHBOARD_HTML.replace("<!--NAV_USER-->", render_nav_user_html(request)))
 
 
 RAG_DASHBOARD_HTML = r"""<!doctype html>
@@ -215,6 +216,7 @@ RAG_DASHBOARD_HTML = r"""<!doctype html>
     <div class="topbar-actions">
       <select id="lang-select" data-i18n-title="lang.selectTitle" title="Language"></select>
       <button id="theme-toggle" data-i18n-title="theme.toggleTitle" title="Toggle theme">🌙</button>
+      <!--NAV_USER-->
     </div>
   </div>
 
@@ -327,7 +329,7 @@ const $ = (id) => document.getElementById(id);
 // --- i18n (identisch zum Haupt-Dashboard) ---------------------------------
 const TRANSLATIONS = __TRANSLATIONS_JSON__;
 const DEFAULT_LANG = "en";
-const LANG_NAMES = { en: "English", de: "Deutsch" };
+const LANG_NAMES = { en: "English", de: "Deutsch", sk: "Slovenčina" };
 let currentLang = localStorage.getItem("vllm_dashboard_lang");
 if (!currentLang || !TRANSLATIONS[currentLang]) currentLang = DEFAULT_LANG;
 
@@ -338,7 +340,7 @@ function t(key, vars) {
   if (vars) for (const k in vars) s = s.split("{" + k + "}").join(vars[k]);
   return s;
 }
-function localeFor(lang) { return lang === "de" ? "de-DE" : "en-US"; }
+function localeFor(lang) { return lang === "de" ? "de-DE" : lang === "sk" ? "sk-SK" : "en-US"; }
 function esc(s) { return (s ?? "").toString().replace(/[&<>]/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;"}[c])); }
 
 function populateLangSelect() {

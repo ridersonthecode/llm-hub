@@ -8,12 +8,13 @@ from __future__ import annotations
 
 import asyncio
 
-from fastapi import APIRouter, WebSocket, WebSocketDisconnect
+from fastapi import APIRouter, Request, WebSocket, WebSocketDisconnect
 from fastapi.responses import HTMLResponse
 
 from . import cost_tracker
 from .config import get_config
 from .dashboard import _LANGUAGES_JS, _is_disconnect_race
+from .web_auth import render_nav_user_html
 
 router = APIRouter()
 
@@ -70,8 +71,8 @@ async def cost_ws(websocket: WebSocket):
 
 
 @router.get("/dashboard/costs")
-async def cost_dashboard_page():
-    return HTMLResponse(COST_DASHBOARD_HTML)
+async def cost_dashboard_page(request: Request):
+    return HTMLResponse(COST_DASHBOARD_HTML.replace("<!--NAV_USER-->", render_nav_user_html(request)))
 
 
 COST_DASHBOARD_HTML = r"""<!doctype html>
@@ -209,6 +210,7 @@ COST_DASHBOARD_HTML = r"""<!doctype html>
     <div class="topbar-actions">
       <select id="lang-select" data-i18n-title="lang.selectTitle" title="Language"></select>
       <button id="theme-toggle" data-i18n-title="theme.toggleTitle" title="Toggle theme">🌙</button>
+      <!--NAV_USER-->
     </div>
   </div>
 
@@ -288,7 +290,7 @@ function safeSetHTML(el, html) {
 // --- i18n (identisch zum Haupt-Dashboard) ---------------------------------
 const TRANSLATIONS = __TRANSLATIONS_JSON__;
 const DEFAULT_LANG = "en";
-const LANG_NAMES = { en: "English", de: "Deutsch" };
+const LANG_NAMES = { en: "English", de: "Deutsch", sk: "Slovenčina" };
 let currentLang = localStorage.getItem("vllm_dashboard_lang");
 if (!currentLang || !TRANSLATIONS[currentLang]) currentLang = DEFAULT_LANG;
 
@@ -299,7 +301,7 @@ function t(key, vars) {
   if (vars) for (const k in vars) s = s.split("{" + k + "}").join(vars[k]);
   return s;
 }
-function localeFor(lang) { return lang === "de" ? "de-DE" : "en-US"; }
+function localeFor(lang) { return lang === "de" ? "de-DE" : lang === "sk" ? "sk-SK" : "en-US"; }
 function esc(s) { return (s ?? "").toString().replace(/[&<>]/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;"}[c])); }
 
 function populateLangSelect() {

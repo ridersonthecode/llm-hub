@@ -80,7 +80,7 @@ cd ~/llm-hub
 python3 -m venv .venv
 source .venv/bin/activate
 pip install --upgrade pip
-pip install vllm fastapi "uvicorn[standard]" httpx huggingface_hub "mcp[cli]<2" qdrant-client pypdf
+pip install vllm fastapi "uvicorn[standard]" httpx huggingface_hub "mcp[cli]<2" qdrant-client pypdf python-pam
 ```
 
 Dauert einige Minuten (vLLM zieht u.a. torch + CUDA-Runtime-Wheels,
@@ -256,21 +256,28 @@ Standardmäßig: kein API-Key, `0.0.0.0:11434` - erreichbar für jeden mit
 Netzwerkroute zu dieser Maschine, keine Firewall-Regel aktiv. Details und
 wie man das einschränkt: [Anleitung.md, Abschnitt "Sicherheit"](Anleitung.md#sicherheit).
 
-Das Dashboard (die Weboberfläche) lässt sich zusätzlich per Benutzername/
-Passwort-Login schützen, unabhängig vom API-Key (der nur `/v1` betrifft) -
-`/v1`/`/api`/`/mcp` bleiben davon unberührt. Dafür einen Nutzer anlegen:
+Das Dashboard (die Weboberfläche) ist zusätzlich per eigener `/login`-Seite
+geschützt, unabhängig vom API-Key (der nur `/v1` betrifft) -
+`/v1`/`/api`/`/mcp` bleiben davon unberührt. Zwei Nutzerklassen:
+
+- **Jeder Linux-Nutzer dieser Maschine mit Shell-Login** (z.B. `root` oder der
+  Account, unter dem `llm-hub.service` läuft) ist automatisch **Admin** -
+  einfach mit dem normalen Linux-Passwort auf `/login` anmelden, kein
+  zusätzlicher Schritt nötig.
+- **Weitere Dashboard-Nutzer** (ohne Shell-Zugang auf der Maschine) legt ein
+  Admin über `/dashboard/users` im Dashboard selbst an.
+
+Als Fallback (z.B. falls sich mal niemand mehr einloggen kann) gibt es
+weiterhin die CLI:
 
 ```bash
 source .venv/bin/activate
-python -m llm_hub.manage_users add admin
+python -m llm_hub.manage_users add jemand
 # fragt interaktiv nach Passwort (mind. 4 Zeichen, mit Bestätigung)
 ```
 
-Sobald `users.json` mindestens einen Nutzer enthält, verlangt jeder
-`/dashboard`-Aufruf den Login-Dialog des Browsers (kein Dienst-Neustart
-nötig - greift sofort beim nächsten Request). Details, weitere Befehle
-(`list`/`remove`) und was genau geschützt wird: [Anleitung.md, Abschnitt
-"Website-Login"](Anleitung.md#website-login-dashboard-per-benutzernamepasswort-schützen).
+Details, weitere Befehle (`list`/`remove`) und was genau geschützt wird:
+[Anleitung.md, Abschnitt "Website-Login"](Anleitung.md#website-login-dashboard-per-benutzernamepasswort-schützen).
 
 ---
 

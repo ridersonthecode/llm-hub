@@ -25,12 +25,13 @@ from __future__ import annotations
 
 import asyncio
 
-from fastapi import APIRouter, HTTPException, WebSocket, WebSocketDisconnect
+from fastapi import APIRouter, HTTPException, Request, WebSocket, WebSocketDisconnect
 from fastapi.responses import HTMLResponse
 
 from . import conversation_tracker
 from .config import get_config
 from .dashboard import _LANGUAGES_JS, _is_disconnect_race
+from .web_auth import render_nav_user_html
 
 router = APIRouter()
 
@@ -98,18 +99,18 @@ async def conversation_detail(record_id: str):
 
 
 @router.get("/dashboard/conversations/{record_id}/view")
-async def conversation_view_page(record_id: str):
+async def conversation_view_page(record_id: str, request: Request):
     """Eigenständige Detail-Seite für EINE Konversation (eigener Tab, siehe
     Modul-Docstring) - lädt ihren Datensatz selbst per fetch() gegen
     conversation_detail() oben, das HTML hier ist unabhängig von record_id
     (identisches Muster wie CONVERSATIONS_DASHBOARD_HTML: eine statische
     Seite, record_id kommt zur Laufzeit aus location.pathname)."""
-    return HTMLResponse(CONVERSATION_VIEW_HTML)
+    return HTMLResponse(CONVERSATION_VIEW_HTML.replace("<!--NAV_USER-->", render_nav_user_html(request)))
 
 
 @router.get("/dashboard/conversations")
-async def conversations_dashboard_page():
-    return HTMLResponse(CONVERSATIONS_DASHBOARD_HTML)
+async def conversations_dashboard_page(request: Request):
+    return HTMLResponse(CONVERSATIONS_DASHBOARD_HTML.replace("<!--NAV_USER-->", render_nav_user_html(request)))
 
 
 CONVERSATIONS_DASHBOARD_HTML = r"""<!doctype html>
@@ -254,6 +255,7 @@ CONVERSATIONS_DASHBOARD_HTML = r"""<!doctype html>
     <div class="topbar-actions">
       <select id="lang-select" data-i18n-title="lang.selectTitle" title="Language"></select>
       <button id="theme-toggle" data-i18n-title="theme.toggleTitle" title="Toggle theme">🌙</button>
+      <!--NAV_USER-->
     </div>
   </div>
 
@@ -293,7 +295,7 @@ const $ = (id) => document.getElementById(id);
 // --- i18n (identisch zu den übrigen Dashboard-Seiten) ---------------------
 const TRANSLATIONS = __TRANSLATIONS_JSON__;
 const DEFAULT_LANG = "en";
-const LANG_NAMES = { en: "English", de: "Deutsch" };
+const LANG_NAMES = { en: "English", de: "Deutsch", sk: "Slovenčina" };
 let currentLang = localStorage.getItem("vllm_dashboard_lang");
 if (!currentLang || !TRANSLATIONS[currentLang]) currentLang = DEFAULT_LANG;
 
@@ -304,7 +306,7 @@ function t(key, vars) {
   if (vars) for (const k in vars) s = s.split("{" + k + "}").join(vars[k]);
   return s;
 }
-function localeFor(lang) { return lang === "de" ? "de-DE" : "en-US"; }
+function localeFor(lang) { return lang === "de" ? "de-DE" : lang === "sk" ? "sk-SK" : "en-US"; }
 function esc(s) { return (s ?? "").toString().replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c])); }
 
 function populateLangSelect() {
@@ -828,6 +830,7 @@ CONVERSATION_VIEW_HTML = r"""<!doctype html>
       <div class="topbar-actions">
         <select id="lang-select" data-i18n-title="lang.selectTitle" title="Language"></select>
         <button id="theme-toggle" data-i18n-title="theme.toggleTitle" title="Toggle theme">🌙</button>
+        <!--NAV_USER-->
       </div>
     </div>
 
@@ -888,7 +891,7 @@ const $ = (id) => document.getElementById(id);
 // --- i18n (identisch zu den übrigen Dashboard-Seiten) ---------------------
 const TRANSLATIONS = __TRANSLATIONS_JSON__;
 const DEFAULT_LANG = "en";
-const LANG_NAMES = { en: "English", de: "Deutsch" };
+const LANG_NAMES = { en: "English", de: "Deutsch", sk: "Slovenčina" };
 let currentLang = localStorage.getItem("vllm_dashboard_lang");
 if (!currentLang || !TRANSLATIONS[currentLang]) currentLang = DEFAULT_LANG;
 
@@ -899,7 +902,7 @@ function t(key, vars) {
   if (vars) for (const k in vars) s = s.split("{" + k + "}").join(vars[k]);
   return s;
 }
-function localeFor(lang) { return lang === "de" ? "de-DE" : "en-US"; }
+function localeFor(lang) { return lang === "de" ? "de-DE" : lang === "sk" ? "sk-SK" : "en-US"; }
 function esc(s) { return (s ?? "").toString().replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c])); }
 
 function populateLangSelect() {

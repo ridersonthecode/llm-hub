@@ -9,17 +9,18 @@ sich nur durch die eigene Aktion hier). Nutzt dieselben Übersetzungen wie das
 Haupt-Dashboard (siehe dashboard.py)."""
 from __future__ import annotations
 
-from fastapi import APIRouter
+from fastapi import APIRouter, Request
 from fastapi.responses import HTMLResponse
 
 from .dashboard import _LANGUAGES_JS
+from .web_auth import render_nav_user_html
 
 router = APIRouter()
 
 
 @router.get("/dashboard/config")
-async def config_dashboard_page():
-    return HTMLResponse(CONFIG_DASHBOARD_HTML)
+async def config_dashboard_page(request: Request):
+    return HTMLResponse(CONFIG_DASHBOARD_HTML.replace("<!--NAV_USER-->", render_nav_user_html(request)))
 
 
 CONFIG_DASHBOARD_HTML = r"""<!doctype html>
@@ -246,6 +247,7 @@ CONFIG_DASHBOARD_HTML = r"""<!doctype html>
     <div class="topbar-actions">
       <select id="lang-select" data-i18n-title="lang.selectTitle" title="Language"></select>
       <button id="theme-toggle" data-i18n-title="theme.toggleTitle" title="Toggle theme">🌙</button>
+      <!--NAV_USER-->
     </div>
   </div>
 
@@ -538,7 +540,7 @@ const $ = (id) => document.getElementById(id);
 // --- i18n (identisch zum Haupt-Dashboard) ---------------------------------
 const TRANSLATIONS = __TRANSLATIONS_JSON__;
 const DEFAULT_LANG = "en";
-const LANG_NAMES = { en: "English", de: "Deutsch" };
+const LANG_NAMES = { en: "English", de: "Deutsch", sk: "Slovenčina" };
 let currentLang = localStorage.getItem("vllm_dashboard_lang");
 if (!currentLang || !TRANSLATIONS[currentLang]) currentLang = DEFAULT_LANG;
 
@@ -1742,7 +1744,7 @@ function initBackupsTable() {
     layout: { bottomEnd: "inputPaging" },
     language: { emptyTable: t("cfg.status.noBackups") },
     columns: [
-      { title: t("th.time"), data: null, render: (b, type) => type !== "display" ? b.modified_at : new Date(b.modified_at * 1000).toLocaleString(currentLang === "de" ? "de-DE" : "en-US") },
+      { title: t("th.time"), data: null, render: (b, type) => type !== "display" ? b.modified_at : new Date(b.modified_at * 1000).toLocaleString(currentLang === "de" ? "de-DE" : currentLang === "sk" ? "sk-SK" : "en-US") },
       { title: t("cfg.th.filename"), data: null, render: (b, type) => type === "display" ? esc(b.filename) : (b.filename || "") },
       { title: t("cfg.th.size"), data: null, render: (b, type) => type !== "display" ? b.size : (b.size / 1024).toFixed(1) + " KB" },
       { title: t("th.action"), data: null, orderable: false, render: (b) => `<button class="btn b-restore" data-filename="${esc(b.filename)}">${t("cfg.action.restore")}</button>` },

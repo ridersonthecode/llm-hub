@@ -21,7 +21,7 @@ from pydantic import ValidationError
 
 from . import active_streams, capability_detector, config_editor, conversation_tracker, cost_tracker, downloader, nvfp4_quantizer, perf_tuner, process_manager, rag, request_queue, telemetry
 from .auth import ApiKeyMiddleware
-from .web_auth import WebAuthMiddleware
+from .web_auth import SessionAuthMiddleware, auth_router
 from . import catalog
 from .catalog import list_cached_models
 from .config import get_config
@@ -33,6 +33,7 @@ from .dashboard import router as dashboard_router
 from .mcp_tools import mcp
 from .ollama_compat import router as ollama_router
 from .rag_dashboard import router as rag_dashboard_router
+from .users_dashboard import router as users_dashboard_router
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 logger = logging.getLogger("llm_hub")
@@ -187,14 +188,16 @@ app.include_router(config_dashboard_router)
 app.include_router(cost_dashboard_router)
 app.include_router(chat_dashboard_router)
 app.include_router(conversations_dashboard_router)
+app.include_router(users_dashboard_router)
+app.include_router(auth_router)
 # Reine ASGI-Middleware statt @app.middleware("http") - siehe auth.py
 # Docstring: BaseHTTPMiddleware bricht Streaming-Responses (stream: true).
 app.add_middleware(ApiKeyMiddleware)
-# Website-Login (Dashboard) per users.json - siehe web_auth.py. Zuletzt
+# Website-Login (Dashboard) per Session-Cookie - siehe web_auth.py. Zuletzt
 # hinzugefügt, damit sie in der Middleware-Kette außen liegt (Starlette baut
 # den Stack in umgekehrter add_middleware()-Reihenfolge) und so auch
 # unautorisierte WebSocket-Handshakes VOR jeder anderen Prüfung abfängt.
-app.add_middleware(WebAuthMiddleware)
+app.add_middleware(SessionAuthMiddleware)
 
 
 @app.get("/health")
