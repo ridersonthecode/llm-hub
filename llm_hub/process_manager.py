@@ -61,7 +61,7 @@ except ImportError:  # pragma: no cover - psutil kommt transitiv über vllm mit
     psutil = None
 
 from . import capability_detector, config_editor, telemetry
-from .config import CONFIG_PATH, PROJECT_ROOT, Config, get_config, resolve_local_model_path
+from .config import CONFIG_PATH, PROJECT_ROOT, Config, get_config, local_model_key_for, resolve_local_model_path
 
 logger = logging.getLogger("llm_hub.engine")
 
@@ -218,14 +218,48 @@ def _parse_cudagraph_sizes(raw: str) -> list[int]:
 
 def _build_command(cfg: Config, model: str, port: int) -> list[str]:
     """Dispatcht auf die passende Engine (siehe ModelConfig.engine) - "vllm"
-    (Default, siehe _build_vllm_command) oder "sglang" (siehe
-    _build_sglang_command). Modelle ohne eigenen models.<name>-Eintrag
-    (z.B. per HF-Repo-Name direkt geladen) laufen wie bisher über vLLM."""
+    (Default, siehe _build_vllm_command), "sglang" (siehe
+    _build_sglang_command) oder "llamacpp" (siehe _build_llamacpp_command).
+    Modelle ohne eigenen models.<name>-Eintrag (z.B. per HF-Repo-Name direkt
+    geladen) laufen wie bisher über vLLM."""
     mcfg = cfg.models.get(model)
     engine = mcfg.engine if mcfg else "vllm"
     if engine == "sglang":
         return _build_sglang_command(cfg, model, port)
+    if engine == "llamacpp":
+        return _build_llamacpp_command(cfg, model, port)
     return _build_vllm_command(cfg, model, port)
+
+
+def _build_llamacpp_command(cfg: Config, model: str, port: int) -> list[str]:
+    """Baut das llama-server-Startkommando für Modelle mit ModelConfig.engine
+    == "llamacpp" - für GGUF-Checkpoints, deren Architektur vLLM nicht kennt,
+    llama.cpp aber nativ unterstützt. Braucht einen LOKALEN Pfad (siehe
+    ModelConfig.engine-Docstring) - anders als bei vLLM/
+    SGLang wird ein HF-Repo-Name hier NICHT an die Engine durchgereicht, weil
+    ein GGUF-Repo meist mehrere Quantisierungsvarianten als Unterordner
+    enthält und "welche genau" keine sinnvolle Automatik ist. Bei einem
+    Multi-Shard-GGUF (z.B. "...-00001-of-00004.gguf") reicht der Pfad zum
+    ERSTEN Shard - llama.cpp findet die übrigen selbst über die
+    Namenskonvention. Nur host/port sind generisch (Hot-Pool-Portvergabe);
+    alles andere (--ctx-size, --n-gpu-layers, --api-key, ...) kommt komplett
+    aus extra_args, siehe ModelConfig.engine-Docstring."""
+    mcfg = cfg.models.get(model)
+    model_path_arg = resolve_local_model_path(model)
+    if model_path_arg is None:
+        raise RuntimeError(
+            f"Modell '{model}' hat engine=\"llamacpp\", ist aber kein lokaler Pfad "
+            f"(\"./\"-relativ oder absolut) - siehe ModelConfig.engine-Docstring."
+        )
+    cmd = [
+        cfg.resolved_llamacpp_bin(),
+        "--host", cfg.engine_host,
+        "--port", str(port),
+        "--model", str(model_path_arg),
+    ]
+    if mcfg:
+        cmd += list(mcfg.extra_args or [])
+    return cmd
 
 
 def _build_sglang_command(cfg: Config, model: str, port: int) -> list[str]:
@@ -669,6 +703,38 @@ def _matched_vllm_serve_model(cmdline: list[str], vllm_bin: Optional[str]) -> Op
     return None
 
 
+def _matched_llamacpp_model(cmdline: list[str], llamacpp_bin: Optional[str]) -> Optional[str]:
+    """Gegenstück zu _matched_vllm_serve_model/_matched_sglang_model für
+    llama-server-Prozesse (siehe _build_llamacpp_command: `<llamacpp_bin>
+    --host ... --port ... --model <pfad> ...`). Reines C++-Binary, kein
+    Shebang-Rewrite wie bei vLLM - cmdline[0] ist direkt das Binary."""
+    if not cmdline:
+        return None
+    if os.path.basename(cmdline[0]) not in ("llama-server", "llama-cli"):
+        return None
+    if llamacpp_bin is not None:
+        try:
+            if os.path.realpath(cmdline[0]) != llamacpp_bin:
+                return None
+        except OSError:
+            return None
+    try:
+        idx = cmdline.index("--model")
+    except ValueError:
+        return None
+    if idx + 1 >= len(cmdline):
+        return None
+    model_path = cmdline[idx + 1]
+    # cmdline trägt den absoluten Dateisystempfad (siehe resolve_local_model_
+    # path), config.json führt lokale Modelle aber unter dem portablen
+    # "./"-relativen Key (siehe local_model_key_for) - zurückübersetzen, sonst
+    # matcht das hier nie gegen ein tatsächliches models.<name>-Eintrag.
+    try:
+        return local_model_key_for(Path(model_path))
+    except (OSError, ValueError):
+        return model_path
+
+
 def _matched_sglang_model(cmdline: list[str], sglang_python: Optional[str]) -> Optional[str]:
     """Gegenstück zu _matched_vllm_serve_model für SGLang-Prozesse (siehe
     _build_sglang_command: `<sglang_python> -m sglang.launch_server
@@ -693,10 +759,11 @@ def _matched_sglang_model(cmdline: list[str], sglang_python: Optional[str]) -> O
 
 
 async def reap_orphan_engines() -> list[dict]:
-    """Findet und beendet Engine-Prozesse (vLLM "vllm serve ..." ODER SGLang
-    "... -m sglang.launch_server ..." dieser Installation), die NICHT im
-    aktuellen `engines`-Dict getrackt sind, samt ihrer Kindprozesse. Das sind
-    Reste eines Absturzes des Manager-Prozesses selbst (der `engines`-Zustand
+    """Findet und beendet Engine-Prozesse (vLLM "vllm serve ...", SGLang
+    "... -m sglang.launch_server ..." ODER llama-server dieser Installation),
+    die NICHT im aktuellen `engines`-Dict getrackt sind, samt ihrer
+    Kindprozesse. Das sind Reste eines Absturzes des Manager-Prozesses selbst
+    (der `engines`-Zustand
     lebt nur im Speicher und ist nach einem Neustart leer, die zuvor
     gestarteten Kindprozesse überleben aber) oder eines unsauberen Beendens -
     genau die Prozesse, die "im Dashboard nicht auftauchen" (kein EngineState
@@ -713,6 +780,10 @@ async def reap_orphan_engines() -> list[dict]:
         sglang_python = os.path.realpath(cfg.resolved_sglang_python())
     except OSError:
         sglang_python = None
+    try:
+        llamacpp_bin = os.path.realpath(cfg.resolved_llamacpp_bin())
+    except OSError:
+        llamacpp_bin = None
     tracked_pids = {e.process.pid for e in engines.values() if e.process is not None}
     own_pid = os.getpid()
 
@@ -726,7 +797,11 @@ async def reap_orphan_engines() -> list[dict]:
                 cmdline = proc.info["cmdline"] or []
             except (psutil.NoSuchProcess, psutil.AccessDenied):
                 continue
-            model = _matched_vllm_serve_model(cmdline, vllm_bin) or _matched_sglang_model(cmdline, sglang_python)
+            model = (
+                _matched_vllm_serve_model(cmdline, vllm_bin)
+                or _matched_sglang_model(cmdline, sglang_python)
+                or _matched_llamacpp_model(cmdline, llamacpp_bin)
+            )
             if model is not None:
                 found.append((proc, model))
         return found

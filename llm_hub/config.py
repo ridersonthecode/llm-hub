@@ -194,7 +194,18 @@ class ModelConfig(BaseModel):
     # NICHT an die Engine übergeben (siehe process_manager._build_sglang_
     # command) - bei Bedarf über extra_args selbst ergänzen (z.B.
     # "--tool-call-parser", "qwen25").
-    engine: Literal["vllm", "sglang"] = "vllm"
+    # "llamacpp" = `<llamacpp_bin> --host ... --port ... --model <lokaler-gguf-
+    # Pfad> ...` (siehe process_manager._build_llamacpp_command) statt vLLM/
+    # SGLang - für GGUF-Checkpoints, die vLLM mangels registrierter Architektur
+    # gar nicht laden kann, llama.cpp aber nativ unterstützt (siehe
+    # llama-arch.cpp im llama.cpp-Quellbaum). Braucht einen LOKALEN Modell-Pfad
+    # (kein HF-Repo-Name) - GGUF-Repos enthalten meist mehrere Quantisierungs-
+    # varianten, "welche genau" ist keine llama.cpp-eigene Auto-Erkennung, die
+    # dieser schmale Wrapper übernehmen will. Genau wie bei "sglang":
+    # gpu_memory_utilization/max_model_len/tool_call_parser/... sind reine
+    # Hot-Pool-Buchhaltung, NICHT an die Engine übergeben - die echten Flags
+    # (--ctx-size, --n-gpu-layers, --api-key, ...) gehören in extra_args.
+    engine: Literal["vllm", "sglang", "llamacpp"] = "vllm"
 
 
 class RagConfig(BaseModel):
@@ -243,6 +254,14 @@ class Config(BaseModel):
     # Fallback auf sys.executable (nur sinnvoll, falls SGLang tatsächlich im
     # selben venv wie der Manager installiert ist).
     sglang_python: Optional[str] = None
+    # Pfad zum llama-server-Binary für Modelle mit ModelConfig.engine ==
+    # "llamacpp" (siehe process_manager._build_llamacpp_command). Kein venv-
+    # Interpreter wie sglang_python, sondern das fertig kompilierte C++-Binary
+    # (`cmake --build ... --target llama-server`, üblicherweise unter
+    # <llama.cpp-checkout>/build/bin/llama-server). None = Fallback auf
+    # PROJECT_ROOT/"llama-cpp-src/build/bin/llama-server" (Standard-Build-
+    # Layout, falls llama.cpp als Sibling-Checkout neben llm-hub gebaut wurde).
+    llamacpp_bin: Optional[str] = None
     api_key: ApiKeyConfig = Field(default_factory=ApiKeyConfig)
     idle_timeout_seconds: Optional[int] = None
     # Anzahl gleichzeitig laufender vLLM-Engine-Prozesse ("Hot Pool"). Bei 1
@@ -315,6 +334,11 @@ class Config(BaseModel):
         if self.sglang_python:
             return self.sglang_python
         return sys.executable
+
+    def resolved_llamacpp_bin(self) -> str:
+        if self.llamacpp_bin:
+            return self.llamacpp_bin
+        return str(PROJECT_ROOT / "llama-cpp-src" / "build" / "bin" / "llama-server")
 
     def priority_for(self, model: str) -> int:
         """Siehe ModelConfig.priority - 0 (neutral) für unbekannte/nicht

@@ -329,6 +329,12 @@ CONFIG_DASHBOARD_HTML = r"""<!doctype html>
               <input type="text" id="f-sglang_python" placeholder="/path/to/sglang-venv/bin/python">
             </div>
           </div>
+          <div class="row">
+            <div>
+              <label><span data-i18n="cfg.field.llamacppBin">llama.cpp Binary (empty = auto)</span><span class="help-icon" data-help="cfg_llamacppBin" data-i18n-title="help.clickForInfo" title="Click for more info">?</span></label>
+              <input type="text" id="f-llamacpp_bin" placeholder="/path/to/llama.cpp/build/bin/llama-server">
+            </div>
+          </div>
         </div>
       </section>
 
@@ -709,6 +715,7 @@ function renderForm() {
   $("f-hf_home").value = state.hf_home ?? "";
   $("f-vllm_bin").value = state.vllm_bin ?? "";
   $("f-sglang_python").value = state.sglang_python ?? "";
+  $("f-llamacpp_bin").value = state.llamacpp_bin ?? "";
 
   $("f-api_key_enabled").checked = !!(state.api_key && state.api_key.enabled);
   $("f-api_key_key").value = (state.api_key && state.api_key.key) || "";
@@ -744,7 +751,7 @@ function renderForm() {
   $("f-auto_reload_last_model").checked = state.auto_reload_last_model !== false;
   $("f-rag_embedding_model").value = rag.embedding_model ?? "";
 
-  document.querySelectorAll("#f-host,#f-port,#f-engine_host,#f-engine_port,#f-hf_home,#f-vllm_bin,#f-sglang_python,"
+  document.querySelectorAll("#f-host,#f-port,#f-engine_host,#f-engine_port,#f-hf_home,#f-vllm_bin,#f-sglang_python,#f-llamacpp_bin,"
     + "#f-api_key_enabled,#f-api_key_key,#f-max_concurrent_models,#f-gpu_memory_ceiling,"
     + "#f-idle_timeout_seconds,#f-startup_timeout_seconds,#f-auto_reload_last_model,"
     + "#f-queue_timeout_seconds,#f-max_concurrent_requests,#f-queue_debounce_seconds,"
@@ -794,6 +801,7 @@ function renderModels() {
         ${m.vision ? `<span class="badge idle">${t("badge.vision")}</span>` : ""}
         ${m.task === "embed" ? `<span class="badge idle">embed</span>` : ""}
         ${m.engine === "sglang" ? `<span class="badge idle">SGLang</span>` : ""}
+        ${m.engine === "llamacpp" ? `<span class="badge idle">llama.cpp</span>` : ""}
       </div>
       <div class="accordion-body">
         <label><span data-i18n="cfg.field.modelName">Model name / path</span>${helpIcon("cfg_modelName")}</label>
@@ -803,6 +811,7 @@ function renderModels() {
         <select class="m-field" data-idx="${i}" data-field="engine">
           <option value="vllm" ${(m.engine ?? "vllm") === "vllm" ? "selected" : ""}>vLLM</option>
           <option value="sglang" ${m.engine === "sglang" ? "selected" : ""}>SGLang</option>
+          <option value="llamacpp" ${m.engine === "llamacpp" ? "selected" : ""}>llama.cpp</option>
         </select>
 
         <div class="check-row">
@@ -823,6 +832,7 @@ function renderModels() {
         <div class="card">
           <div class="hint" data-i18n="cfg.hint.autoManaged">🔒 Automatically determined from the model itself at every engine start - not editable here, any manual value would be overwritten on the next start anyway.</div>
           ${m.engine === "sglang" ? `<div class="hint" data-i18n="cfg.hint.sglangNoAutoFlags">⚠️ Engine: SGLang - tool calling/reasoning parser below are detected for display only, they are NOT passed to the engine (different flag names than vLLM). Add them yourself via "Extra args" if needed.</div>` : ""}
+          ${m.engine === "llamacpp" ? `<div class="hint" data-i18n="cfg.hint.llamacppNoAutoFlags">⚠️ Engine: llama.cpp - gpu_memory_utilization/max_model_len/tool_call_parser/... below are bookkeeping only, they are NOT passed to llama-server. Model name/path above must be a LOCAL gguf file path (first shard of a multi-part file); the real runtime flags (--ctx-size, --n-gpu-layers, --api-key, ...) go into "Extra args" below.</div>` : ""}
           <div class="row" style="margin-top:6px;">
             <div><span data-i18n="cfg.field.task">Task</span>: <span class="mono">${m.task === "embed" ? "embed" : "generate"}</span></div>
             <div><span data-i18n="badge.vision">Vision</span>: <span class="mono">${m.vision ? "✅" : "–"}</span></div>
@@ -1586,6 +1596,7 @@ function buildPayload() {
     hf_home: $("f-hf_home").value || null,
     vllm_bin: $("f-vllm_bin").value || null,
     sglang_python: $("f-sglang_python").value || null,
+    llamacpp_bin: $("f-llamacpp_bin").value || null,
     api_key: { enabled: $("f-api_key_enabled").checked, key: $("f-api_key_key").value },
     idle_timeout_seconds: num("f-idle_timeout_seconds"),
     max_concurrent_models: parseInt($("f-max_concurrent_models").value, 10),

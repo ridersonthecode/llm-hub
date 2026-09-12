@@ -69,10 +69,11 @@ quantize_output/
 .venv-test-vllm-main/
 .venv-test-vllm028/
 
-# Fremde Source-Checkouts (eigene git-Repos von sglang/vllm) zum lokalen
-# Testen/Bauen - kein Bestandteil dieses Projekts.
+# Fremde Source-Checkouts (eigene git-Repos von sglang/vllm/llama.cpp) zum
+# lokalen Testen/Bauen - kein Bestandteil dieses Projekts.
 sglang-qwen4exp/
 vllm-src-main/
+llama-cpp-src/
 
 # Alte, archivierte Skripte mit früher hartkodiertem API-Key im Klartext
 archive/Anleitung.txt.alt
