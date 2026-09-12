@@ -159,7 +159,7 @@ USERS_DASHBOARD_HTML = r"""<!doctype html>
   h1 { font-size:18px; margin:0 0 4px; }
   h2 { font-size:15px; margin:28px 0 10px; }
   .topbar { display:flex; align-items:flex-start; justify-content:space-between; }
-  .topbar-actions { display:flex; gap:8px; align-items:center; flex:0 0 auto; }
+  .topbar-actions { display:flex; gap:8px; align-items:center; flex:0 0 auto; flex-wrap:wrap; }
   .sub { color:var(--text-dim); font-size:13px; margin-bottom:8px; }
   .sub a { color:var(--accent); text-decoration:none; }
   .card { background:var(--panel); border:1px solid var(--border); border-radius:10px; padding:16px; }

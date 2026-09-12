@@ -85,6 +85,14 @@ NAV_LINK_STYLE = (
     "display:inline-flex;align-items:center;background:var(--panel);"
     "border:1px solid var(--border);color:var(--text);text-decoration:none;"
     "border-radius:8px;height:36px;padding:0 12px;font-size:13px;box-sizing:border-box;"
+    # flex-shrink:0 + white-space:nowrap: ohne die beiden quetscht der
+    # umgebende .topbar-actions-Flex-Container (fixe Breite, mehrere Links seit
+    # render_nav_links_html) diese Pills bei wenig Platz zusammen, statt sie
+    # umbrechen zu lassen - Text wird dabei mitten im Label abgeschnitten/
+    # umgebrochen ("gequetschte" Navigation, siehe .topbar-actions in jeder
+    # *_dashboard.py: braucht zusätzlich flex-wrap:wrap, das übernimmt jede
+    # Seite selbst).
+    "flex-shrink:0;white-space:nowrap;"
 )
 
 logger = logging.getLogger("llm_hub.web_auth")

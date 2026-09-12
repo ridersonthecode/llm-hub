@@ -111,7 +111,7 @@ COST_DASHBOARD_HTML = r"""<!doctype html>
   h1 { font-size: 18px; margin: 0 0 4px; }
   a { color: var(--accent); }
   .topbar { display:flex; align-items:flex-start; justify-content:space-between; margin-bottom: 4px; }
-  .topbar-actions { display:flex; gap:8px; align-items:flex-start; flex:0 0 auto; }
+  .topbar-actions { display:flex; gap:8px; align-items:flex-start; flex:0 0 auto; flex-wrap:wrap; }
   .sub { color: var(--text-dim); font-size: 13px; margin-bottom: 20px; }
   .conn { display:inline-flex; align-items:center; gap:6px; font-size:12px; color:var(--text-dim); }
   .dot { width:8px; height:8px; border-radius:50%; background: var(--bad); }
