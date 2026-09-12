@@ -511,6 +511,7 @@ DASHBOARD_HTML = r"""<!doctype html>
     font-size:12px; padding:0; margin-right:10px;
   }
   .logs-btn:hover { text-decoration:underline; }
+  .phase-logs-btn { display:block; margin-top:4px; margin-right:0; }
   .help-icon {
     display:inline-flex; align-items:center; justify-content:center;
     width:14px; height:14px; border-radius:50%; background:var(--panel-2);
@@ -1084,6 +1085,12 @@ function statusCell(r) {
   return `<span class="badge error">${t("status.error")}</span>`;
 }
 
+// Ab dieser Wartezeit (Sekunden seit Request-Start) taucht in der
+// Phase-Zelle der Active-Requests-Tabelle ein "Logs"-Button auf, der über
+// openLogsModal() (siehe unten) den Live-Log der Engine zeigt - für kurze,
+// schnelle Anfragen bleibt die Tabelle unverändert, kein Flackern.
+const SHOW_LOGS_BTN_AFTER_SEC = 3;
+
 // Phasen einer aktiven Anfrage (siehe telemetry.py _set_phase): was die
 // Engine gerade tut, für die Active-Requests-Tabelle im Dashboard.
 const PHASE_META = {
@@ -1295,6 +1302,7 @@ function render(data) {
           <td>
             <span class="badge ${pi.badgeClass}" title="${esc(timeline)}">${pi.icon} ${esc(pi.label())}</span>
             <div class="hint">${esc(t("phase.since", { duration: fmtDuration(phaseSinceSec) }))}</div>
+            ${elapsed > SHOW_LOGS_BTN_AFTER_SEC ? `<button class="logs-btn phase-logs-btn" data-model="${esc(r.model)}">${t("action.viewLogs")}</button>` : ""}
           </td>
           <td class="mono">${fmtDuration(elapsed)}</td>
           <td class="mono">${r.queued_ms ? fmtMs(r.queued_ms) : "–"}</td>
@@ -1496,8 +1504,10 @@ async function cancelActiveRequest(rid, model, btn) {
   }
 }
 $("active-request-box").addEventListener("click", (e) => {
-  const btn = e.target.closest(".cancel-request-btn");
-  if (btn) cancelActiveRequest(btn.dataset.rid, btn.dataset.model, btn);
+  const cancelBtn = e.target.closest(".cancel-request-btn");
+  if (cancelBtn) { cancelActiveRequest(cancelBtn.dataset.rid, cancelBtn.dataset.model, cancelBtn); return; }
+  const logsBtn = e.target.closest(".logs-btn");
+  if (logsBtn) openLogsModal(logsBtn.dataset.model);
 });
 
 // --- Modell-Katalog / Klick-Modal ---------------------------------------
