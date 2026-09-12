@@ -951,27 +951,48 @@ document.addEventListener("keydown", (e) => { if (e.key === "Escape") closeLogsM
 // connect() mit (siehe latestActiveRequests unten, gesetzt beim Tabellen-
 // Rendern), daher reicht ein einfaches "ist gerade offen?"-Flag.
 let previewRid = null;
+let previewModel = null;  // Modell + App der ZULETZT geöffneten Anfrage - fürs
+let previewApp = null;    // Auto-Weiterspringen unten (updatePreviewModal), bleiben über einen Request-Wechsel hinweg gleich.
 let latestActiveRequests = [];
 
 function openPreviewModal(rid) {
   previewRid = rid;
+  const r = latestActiveRequests.find(x => x.id === rid);
+  previewModel = r ? r.model : null;
+  previewApp = r ? r.user_agent : null;
   $("preview-modal-overlay").classList.add("open");
   updatePreviewModal();
 }
 
 function closePreviewModal() {
   previewRid = null;
+  previewModel = null;
+  previewApp = null;
   $("preview-modal-overlay").classList.remove("open");
 }
 
 function updatePreviewModal() {
   if (!previewRid || !$("preview-modal-overlay").classList.contains("open")) return;
-  const r = latestActiveRequests.find(x => x.id === previewRid);
+  let r = latestActiveRequests.find(x => x.id === previewRid);
+  if (!r) {
+    // Ursprüngliche Anfrage ist fertig/abgebrochen/fehlgeschlagen - statt
+    // stumpf "nicht mehr aktiv" stehen zu bleiben, automatisch auf eine neue
+    // Anfrage vom selben Modell + derselben App weiterspringen (z.B. die
+    // nächste Chat-Nachricht im selben Fenster), damit man das Modal nicht
+    // manuell schließen und über den Vorschau-Button neu öffnen muss.
+    const next = latestActiveRequests.find(x => x.model === previewModel && x.user_agent === previewApp);
+    if (next) {
+      previewRid = next.id;
+      r = next;
+      $("preview-modal-reasoning").textContent = "";
+      $("preview-modal-content").textContent = "";
+    }
+  }
   const status = $("preview-modal-status");
   if (!r) {
-    // Anfrage aus der Liste verschwunden (fertig/abgebrochen/Fehler) - letzten
-    // bekannten Stand einfach stehen lassen, nur den Status umschalten, statt
-    // den ohnehin schon gelesenen Text zu löschen.
+    // Kein Nachfolger gefunden - letzten bekannten Stand einfach stehen
+    // lassen, nur den Status umschalten, statt den ohnehin schon gelesenen
+    // Text zu löschen.
     status.className = "log-modal-status";
     status.textContent = t("preview.requestGone");
     return;
