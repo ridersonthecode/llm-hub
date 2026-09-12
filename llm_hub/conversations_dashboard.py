@@ -31,7 +31,7 @@ from fastapi.responses import HTMLResponse
 from . import conversation_tracker
 from .config import get_config
 from .dashboard import _LANGUAGES_JS, _is_disconnect_race
-from .web_auth import render_nav_user_html
+from .web_auth import render_nav_links_html, render_nav_user_html
 
 router = APIRouter()
 
@@ -105,12 +105,16 @@ async def conversation_view_page(record_id: str, request: Request):
     conversation_detail() oben, das HTML hier ist unabhängig von record_id
     (identisches Muster wie CONVERSATIONS_DASHBOARD_HTML: eine statische
     Seite, record_id kommt zur Laufzeit aus location.pathname)."""
-    return HTMLResponse(CONVERSATION_VIEW_HTML.replace("<!--NAV_USER-->", render_nav_user_html(request)))
+    html = CONVERSATION_VIEW_HTML.replace("<!--NAV_USER-->", render_nav_user_html(request))
+    html = html.replace("<!--NAV_LINKS-->", render_nav_links_html("conversations"))
+    return HTMLResponse(html)
 
 
 @router.get("/dashboard/conversations")
 async def conversations_dashboard_page(request: Request):
-    return HTMLResponse(CONVERSATIONS_DASHBOARD_HTML.replace("<!--NAV_USER-->", render_nav_user_html(request)))
+    html = CONVERSATIONS_DASHBOARD_HTML.replace("<!--NAV_USER-->", render_nav_user_html(request))
+    html = html.replace("<!--NAV_LINKS-->", render_nav_links_html("conversations"))
+    return HTMLResponse(html)
 
 
 CONVERSATIONS_DASHBOARD_HTML = r"""<!doctype html>
@@ -248,11 +252,11 @@ CONVERSATIONS_DASHBOARD_HTML = r"""<!doctype html>
     <div>
       <h1 data-i18n="conversations.title">Conversations</h1>
       <div class="sub">
-        <a href="/dashboard" data-i18n="nav.dashboardLink">← Dashboard</a>
-        · <span class="conn"><span class="dot" id="conn-dot"></span><span id="conn-text" data-i18n="nav.connecting">connecting…</span></span>
+        <span class="conn"><span class="dot" id="conn-dot"></span><span id="conn-text" data-i18n="nav.connecting">connecting…</span></span>
       </div>
     </div>
     <div class="topbar-actions">
+      <!--NAV_LINKS-->
       <select id="lang-select" data-i18n-title="lang.selectTitle" title="Language"></select>
       <button id="theme-toggle" data-i18n-title="theme.toggleTitle" title="Toggle theme">🌙</button>
       <!--NAV_USER-->
@@ -828,6 +832,7 @@ CONVERSATION_VIEW_HTML = r"""<!doctype html>
         <div class="sub"><a href="/dashboard/conversations" data-i18n="conversations.view.back">← All Conversations</a></div>
       </div>
       <div class="topbar-actions">
+        <!--NAV_LINKS-->
         <select id="lang-select" data-i18n-title="lang.selectTitle" title="Language"></select>
         <button id="theme-toggle" data-i18n-title="theme.toggleTitle" title="Toggle theme">🌙</button>
         <!--NAV_USER-->

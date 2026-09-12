@@ -14,7 +14,7 @@ from fastapi.responses import HTMLResponse
 from . import cost_tracker
 from .config import get_config
 from .dashboard import _LANGUAGES_JS, _is_disconnect_race
-from .web_auth import render_nav_user_html
+from .web_auth import render_nav_links_html, render_nav_user_html
 
 router = APIRouter()
 
@@ -72,7 +72,9 @@ async def cost_ws(websocket: WebSocket):
 
 @router.get("/dashboard/costs")
 async def cost_dashboard_page(request: Request):
-    return HTMLResponse(COST_DASHBOARD_HTML.replace("<!--NAV_USER-->", render_nav_user_html(request)))
+    html = COST_DASHBOARD_HTML.replace("<!--NAV_USER-->", render_nav_user_html(request))
+    html = html.replace("<!--NAV_LINKS-->", render_nav_links_html("costs"))
+    return HTMLResponse(html)
 
 
 COST_DASHBOARD_HTML = r"""<!doctype html>
@@ -203,11 +205,11 @@ COST_DASHBOARD_HTML = r"""<!doctype html>
     <div>
       <h1 data-i18n="cost.title">Cost Tracking</h1>
       <div class="sub">
-        <a href="/dashboard" data-i18n="nav.dashboardLink">← Dashboard</a>
-        · <span class="conn"><span class="dot" id="conn-dot"></span><span id="conn-text" data-i18n="nav.connecting">connecting…</span></span>
+        <span class="conn"><span class="dot" id="conn-dot"></span><span id="conn-text" data-i18n="nav.connecting">connecting…</span></span>
       </div>
     </div>
     <div class="topbar-actions">
+      <!--NAV_LINKS-->
       <select id="lang-select" data-i18n-title="lang.selectTitle" title="Language"></select>
       <button id="theme-toggle" data-i18n-title="theme.toggleTitle" title="Toggle theme">🌙</button>
       <!--NAV_USER-->

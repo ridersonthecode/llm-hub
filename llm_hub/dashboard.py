@@ -20,7 +20,7 @@ from fastapi.responses import HTMLResponse
 from . import catalog, cost_tracker, downloader, process_manager, system_metrics, telemetry
 from .catalog import list_cached_models
 from .config import get_config
-from .web_auth import render_nav_user_html
+from .web_auth import render_nav_links_html, render_nav_user_html
 
 router = APIRouter()
 
@@ -331,7 +331,9 @@ async def dashboard_logs_ws(websocket: WebSocket):
 
 @router.get("/dashboard")
 async def dashboard_page(request: Request):
-    return HTMLResponse(DASHBOARD_HTML.replace("<!--NAV_USER-->", render_nav_user_html(request)))
+    html = DASHBOARD_HTML.replace("<!--NAV_USER-->", render_nav_user_html(request))
+    html = html.replace("<!--NAV_LINKS-->", render_nav_links_html("dashboard"))
+    return HTMLResponse(html)
 
 
 DASHBOARD_HTML = r"""<!doctype html>
@@ -382,12 +384,6 @@ DASHBOARD_HTML = r"""<!doctype html>
     border-radius:8px; height:36px; padding:0 8px; font-size:13px; cursor:pointer; flex:0 0 auto;
   }
   #lang-select:hover { background:var(--panel-2); }
-  #rag-link, #config-link, #costs-link, #conversations-link {
-    display:inline-flex; align-items:center; background:var(--panel); border:1px solid var(--border);
-    color:var(--text); text-decoration:none; border-radius:8px; height:36px; padding:0 12px;
-    font-size:13px; flex:0 0 auto; box-sizing:border-box;
-  }
-  #rag-link:hover, #config-link:hover, #costs-link:hover, #conversations-link:hover { background:var(--panel-2); border-color: var(--accent); }
   .unload-btn {
     background:var(--panel-2); border:1px solid var(--border); color:var(--text);
     border-radius:6px; padding:4px 10px; font-size:12px; cursor:pointer;
@@ -582,10 +578,7 @@ DASHBOARD_HTML = r"""<!doctype html>
       <div class="sub"><span class="conn"><span class="dot" id="conn-dot"></span><span id="conn-text" data-i18n="nav.connecting">connecting…</span></span></div>
     </div>
     <div class="topbar-actions">
-      <a href="/dashboard/config" id="config-link" data-i18n="nav.configLink">⚙️ Config →</a>
-      <a href="/dashboard/costs" id="costs-link" data-i18n="nav.costsLink">💰 Costs →</a>
-      <a href="/dashboard/rag" id="rag-link" data-i18n="nav.ragLink">RAG →</a>
-      <a href="/dashboard/conversations" id="conversations-link" data-i18n="nav.conversationsLink">🗨️ Conversations →</a>
+      <!--NAV_LINKS-->
       <select id="lang-select" data-i18n-title="lang.selectTitle" title="Language"></select>
       <button id="theme-toggle" data-i18n-title="theme.toggleTitle" title="Toggle theme">🌙</button>
       <!--NAV_USER-->

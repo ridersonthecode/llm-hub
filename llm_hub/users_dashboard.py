@@ -19,6 +19,7 @@ from . import system_users
 from .web_auth import (
     build_user_entry,
     read_users,
+    render_nav_links_html,
     render_nav_user_html,
     username_conflicts_with_system_user,
     write_users,
@@ -43,7 +44,9 @@ async def users_dashboard_page(request: Request):
         # eine direkt aufgerufene URL landet trotzdem sauber zurück statt auf
         # einer nackten 403-Seite.
         return RedirectResponse("/dashboard", status_code=302)
-    return HTMLResponse(USERS_DASHBOARD_HTML.replace("<!--NAV_USER-->", render_nav_user_html(request)))
+    html = USERS_DASHBOARD_HTML.replace("<!--NAV_USER-->", render_nav_user_html(request))
+    html = html.replace("<!--NAV_LINKS-->", render_nav_links_html("users", i18n=False))
+    return HTMLResponse(html)
 
 
 @router.get("/dashboard/users/api/list")
@@ -196,9 +199,9 @@ USERS_DASHBOARD_HTML = r"""<!doctype html>
   <div class="topbar">
     <div>
       <h1>👤 Nutzerverwaltung</h1>
-      <div class="sub"><a href="/dashboard">← Dashboard</a></div>
     </div>
     <div class="topbar-actions">
+      <!--NAV_LINKS-->
       <button id="theme-toggle" title="Toggle theme">🌙</button>
       <!--NAV_USER-->
     </div>

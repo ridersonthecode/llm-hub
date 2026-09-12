@@ -29,14 +29,16 @@ from fastapi import APIRouter, Request
 from fastapi.responses import HTMLResponse
 
 from .dashboard import _LANGUAGES_JS
-from .web_auth import render_nav_user_html
+from .web_auth import render_nav_links_html, render_nav_user_html
 
 router = APIRouter()
 
 
 @router.get("/dashboard/chat")
 async def chat_dashboard_page(request: Request):
-    return HTMLResponse(CHAT_DASHBOARD_HTML.replace("<!--NAV_USER-->", render_nav_user_html(request)))
+    html = CHAT_DASHBOARD_HTML.replace("<!--NAV_USER-->", render_nav_user_html(request))
+    html = html.replace("<!--NAV_LINKS-->", render_nav_links_html("chat"))
+    return HTMLResponse(html)
 
 
 CHAT_DASHBOARD_HTML = r"""<!doctype html>
@@ -172,6 +174,22 @@ CHAT_DASHBOARD_HTML = r"""<!doctype html>
   .status-line { font-size:12px; color:var(--text-dim); min-height:16px; flex:0 0 auto; }
   .status-line.err { color:var(--bad); }
 
+  /* Live-Engine-Log während "Processing Prompt": öffnet sich automatisch, wenn
+     eine Anfrage länger dauert (siehe openEngineLog()/ENGINE_LOG_DELAY_MS) -
+     nutzt denselben /dashboard/logs/ws wie das Log-Modal im Haupt-Dashboard
+     (dashboard.py), nur inline statt als Modal und automatisch nach unten
+     scrollend. */
+  .engine-log-panel { flex:0 0 auto; margin-top:-4px; }
+  .engine-log-status { margin:0 0 4px; font-size:11px; color:var(--text-dim); }
+  .engine-log-status.live { color:var(--good); }
+  .engine-log-status.live::before { content:"● "; }
+  .engine-log-body {
+    background:var(--panel-2); border:1px solid var(--border); border-radius:8px;
+    padding:10px; font-family:var(--mono); font-size:11.5px; line-height:1.5;
+    white-space:pre-wrap; word-break:break-word; margin:0;
+    max-height:160px; overflow-y:auto;
+  }
+
   .composer { display:flex; gap:10px; align-items:flex-end; flex:0 0 auto; }
   #input-box {
     flex:1; resize:none; min-height:44px; max-height:200px; border-radius:12px;
@@ -189,9 +207,9 @@ CHAT_DASHBOARD_HTML = r"""<!doctype html>
   <div class="topbar">
     <div>
       <h1 data-i18n="chat.title">Chat</h1>
-      <div class="sub"><a href="/dashboard" data-i18n="nav.dashboardLink">← Dashboard</a></div>
     </div>
     <div class="topbar-actions">
+      <!--NAV_LINKS-->
       <select id="lang-select" data-i18n-title="lang.selectTitle" title="Language"></select>
       <button id="theme-toggle" data-i18n-title="theme.toggleTitle" title="Toggle theme">🌙</button>
       <!--NAV_USER-->
@@ -213,6 +231,10 @@ CHAT_DASHBOARD_HTML = r"""<!doctype html>
     </div>
 
     <div class="status-line" id="status-line"></div>
+    <div class="engine-log-panel" id="engine-log-panel" hidden>
+      <p class="engine-log-status" id="engine-log-status"></p>
+      <pre class="engine-log-body" id="engine-log-body"></pre>
+    </div>
 
     <div class="composer">
       <textarea id="input-box" rows="1" data-i18n-placeholder="chat.placeholder.message" placeholder="Type a message… (Shift+Enter for a new line)"></textarea>
@@ -498,6 +520,66 @@ function setStatus(text, isError) {
   el.classList.toggle("err", !!isError);
 }
 
+// --- Live-Engine-Log während "Processing Prompt" ---------------------------
+// vLLM liefert über /v1/chat/completions keinerlei Zwischen-Events während
+// der Prompt-Verarbeitung (Prefill) - die erste SSE-Zeile kommt erst mit dem
+// ersten generierten Token. Als einzige Quelle für "was passiert gerade" bleibt
+// die Engine-Logdatei, die schon fürs Live-Logs-Modal im Haupt-Dashboard über
+// /dashboard/logs/ws getailt wird (siehe dashboard.py, openLogsModal) - hier
+// exakt derselbe Endpoint, nur inline statt als Modal. Öffnet sich erst nach
+// ENGINE_LOG_DELAY_MS, damit kurze, schnelle Antworten nicht unnötig flackern.
+const ENGINE_LOG_DELAY_MS = 2000;
+let engineLogSocket = null;
+let engineLogTimer = null;
+
+function setEngineLogStatus(cls, text) {
+  const el = $("engine-log-status");
+  el.className = "engine-log-status" + (cls ? " " + cls : "");
+  el.textContent = text;
+}
+
+function openEngineLog(model) {
+  $("engine-log-panel").hidden = false;
+  $("engine-log-body").textContent = "";
+  setEngineLogStatus("", t("modal.logsConnecting"));
+
+  if (engineLogSocket) engineLogSocket.close();
+  const proto = location.protocol === "https:" ? "wss:" : "ws:";
+  const ws = new WebSocket(proto + "//" + location.host + "/dashboard/logs/ws");
+  engineLogSocket = ws;
+
+  ws.onopen = () => ws.send(JSON.stringify({ api_key: apiKey, model }));
+
+  ws.onmessage = (ev) => {
+    let msg;
+    try { msg = JSON.parse(ev.data); } catch (e) { return; }
+    if (msg.type === "auth_error") { setEngineLogStatus("error", t("auth.apiKeyPrompt")); ws.close(); return; }
+    const body = $("engine-log-body");
+    if (msg.type === "init") {
+      body.textContent = msg.exists ? msg.text : t("modal.logsNotFound");
+      setEngineLogStatus(msg.exists ? "live" : "", msg.exists ? t("modal.logsLive") : "");
+    } else if (msg.type === "append") {
+      body.textContent += msg.text;
+    }
+    body.scrollTop = body.scrollHeight;
+  };
+
+  ws.onclose = () => { if (engineLogSocket === ws) setEngineLogStatus("", t("modal.logsDisconnected")); };
+  ws.onerror = () => ws.close();
+}
+
+function scheduleEngineLog(model) {
+  clearTimeout(engineLogTimer);
+  engineLogTimer = setTimeout(() => openEngineLog(model), ENGINE_LOG_DELAY_MS);
+}
+
+function closeEngineLog() {
+  clearTimeout(engineLogTimer);
+  engineLogTimer = null;
+  if (engineLogSocket) { engineLogSocket.close(); engineLogSocket = null; }
+  $("engine-log-panel").hidden = true;
+}
+
 // Auto-Scroll standardmäßig an, schaltet sich selbst ab, sobald während des
 // Streamens hochgescrollt wird (siehe #messages "scroll"-Listener unten) -
 // erst ein Klick auf den Pfeil-Button ODER manuelles Zurückscrollen ganz nach
@@ -580,6 +662,7 @@ async function sendMessage() {
   renderMessages();
   setBusy(true);
   setStatus(t("chat.status.waiting"));
+  scheduleEngineLog(model);
 
   const controller = new AbortController();
   currentAbort = controller;
@@ -597,6 +680,7 @@ async function sendMessage() {
       method: "POST", headers: authHeaders(), body: JSON.stringify(body), signal: controller.signal,
     });
     if (res.status === 401) {
+      closeEngineLog();
       await ensureApiKey();
       conversation.splice(-2, 2);
       renderMessages();
@@ -640,6 +724,7 @@ async function sendMessage() {
         if (firstToken && (delta.content || reasoning)) {
           firstToken = false;
           setStatus("");
+          closeEngineLog();
         }
         if (reasoning) {
           assistantMsg.reasoning += reasoning;
@@ -661,6 +746,7 @@ async function sendMessage() {
       setStatus(t("chat.status.streamError", { msg: e.message }), true);
     }
   } finally {
+    closeEngineLog(); // Sicherheitsnetz - eigentlich schon bei firstToken/401 geschlossen
     assistantMsg.streaming = false;
     assistantMsg.streamingReasoning = false;
     renderMessages();

@@ -519,6 +519,46 @@ async def logout():
 
 # --- Topbar-Snippet für alle Dashboard-Seiten --------------------------------
 
+# Die Cross-Links zwischen den Dashboard-Seiten selbst (Dashboard/Config/
+# Costs/RAG/Conversations) - Reihenfolge = Reihenfolge in der Topbar.
+# (key, Ziel-URL, i18n-Key, Default-Text (Englisch, siehe languages/*.json),
+#  Text ohne i18n-System (siehe users_dashboard.py, das ist Deutsch-only).)
+_NAV_ITEMS = (
+    ("dashboard", "/dashboard", "nav.dashboardLink", "← Dashboard", "← Dashboard"),
+    ("config", "/dashboard/config", "nav.configLink", "⚙️ Config →", "⚙️ Config →"),
+    ("costs", "/dashboard/costs", "nav.costsLink", "💰 Costs →", "💰 Kosten →"),
+    ("rag", "/dashboard/rag", "nav.ragLink", "RAG →", "RAG →"),
+    ("conversations", "/dashboard/conversations", "nav.conversationsLink", "🗨️ Conversations →", "🗨️ Konversationen →"),
+)
+
+
+def render_nav_links_html(active: str, *, i18n: bool = True) -> str:
+    """Gemeinsame Cross-Links zwischen den Dashboard-Seiten (siehe
+    _NAV_ITEMS) fürs Topbar jeder Seite. Wird per Platzhalter
+    '<!--NAV_LINKS-->' in jedes *_dashboard.py-Template eingesetzt (siehe
+    render_nav_user_html unten für das Pendant mit Nutzer/Logout).
+
+    `active` ist die aktuell angezeigte Seite (z.B. "config") und wird nicht
+    verlinkt - so landet niemand per Klick auf der Seite, auf der er schon
+    ist. Seiten, die (noch) keinen eigenen Eintrag haben (z.B. "chat", siehe
+    chat_dashboard.py - bewusst nicht in der Hauptnavigation verlinkt),
+    übergeben einfach ihren eigenen Namen als `active`; taucht der in
+    _NAV_ITEMS gar nicht auf, werden schlicht alle Links angezeigt.
+
+    `i18n=False` für Seiten ohne Sprachumschaltung (aktuell nur
+    users_dashboard.py): dann werden feste deutsche Texte statt
+    data-i18n-Attributen ausgegeben."""
+    parts = []
+    for key, href, i18n_key, en_label, de_label in _NAV_ITEMS:
+        if key == active:
+            continue
+        if i18n:
+            parts.append(f'<a href="{href}" data-i18n="{i18n_key}" style="{NAV_LINK_STYLE}">{en_label}</a>')
+        else:
+            parts.append(f'<a href="{href}" style="{NAV_LINK_STYLE}">{de_label}</a>')
+    return "".join(parts)
+
+
 def render_nav_user_html(request: Request) -> str:
     """Kleines HTML-Snippet fürs Topbar jeder Dashboard-Seite: eingeloggter
     Nutzer + Rolle, Link zur Nutzerverwaltung (nur für Admins) und Logout.

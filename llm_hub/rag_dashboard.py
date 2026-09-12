@@ -8,14 +8,16 @@ from fastapi import APIRouter, Request
 from fastapi.responses import HTMLResponse
 
 from .dashboard import _LANGUAGES_JS
-from .web_auth import render_nav_user_html
+from .web_auth import render_nav_links_html, render_nav_user_html
 
 router = APIRouter()
 
 
 @router.get("/dashboard/rag")
 async def rag_dashboard_page(request: Request):
-    return HTMLResponse(RAG_DASHBOARD_HTML.replace("<!--NAV_USER-->", render_nav_user_html(request)))
+    html = RAG_DASHBOARD_HTML.replace("<!--NAV_USER-->", render_nav_user_html(request))
+    html = html.replace("<!--NAV_LINKS-->", render_nav_links_html("rag"))
+    return HTMLResponse(html)
 
 
 RAG_DASHBOARD_HTML = r"""<!doctype html>
@@ -211,9 +213,9 @@ RAG_DASHBOARD_HTML = r"""<!doctype html>
   <div class="topbar">
     <div>
       <h1 data-i18n="rag.title">RAG Documents</h1>
-      <div class="sub"><a href="/dashboard" data-i18n="nav.dashboardLink">← Dashboard</a></div>
     </div>
     <div class="topbar-actions">
+      <!--NAV_LINKS-->
       <select id="lang-select" data-i18n-title="lang.selectTitle" title="Language"></select>
       <button id="theme-toggle" data-i18n-title="theme.toggleTitle" title="Toggle theme">🌙</button>
       <!--NAV_USER-->
