@@ -102,10 +102,15 @@ def _recent_requests_with_cost() -> list[dict]:
 async def _engines_snapshot() -> list[dict]:
     """Status + Live-Metriken jeder aktuell laufenden Engine im Hot Pool
     (bei max_concurrent_models=1 also höchstens eine)."""
+    cfg = get_config()
     engs = list(process_manager.engines.values())
 
     async def _metrics(e: process_manager.EngineState) -> dict:
-        return await telemetry.fetch_engine_metrics(e.port) if e.state == "ready" else {}
+        if e.state != "ready":
+            return {}
+        mcfg = cfg.models.get(e.model)
+        engine = mcfg.engine if mcfg else "vllm"
+        return await telemetry.fetch_engine_metrics(e.port, engine=engine, model=e.model)
 
     metrics_list = await asyncio.gather(*[_metrics(e) for e in engs])
     out = []

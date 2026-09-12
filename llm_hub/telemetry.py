@@ -272,13 +272,17 @@ def _get_metrics_client() -> httpx.AsyncClient:
     return _metrics_client
 
 
-async def fetch_engine_metrics(port: Optional[int] = None) -> dict:
-    """Ruft vLLMs eigenen /metrics-Endpoint ab und extrahiert die wichtigsten
+async def fetch_engine_metrics(port: Optional[int] = None, engine: str = "vllm", model: Optional[str] = None) -> dict:
+    """Ruft den /metrics-Endpoint der Engine ab und extrahiert die wichtigsten
     Werte. `port` adressiert eine bestimmte Engine aus dem Hot Pool - ohne
-    Angabe wird der konfigurierte Default-Port verwendet. Kurz gecacht pro
-    Port (mit Lock-Dedup wie catalog.py) - mehrere gleichzeitig offene
-    Dashboard-Tabs lösen so nur EINEN echten Abruf pro Engine/Sekunde aus,
-    nicht einen pro Tab."""
+    Angabe wird der konfigurierte Default-Port verwendet. `engine` steuert,
+    welches Prometheus-Namensschema geparst wird ("vllm" oder "llamacpp",
+    siehe ModelConfig.engine) - beide Engines exponieren /metrics, aber mit
+    unterschiedlichen Metrik-Namen/-Präfixen (vllm:... bzw. llamacpp:...).
+    `model` wird nur für den llama.cpp-TTFT-Fallback gebraucht (siehe unten).
+    Kurz gecacht pro Port (mit Lock-Dedup wie catalog.py) - mehrere
+    gleichzeitig offene Dashboard-Tabs lösen so nur EINEN echten Abruf pro
+    Engine/Sekunde aus, nicht einen pro Tab."""
     cfg = get_config()
     resolved_port = port or cfg.engine_port
     now = time.time()
@@ -296,19 +300,32 @@ async def fetch_engine_metrics(port: Optional[int] = None) -> dict:
         try:
             r = await _get_metrics_client().get(url)
             r.raise_for_status()
-            result = _parse_prometheus(r.text)
-            # Rohe kumulative Zähler in "seit letztem Poll neu abgeschlossen"
-            # umrechnen (siehe _recent_avg()-Docstring) statt des irreführenden
-            # Lifetime-Mittels seit Engine-Start anzuzeigen.
-            result["avg_ttft_ms"] = _recent_avg(
-                resolved_port, "ttft", result.pop("_raw_ttft_sum"), result.pop("_raw_ttft_count")
-            )
-            result["avg_tpot_ms"] = _recent_avg(
-                resolved_port, "tpot", result.pop("_raw_tpot_sum"), result.pop("_raw_tpot_count")
-            )
-            result["avg_e2e_latency_ms"] = _recent_avg(
-                resolved_port, "e2e", result.pop("_raw_e2e_sum"), result.pop("_raw_e2e_count")
-            )
+            if engine == "llamacpp":
+                result = _parse_prometheus_llamacpp(r.text)
+                # llama-server hat kein TTFT-Histogramm (siehe
+                # _parse_prometheus_llamacpp-Docstring) - Fallback auf die
+                # eigene, engine-unabhängige Proxy-Messung (mark_first_token)
+                # über die zuletzt abgeschlossenen Anfragen dieses Modells.
+                result["avg_ttft_ms"] = _avg_ttft_from_recent_requests(model)
+                result["avg_tpot_ms"] = _recent_avg(
+                    resolved_port, "tpot", result.pop("_raw_tpot_sum"), result.pop("_raw_tpot_count")
+                )
+                result["avg_e2e_latency_ms"] = None
+                result["kv_cache_usage_perc"] = await _fetch_llamacpp_kv_usage(resolved_port)
+            else:
+                result = _parse_prometheus(r.text)
+                # Rohe kumulative Zähler in "seit letztem Poll neu
+                # abgeschlossen" umrechnen (siehe _recent_avg()-Docstring)
+                # statt des irreführenden Lifetime-Mittels seit Engine-Start.
+                result["avg_ttft_ms"] = _recent_avg(
+                    resolved_port, "ttft", result.pop("_raw_ttft_sum"), result.pop("_raw_ttft_count")
+                )
+                result["avg_tpot_ms"] = _recent_avg(
+                    resolved_port, "tpot", result.pop("_raw_tpot_sum"), result.pop("_raw_tpot_count")
+                )
+                result["avg_e2e_latency_ms"] = _recent_avg(
+                    resolved_port, "e2e", result.pop("_raw_e2e_sum"), result.pop("_raw_e2e_count")
+                )
         except Exception:
             result = {}
         _metrics_cache[resolved_port] = result
@@ -316,7 +333,67 @@ async def fetch_engine_metrics(port: Optional[int] = None) -> dict:
         return result
 
 
-def _parse_prometheus(text: str) -> dict:
+async def _fetch_llamacpp_kv_usage(port: int) -> Optional[float]:
+    """KV-Cache-Auslastung in Prozent für llama.cpp: kein fertiges Aggregat
+    wie vLLMs kv_cache_usage_perc über /metrics (siehe
+    _parse_prometheus_llamacpp-Docstring) - stattdessen selbst aus /slots
+    (braucht das --slots-Flag, siehe ModelConfig.engine=="llamacpp"-
+    extra_args) berechnet: n_prompt_tokens (Tokenanzahl des jeweils letzten
+    Tasks pro Slot - bleibt laut llama.cpp server_slot::to_json() auch nach
+    Abschluss stehen, solange kein neuer Task denselben Slot übernimmt) zu
+    n_ctx (Kapazität des Slots) aufsummiert über alle Slots. Bei --parallel 1
+    (unser Standardfall) ist das genau ein Slot, die Quote entspricht dann
+    schlicht "aktuelle Konversationslänge / --ctx-size". Eigener Request statt
+    Teil von /metrics - kein Problem, das Ergebnis landet ohnehin zusammen mit
+    dem Rest im selben, kurz gecachten fetch_engine_metrics()-Aufruf. None,
+    wenn der Endpoint fehlt/deaktiviert ist (kein --slots) oder kein Slot
+    bisher einen Task gesehen hat."""
+    cfg = get_config()
+    url = f"http://{cfg.engine_host}:{port}/slots"
+    try:
+        r = await _get_metrics_client().get(url)
+        r.raise_for_status()
+        slots = r.json()
+    except Exception:
+        return None
+    total_ctx = 0
+    total_used = 0
+    for slot in slots if isinstance(slots, list) else []:
+        n_ctx = slot.get("n_ctx") or 0
+        if n_ctx <= 0:
+            continue
+        total_ctx += n_ctx
+        total_used += slot.get("n_prompt_tokens") or 0
+    if total_ctx <= 0:
+        return None
+    return round(total_used / total_ctx * 100, 1)
+
+
+def _avg_ttft_from_recent_requests(model: Optional[str], max_samples: int = 20) -> Optional[float]:
+    """TTFT-Fallback für Engines ohne eigenes TTFT-Histogramm (aktuell nur
+    llama.cpp, siehe fetch_engine_metrics): Mittelwert über die ttft_ms-Werte
+    (siehe mark_first_token) der letzten `max_samples` abgeschlossenen
+    Anfragen GENAU dieses Modells aus recent_requests - misst der Proxy
+    selbst, unabhängig davon, was die Engine an /metrics hergibt. Gleiches
+    "nur die letzten, nicht das Lifetime-Mittel"-Prinzip wie _recent_avg()."""
+    if model is None:
+        return None
+    samples = [
+        r["ttft_ms"] for r in recent_requests
+        if r.get("model") == model and r.get("ttft_ms") is not None
+    ][:max_samples]
+    if not samples:
+        return None
+    return round(sum(samples) / len(samples), 1)
+
+
+def _parse_prometheus_values(text: str, prefix: str) -> dict[str, float]:
+    """Rohes Prometheus-Text-Format (Name/Wert-Zeilen, "#"-Kommentare) auf ein
+    dict Metrikname->Wert reduziert - gemeinsamer Kern für _parse_prometheus
+    (vLLM, Präfix "vllm:") und _parse_prometheus_llamacpp (Präfix
+    "llamacpp:"). Mehrere Zeilen mit gleichem Namen (z.B. Label-Varianten wie
+    llama.cpp's spec_decode_..._per_pos_total{position="N"}) werden
+    aufsummiert - bei uns i.d.R. sowieso nur eine Engine/ein Label aktiv."""
     values: dict[str, float] = {}
     for line in text.splitlines():
         if not line or line.startswith("#"):
@@ -330,10 +407,13 @@ def _parse_prometheus(text: str) -> dict:
             value = float(value_str.strip())
         except ValueError:
             continue
-        if name.startswith("vllm:"):
-            # Bei mehreren Engines/Labels aufsummieren (bei uns i.d.R. nur eine aktiv)
+        if name.startswith(prefix):
             values[name] = values.get(name, 0.0) + value
+    return values
 
+
+def _parse_prometheus(text: str) -> dict:
+    values = _parse_prometheus_values(text, "vllm:")
     return {
         "num_requests_running": values.get("vllm:num_requests_running"),
         "num_requests_waiting": values.get("vllm:num_requests_waiting"),
@@ -350,4 +430,35 @@ def _parse_prometheus(text: str) -> dict:
         "_raw_tpot_count": values.get("vllm:request_time_per_output_token_seconds_count", 0.0),
         "_raw_e2e_sum": values.get("vllm:e2e_request_latency_seconds_sum", 0.0),
         "_raw_e2e_count": values.get("vllm:e2e_request_latency_seconds_count", 0.0),
+    }
+
+
+def _parse_prometheus_llamacpp(text: str) -> dict:
+    """Gegenstück zu _parse_prometheus für llama-server (--metrics-Flag
+    nötig, siehe ModelConfig.engine=="llamacpp"-Docstring/extra_args) -
+    eigenes, viel schmaleres Namensschema als vLLM (siehe llama.cpp,
+    tools/server/server-task.cpp::to_metrics()). Deckungsgleich verfügbar:
+    requests_processing/-deferred (~ vLLMs running/waiting),
+    prompt_tokens_total, tokens_predicted_total (~ vLLMs generation_tokens_
+    total) sowie tokens_predicted_seconds_total (Summe der reinen
+    Decode-Zeit über alle generierten Tokens - Pendant zu vLLMs "time per
+    output token"-Histogramm, hier aber als zwei einzelne Counter statt
+    einem sum/count-Histogrammpaar). KEIN Pendant vorhanden für vLLMs TTFT-
+    Histogramm und KV-Cache-Auslastung in Prozent (llama.cpp exponiert dafür
+    nur Rohgrößen pro Slot über /slots, keine fertige Aggregat-Quote) - siehe
+    fetch_engine_metrics für den TTFT-Fallback über die eigene Proxy-Messung;
+    kv_cache_usage_perc bleibt bewusst None (bei "–" im Dashboard belassen,
+    statt eine irreführende Kennzahl zu erfinden)."""
+    values = _parse_prometheus_values(text, "llamacpp:")
+    return {
+        "num_requests_running": values.get("llamacpp:requests_processing"),
+        "num_requests_waiting": values.get("llamacpp:requests_deferred"),
+        "kv_cache_usage_perc": None,
+        "prompt_tokens_total": values.get("llamacpp:prompt_tokens_total"),
+        "generation_tokens_total": values.get("llamacpp:tokens_predicted_total"),
+        # Siehe _raw_ttft_sum/-count-Kommentar in _parse_prometheus: gleiches
+        # Prinzip, hier aber sum(Sekunden)/count(Tokens) statt sum/count(Anfragen)
+        # - _recent_avg() ist dafür bewusst einheitenagnostisch.
+        "_raw_tpot_sum": values.get("llamacpp:tokens_predicted_seconds_total", 0.0),
+        "_raw_tpot_count": values.get("llamacpp:tokens_predicted_total", 0.0),
     }
