@@ -13,6 +13,13 @@ from .config import get_config
 
 MAX_RECENT = 30
 
+# Wie viele Zeichen von Reasoning/Content einer laufenden Anfrage fürs
+# Live-Vorschau-Modal im Dashboard vorgehalten werden (siehe
+# increment_tokens/increment_reasoning_tokens unten sowie dashboard.py,
+# openPreviewModal) - nur der jeweils LETZTE Ausschnitt (Tail), kein
+# unbegrenztes Wachstum bei langen Antworten.
+PREVIEW_TAIL_CHARS = 4000
+
 active_requests: dict[str, dict] = {}
 recent_requests: deque[dict] = deque(maxlen=MAX_RECENT)
 last_request_at: Optional[float] = None
@@ -60,6 +67,12 @@ def start_request(model: str, path: str, is_stream: bool = False, user_agent: Op
         "ttft_ms": None,  # Zeit bis zum ersten Token AB ready_at (reine Generierungs-TTFT)
         "tokens_streamed": 0,
         "reasoning_tokens_streamed": 0,  # separat gezählt: Denkprozess-Chunks (delta.reasoning bzw. delta.reasoning_content, siehe reasoning_parser in config.json und main.py gen())
+        # Live-Vorschau fürs Dashboard (siehe PREVIEW_TAIL_CHARS oben): NUR der
+        # letzte Ausschnitt des bisher gestreamten Textes, damit man im
+        # Active-Requests-Modal sieht, was während prefill/thinking/generating
+        # tatsächlich passiert, statt nur den reinen Phasen-Namen.
+        "content_preview": "",
+        "reasoning_preview": "",
         "prompt_tokens": None,
         "completion_tokens": None,
         "status": "running",
@@ -121,17 +134,21 @@ def mark_first_token(rid: str) -> None:
         _publish({"type": "first_token"})
 
 
-def increment_tokens(rid: str) -> None:
+def increment_tokens(rid: str, text: str = "") -> None:
     r = active_requests.get(rid)
     if r is not None:
         r["tokens_streamed"] += 1
+        if text:
+            r["content_preview"] = (r.get("content_preview", "") + text)[-PREVIEW_TAIL_CHARS:]
     _set_phase(rid, "generating")
 
 
-def increment_reasoning_tokens(rid: str) -> None:
+def increment_reasoning_tokens(rid: str, text: str = "") -> None:
     r = active_requests.get(rid)
     if r is not None:
         r["reasoning_tokens_streamed"] += 1
+        if text:
+            r["reasoning_preview"] = (r.get("reasoning_preview", "") + text)[-PREVIEW_TAIL_CHARS:]
     _set_phase(rid, "thinking")
 
 

@@ -1103,7 +1103,7 @@ async def proxy_v1(path: str, request: Request):
                                 if choices and choices[0].get("text"):
                                     output_content_parts.append(choices[0]["text"])
                                 if delta.get("content"):
-                                    telemetry.increment_tokens(rid)
+                                    telemetry.increment_tokens(rid, delta["content"])
                                     output_content_parts.append(delta["content"])
                                     if detect_loop:
                                         content_buf = (content_buf + delta["content"])[-_REPETITION_LOOKBACK:]
@@ -1128,7 +1128,7 @@ async def proxy_v1(path: str, request: Request):
                                 )
                                 reasoning_delta = delta.get("reasoning") or delta.get("reasoning_content")
                                 if reasoning_delta:
-                                    telemetry.increment_reasoning_tokens(rid)
+                                    telemetry.increment_reasoning_tokens(rid, reasoning_delta)
                                     output_reasoning_parts.append(reasoning_delta)
                                     if detect_loop:
                                         reasoning_buf = (reasoning_buf + reasoning_delta)[-_REPETITION_LOOKBACK:]

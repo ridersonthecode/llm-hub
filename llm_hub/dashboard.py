@@ -511,7 +511,10 @@ DASHBOARD_HTML = r"""<!doctype html>
     font-size:12px; padding:0; margin-right:10px;
   }
   .logs-btn:hover { text-decoration:underline; }
-  .phase-logs-btn { display:block; margin-top:4px; margin-right:0; }
+  .phase-preview-btn { display:block; margin-top:4px; margin-right:0; }
+  .preview-modal-label { margin:14px 0 6px; font-size:12px; font-weight:600; color:var(--text-dim); }
+  .preview-modal-label:first-of-type { margin-top:0; }
+  .preview-modal-reasoning { color:var(--text-dim); font-style:italic; }
   .help-icon {
     display:inline-flex; align-items:center; justify-content:center;
     width:14px; height:14px; border-radius:50%; background:var(--panel-2);
@@ -701,6 +704,20 @@ DASHBOARD_HTML = r"""<!doctype html>
       <h3 id="log-modal-title">–</h3>
       <p class="log-modal-status" id="log-modal-status"></p>
       <pre class="log-modal-body" id="log-modal-body"></pre>
+    </div>
+  </div>
+
+  <div class="modal-overlay" id="preview-modal-overlay">
+    <div class="modal log-modal">
+      <button class="close-btn" id="preview-modal-close">✕</button>
+      <h3 id="preview-modal-title">–</h3>
+      <p class="log-modal-status" id="preview-modal-status"></p>
+      <div id="preview-modal-reasoning-wrap" hidden>
+        <p class="preview-modal-label" data-i18n="chat.label.reasoning">Reasoning</p>
+        <pre class="log-modal-body preview-modal-reasoning" id="preview-modal-reasoning"></pre>
+      </div>
+      <p class="preview-modal-label" data-i18n="preview.output">Output</p>
+      <pre class="log-modal-body" id="preview-modal-content"></pre>
     </div>
   </div>
 
@@ -924,6 +941,65 @@ $("log-modal-close").addEventListener("click", closeLogsModal);
 $("log-modal-overlay").addEventListener("click", (e) => { if (e.target.id === "log-modal-overlay") closeLogsModal(); });
 document.addEventListener("keydown", (e) => { if (e.key === "Escape") closeLogsModal(); });
 
+// --- Live-Vorschau-Modal (Active Requests) -------------------------------
+// Zeigt, was eine laufende Anfrage GERADE erzeugt (Reasoning/Content), nicht
+// nur den Phasen-Namen (prefill/thinking/generating/...) - Quelle ist
+// r.content_preview/r.reasoning_preview aus dem 1s-Snapshot (siehe
+// telemetry.increment_tokens/increment_reasoning_tokens, main.py gen()),
+// jeweils nur der letzte Ausschnitt (PREVIEW_TAIL_CHARS in telemetry.py).
+// Kein eigener WebSocket nötig - läuft im ohnehin laufenden Heartbeat von
+// connect() mit (siehe latestActiveRequests unten, gesetzt beim Tabellen-
+// Rendern), daher reicht ein einfaches "ist gerade offen?"-Flag.
+let previewRid = null;
+let latestActiveRequests = [];
+
+function openPreviewModal(rid) {
+  previewRid = rid;
+  $("preview-modal-overlay").classList.add("open");
+  updatePreviewModal();
+}
+
+function closePreviewModal() {
+  previewRid = null;
+  $("preview-modal-overlay").classList.remove("open");
+}
+
+function updatePreviewModal() {
+  if (!previewRid || !$("preview-modal-overlay").classList.contains("open")) return;
+  const r = latestActiveRequests.find(x => x.id === previewRid);
+  const status = $("preview-modal-status");
+  if (!r) {
+    // Anfrage aus der Liste verschwunden (fertig/abgebrochen/Fehler) - letzten
+    // bekannten Stand einfach stehen lassen, nur den Status umschalten, statt
+    // den ohnehin schon gelesenen Text zu löschen.
+    status.className = "log-modal-status";
+    status.textContent = t("preview.requestGone");
+    return;
+  }
+  $("preview-modal-title").textContent = modelName(r.model);
+  const pi = phaseInfo(r.phase);
+  status.className = "log-modal-status live";
+  status.textContent = `${pi.icon} ${pi.label()}`;
+
+  const reasoning = r.reasoning_preview || "";
+  $("preview-modal-reasoning-wrap").hidden = !reasoning;
+  if (reasoning) {
+    const box = $("preview-modal-reasoning");
+    const wasAtBottom = box.scrollTop + box.clientHeight >= box.scrollHeight - 20;
+    box.textContent = reasoning;
+    if (wasAtBottom) box.scrollTop = box.scrollHeight;
+  }
+
+  const content = $("preview-modal-content");
+  const wasAtBottom = content.scrollTop + content.clientHeight >= content.scrollHeight - 20;
+  content.textContent = r.content_preview || t("preview.noOutputYet");
+  if (wasAtBottom) content.scrollTop = content.scrollHeight;
+}
+
+$("preview-modal-close").addEventListener("click", closePreviewModal);
+$("preview-modal-overlay").addEventListener("click", (e) => { if (e.target.id === "preview-modal-overlay") closePreviewModal(); });
+document.addEventListener("keydown", (e) => { if (e.key === "Escape") closePreviewModal(); });
+
 function reasonLabel(r) {
   if (r === "ready") return t("reason.ready");
   if (r === "loading") return t("reason.loading");
@@ -1084,12 +1160,6 @@ function statusCell(r) {
   if (r.status === "cancelled") return `<span class="badge idle" title="${esc(t("status.cancelledHint"))}">${t("status.cancelled")}</span>`;
   return `<span class="badge error">${t("status.error")}</span>`;
 }
-
-// Ab dieser Wartezeit (Sekunden seit Request-Start) taucht in der
-// Phase-Zelle der Active-Requests-Tabelle ein "Logs"-Button auf, der über
-// openLogsModal() (siehe unten) den Live-Log der Engine zeigt - für kurze,
-// schnelle Anfragen bleibt die Tabelle unverändert, kein Flackern.
-const SHOW_LOGS_BTN_AFTER_SEC = 3;
 
 // Phasen einer aktiven Anfrage (siehe telemetry.py _set_phase): was die
 // Engine gerade tut, für die Active-Requests-Tabelle im Dashboard.
@@ -1275,6 +1345,8 @@ function render(data) {
   }
 
   const active = data.active_requests || [];
+  latestActiveRequests = active; // fürs Vorschau-Modal (siehe updatePreviewModal)
+  updatePreviewModal();
   if (active.length === 0) {
     safeSetHTML($("active-request-box"), `<div class="empty">${t("empty.noActiveRequest")}</div>`);
   } else {
@@ -1302,7 +1374,7 @@ function render(data) {
           <td>
             <span class="badge ${pi.badgeClass}" title="${esc(timeline)}">${pi.icon} ${esc(pi.label())}</span>
             <div class="hint">${esc(t("phase.since", { duration: fmtDuration(phaseSinceSec) }))}</div>
-            ${elapsed > SHOW_LOGS_BTN_AFTER_SEC ? `<button class="logs-btn phase-logs-btn" data-model="${esc(r.model)}">${t("action.viewLogs")}</button>` : ""}
+            <button class="logs-btn phase-preview-btn" data-rid="${esc(r.id)}">${t("action.viewPreview")}</button>
           </td>
           <td class="mono">${fmtDuration(elapsed)}</td>
           <td class="mono">${r.queued_ms ? fmtMs(r.queued_ms) : "–"}</td>
@@ -1506,8 +1578,8 @@ async function cancelActiveRequest(rid, model, btn) {
 $("active-request-box").addEventListener("click", (e) => {
   const cancelBtn = e.target.closest(".cancel-request-btn");
   if (cancelBtn) { cancelActiveRequest(cancelBtn.dataset.rid, cancelBtn.dataset.model, cancelBtn); return; }
-  const logsBtn = e.target.closest(".logs-btn");
-  if (logsBtn) openLogsModal(logsBtn.dataset.model);
+  const previewBtn = e.target.closest(".phase-preview-btn");
+  if (previewBtn) openPreviewModal(previewBtn.dataset.rid);
 });
 
 // --- Modell-Katalog / Klick-Modal ---------------------------------------
