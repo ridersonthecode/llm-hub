@@ -40,6 +40,7 @@ logger = logging.getLogger("llm_hub")
 
 IDLE_CHECK_INTERVAL = 30
 ORPHAN_CHECK_INTERVAL = 300  # 5 Minuten - Prozess-Scan ist billig, muss nicht so oft wie der Idle-Check laufen
+RAM_CHECK_INTERVAL = 20  # kurz: Speicherdruck kann sich innerhalb von Sekunden aufbauen (großer Einzel-Prompt)
 # Fallback für GET /v1/models -> maxInputTokens/maxOutputTokens, wenn kein
 # max_model_len/max_tokens bekannt ist (nicht registrierte, nur gecachte
 # Modelle) - reiner Platzhalter für Clients, die diese Felder erwarten.
@@ -64,6 +65,21 @@ async def _idle_watchdog() -> None:
     while True:
         await asyncio.sleep(IDLE_CHECK_INTERVAL)
         await _idle_check_once()
+
+
+async def _ram_pressure_watchdog() -> None:
+    """Periodische Ergänzung zu process_manager._make_room() (siehe dortiger
+    Docstring/Config.ram_pressure_min_free_gib): dessen Speicherprüfung läuft
+    nur beim LADEN eines neuen Modells, nicht während bereits geladene
+    Engines laufen. Läuft daher als eigener Watchdog wie _idle_watchdog/
+    _orphan_watchdog und verdrängt bei Bedarf proaktiv, statt erst auf den
+    nächsten Modellwechsel zu warten oder gar auf den echten OOM."""
+    while True:
+        await asyncio.sleep(RAM_CHECK_INTERVAL)
+        try:
+            await process_manager.evict_lru_for_ram_pressure()
+        except Exception:
+            logger.exception("Periodische RAM-Druck-Prüfung fehlgeschlagen")
 
 
 async def _reconcile_dead_engines() -> None:
@@ -130,6 +146,10 @@ async def _auto_reload_last_model() -> None:
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
     config_editor.load_config_with_fallback()
+    # Best-effort Selbstschutz gegen den Linux-OOM-Killer (siehe
+    # process_manager.set_own_oom_score_adj()-Docstring) - so früh wie
+    # möglich, bevor überhaupt eine Engine gestartet wird.
+    process_manager.set_own_oom_score_adj()
     # Vor allem anderen: verwaiste Engine-Prozesse aus einem vorherigen Absturz
     # dieses Manager-Prozesses beenden (siehe process_manager.reap_orphan_engines) -
     # sonst startet z.B. der Auto-Reload unten in denselben Engine-Port hinein,
@@ -151,11 +171,13 @@ async def lifespan(_app: FastAPI):
         logger.exception("Fortsetzen unterbrochener Downloads beim Start fehlgeschlagen")
     watchdog = asyncio.create_task(_idle_watchdog())
     orphan_watchdog = asyncio.create_task(_orphan_watchdog())
+    ram_watchdog = asyncio.create_task(_ram_pressure_watchdog())
     auto_reload = asyncio.create_task(_auto_reload_last_model())
     async with mcp.session_manager.run():
         yield
     watchdog.cancel()
     orphan_watchdog.cancel()
+    ram_watchdog.cancel()
     auto_reload.cancel()
     await process_manager.stop_engine(reason="shutdown")
 

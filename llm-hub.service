@@ -12,6 +12,16 @@ Environment=PYTHONUNBUFFERED=1
 ExecStart=/home/mwagner/llm-hub/.venv/bin/python -m llm_hub
 Restart=on-failure
 RestartSec=5
+# Schützt den Hub-Prozess relativ zu seinen Engine-Kindprozessen vor dem
+# Linux-OOM-Killer (siehe process_manager.set_own_oom_score_adj()/
+# ENGINE_OOM_SCORE_ADJ-Docstring): der Hub setzt für sich selbst zwar
+# ebenfalls HUB_OOM_SCORE_ADJ (-300), aber ein Prozess kann seinen EIGENEN
+# oom_score_adj nur ANHEBEN, nie SENKEN, ohne CAP_SYS_RESOURCE (verifiziert -
+# schlägt sonst still mit EPERM fehl, siehe _set_oom_score_adj()-Docstring).
+# systemd (als root) DARF das für von ihm gestartete Units, noch bevor auf
+# User=/Group= fallengelassen wird - das hier ist daher der Teil, der die
+# Absenkung tatsächlich wirksam macht.
+OOMScoreAdjust=-300
 # Der Manager-Prozess selbst startet sofort; einzelne Modelle laden erst bei
 # Bedarf im Hintergrund (siehe startup_timeout_seconds in config.json).
 TimeoutStartSec=30

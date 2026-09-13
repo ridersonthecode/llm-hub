@@ -31,6 +31,17 @@ schnelleren Mittelweg an - wieder entfernt, siehe Git-Historie: brachte in
 der Praxis mehr Ärger als Nutzen, u.a. ein RAM-Vollauf-Absturz, live
 beobachtet 2026-08-25.)
 
+_make_room() (und damit auch der Live-Check oben) läuft nur beim LADEN eines
+neuen Modells - schützt also nicht vor Speicherdruck, der WÄHREND der
+Laufzeit bereits geladener Engines entsteht (z.B. ein sehr großer Einzel-
+Prompt, oder ein fremder, nicht vom Hot Pool verwalteter Prozess). Dafür
+läuft zusätzlich der periodische Watchdog main._ram_pressure_watchdog(), der
+evict_lru_for_ram_pressure() aufruft (siehe Config.ram_pressure_min_free_gib).
+Ergänzend dazu (falls der Kernel trotzdem eingreifen muss, bevor einer der
+beiden Checks reagieren konnte): set_own_oom_score_adj()/ENGINE_OOM_SCORE_ADJ
+verschieben die OOM-Killer-Priorität relativ zueinander, damit im Ernstfall
+eher ein Engine-Kindprozess als der Hub-Elternprozess selbst getroffen wird.
+
 Anfrage-Warteschlange (_room_queue_lock): Statt eine Anfrage für ein noch
 nicht geladenes Modell sofort mit einem Fehler abzulehnen, wenn gerade kein
 Platz ist (alle anderen Engines sind beschäftigt oder selbst im Kaltstart),
@@ -124,6 +135,49 @@ def load_last_active_model() -> Optional[str]:
 
 def _safe_name(model: str) -> str:
     return model.replace("/", "__")
+
+
+# Relative statt extremer oom_score_adj-Werte (siehe set_own_oom_score_adj()-
+# Docstring für den Grund): Engine-Kindprozesse etwas WAHRSCHEINLICHER treffen
+# lassen als der Default (0), den Hub-Prozess selbst etwas UNWAHRSCHEINLICHER -
+# beides bewusst weit weg von den erlaubten Extremen (+1000/-1000), damit der
+# Kernel-OOM-Killer im Ernstfall weiterhin normal funktioniert (kein Prozess
+# wird faktisch unkillbar gemacht, was selbst zum Systemstillstand führen
+# könnte) und trotzdem bevorzugt ein Engine-Kindprozess statt des Hub-
+# Elternprozesses selbst getroffen wird.
+ENGINE_OOM_SCORE_ADJ = 300
+HUB_OOM_SCORE_ADJ = -300
+
+
+def _set_oom_score_adj(pid: int, value: int) -> None:
+    """Best-effort: verschiebt, wie wahrscheinlich der Linux-Kernel-OOM-Killer
+    GENAU DIESEN Prozess (per PID) als Opfer auswählt, wenn der (auf Unified-
+    Memory-Systemen wie der GB10 gemeinsame) Speicher tatsächlich ausgeht -
+    siehe ENGINE_OOM_SCORE_ADJ/HUB_OOM_SCORE_ADJ. Ohne besondere Capability
+    schreibbar für Prozesse mit derselben effektiven UID (hier: der Hub selbst
+    für sich UND für seine eigenen Kindprozesse) - kein root nötig. Rein
+    vorbeugend, kein Ersatz für _make_room()/evict_lru_for_ram_pressure(): ob
+    der Kernel überhaupt einen OOM-Killer bemüht (statt z.B. nur zu swappen
+    oder die anfragende Allokation direkt fehlschlagen zu lassen) hängt vom
+    System ab. Schlägt still fehl (z.B. /proc nicht vorhanden - nicht Linux,
+    oder der Prozess ist zwischen Start und diesem Aufruf schon wieder weg) -
+    das darf niemals den Start/Lauf der eigentlichen Engine verhindern."""
+    try:
+        Path(f"/proc/{pid}/oom_score_adj").write_text(str(value))
+    except OSError:
+        logger.debug("oom_score_adj für PID %d konnte nicht gesetzt werden (ignoriert)", pid, exc_info=True)
+
+
+def set_own_oom_score_adj() -> None:
+    """Beim Hub-Start einmal aufgerufen (siehe main.lifespan): setzt
+    HUB_OOM_SCORE_ADJ für den eigenen Prozess. Reine Selbstschutz-Abwägung -
+    OHNE das würde ein System-weiter OOM ebenso leicht den Hub-Elternprozess
+    treffen wie einen seiner Engine-Kindprozesse; stirbt aber DER Hub, reißt
+    das alle laufenden Anfragen an ALLEN Modellen mit ab (und Dashboard/API
+    sind komplett weg), während der Tod EINER Engine (siehe bereits
+    bestehende _reconcile_dead_engines()/"crashed"-Behandlung) nur das eine
+    Modell betrifft und beim nächsten Request automatisch neu geladen wird."""
+    _set_oom_score_adj(os.getpid(), HUB_OOM_SCORE_ADJ)
 
 
 def _tail(path: Optional[Path], n: int = 40) -> str:
@@ -496,6 +550,80 @@ def _query_gpu_memory_gib() -> tuple[Optional[float], Optional[float]]:
         return None, None
 
 
+def _protected_models(exclude: Optional[str] = None) -> set[str]:
+    """Modelle, die gerade NICHT verdrängt werden dürfen: mit einer aktiven
+    Anfrage, oder selbst noch im Kaltstart (siehe _make_room()-Docstring zum
+    "loading"-Schutz). `exclude` nimmt zusätzlich ein bestimmtes Zielmodell
+    aus dem "loading"-Schutz aus (für _make_room(): das eigene Zielmodell
+    steht ohnehin nie unter den "übrigen" Engines, aber ein zweiter,
+    gleichzeitig ladender Aufruf für DASSELBE Modell soll trotzdem geschützt
+    bleiben) - für den allgemeinen RAM-Druck-Check (evict_lru_for_ram_pressure)
+    gibt es kein solches Zielmodell, exclude bleibt dort None."""
+    return (
+        {r["model"] for r in telemetry.active_requests.values()}
+        | {e.model for e in engines.values() if e.state == "loading" and e.model != exclude}
+    )
+
+
+async def _evict_lru_victim(cfg: Config, candidates: list[EngineState], reason: str) -> Optional[str]:
+    """Verdrängt aus `candidates` die Engine mit der niedrigsten Priorität
+    (ModelConfig.priority - höhere Zahl = wird eher verdrängt), bei
+    Gleichstand die am längsten ungenutzte (LRU). Gemeinsamer Kern für
+    _make_room() (dringender Bedarf für ein bestimmtes Zielmodell) und
+    evict_lru_for_ram_pressure() (vorbeugend, kein bestimmtes Zielmodell).
+    Gibt den verdrängten Modellnamen zurück, None wenn candidates leer ist."""
+    if not candidates:
+        return None
+    victim = min(candidates, key=lambda e: (cfg.priority_for(e.model), e.last_used))
+    await stop_engine(victim.model, reason=reason)
+    return victim.model
+
+
+# Config.ram_pressure_min_free_gib-Docstring erklärt das Zusammenspiel mit
+# _make_room(). Nach einer Verdrängung meldet der Treiber/Kernel den
+# freigegebenen Speicher nicht sofort als frei (derselbe Effekt wie beim
+# Live-Check in _make_room(), siehe dortiger Kommentar) - der Aufrufer
+# (main._ram_pressure_watchdog, alle main.RAM_CHECK_INTERVAL Sekunden) prüft
+# ohnehin erst nach einer Pause wieder, ein zusätzlicher Cooldown hier ist
+# daher nicht nötig.
+async def evict_lru_for_ram_pressure() -> Optional[str]:
+    """Periodische Ergänzung zu _make_room(): dessen Speicherprüfung läuft nur
+    beim LADEN eines neuen Modells, schützt also nicht vor Speicherdruck, der
+    WÄHREND der Laufzeit bereits geladener Engines entsteht (z.B. ein sehr
+    großer Einzel-Prompt, oder ein fremder, nicht vom Hot Pool verwalteter
+    Prozess wie ComfyUI - siehe Moduldocstring). Wird von
+    main._ram_pressure_watchdog() aufgerufen, NICHT von _make_room() selbst.
+
+    Prüft den tatsächlich freien Speicher (_query_gpu_memory_gib - auf
+    Unified-Memory-Systemen wie der GB10 identisch mit System-RAM) gegen
+    Config.ram_pressure_min_free_gib und verdrängt bei Unterschreitung GENAU
+    EINE Engine (niedrigste Priorität, bei Gleichstand LRU) - wie bei
+    _make_room() nie eine mit gerade aktiver Anfrage oder selbst im
+    Kaltstart. Der nächste periodische Aufruf prüft danach erneut und
+    verdrängt bei anhaltendem Druck schrittweise weiter, statt in einem
+    Rutsch den ganzen Pool leerzuräumen.
+
+    Gibt den verdrängten Modellnamen zurück (fürs Logging), None wenn nichts
+    getan wurde (Schwelle deaktiviert, kein Druck, nichts Verdrängbares, oder
+    die Live-Speicherabfrage gerade nicht verfügbar ist)."""
+    cfg = get_config()
+    if cfg.ram_pressure_min_free_gib <= 0:
+        return None
+    free_gib, total_gib = await asyncio.to_thread(_query_gpu_memory_gib)
+    if free_gib is None or free_gib >= cfg.ram_pressure_min_free_gib:
+        return None
+    candidates = [e for e in engines.values() if e.model not in _protected_models()]
+    if not candidates:
+        return None
+    victim = await _evict_lru_victim(cfg, candidates, reason="ram_pressure")
+    if victim:
+        logger.warning(
+            "RAM-Druck erkannt (%.1f/%.1f GiB frei, Schwelle %.1f GiB) - verdränge '%s' aus dem Hot Pool",
+            free_gib, total_gib or 0.0, cfg.ram_pressure_min_free_gib, victim,
+        )
+    return victim
+
+
 async def _make_room(cfg: Config, model: str, gmu: float) -> None:
     """Verdrängt bei Bedarf Engines (LRU), damit `model` (mit geschätztem
     Speicherbedarf `gmu`) ins Poolgrößen- und Speicherbudget passt. Engines mit
@@ -531,10 +659,7 @@ async def _make_room(cfg: Config, model: str, gmu: float) -> None:
         return [e for e in engines.values() if e.model != model]
 
     def protected_models() -> set[str]:
-        return (
-            {r["model"] for r in telemetry.active_requests.values()}
-            | {e.model for e in engines.values() if e.state == "loading" and e.model != model}
-        )
+        return _protected_models(exclude=model)
 
     def total_util() -> float:
         return sum(cfg.serve_args_for(e.model)[0] for e in others()) + gmu
@@ -544,15 +669,10 @@ async def _make_room(cfg: Config, model: str, gmu: float) -> None:
         wenn gerade nichts Verdrängbares da ist (alle übrigen Engines sind
         geschützt)."""
         candidates = [e for e in others() if e.model not in protected_models()]
-        if not candidates:
-            return False
-        # Niedrigste Priorität zuerst (siehe ModelConfig.priority - höhere
-        # Zahl = wird später verdrängt), bei Gleichstand wie bisher LRU
-        # (am längsten ungenutzt zuerst).
-        victim = min(candidates, key=lambda e: (cfg.priority_for(e.model), e.last_used))
-        logger.info("Verdränge Modell '%s' aus dem Pool, um Platz für '%s' zu schaffen", victim.model, model)
-        await stop_engine(victim.model, reason=f"evicted_for:{model}")
-        return True
+        victim = await _evict_lru_victim(cfg, candidates, reason=f"evicted_for:{model}")
+        if victim:
+            logger.info("Verdränge Modell '%s' aus dem Pool, um Platz für '%s' zu schaffen", victim, model)
+        return victim is not None
 
     async def wait_for_room(busy_msg: str, impossible_msg: str) -> None:
         """Wie evict_one(), aber wartet bei Bedarf in der Warteschlange (siehe
@@ -1173,6 +1293,11 @@ async def _ensure_loaded_once(model: str, wait: bool = True) -> dict:
                     )
                     eng.process = proc
                     eng.started_at = time.time()
+                    # Siehe ENGINE_OOM_SCORE_ADJ-Docstring: Engine-Kindprozess
+                    # bevorzugt vor dem Hub-Elternprozess selbst treffen lassen,
+                    # falls der Kernel bei echtem Speicherdruck doch eingreifen
+                    # muss (best-effort, verhindert den Start nie).
+                    _set_oom_score_adj(proc.pid, ENGINE_OOM_SCORE_ADJ)
         # _room_queue_lock ab hier freigegeben - der nächste wartende
         # Modellwechsel darf jetzt versuchen, seinen Platz zu sichern.
 

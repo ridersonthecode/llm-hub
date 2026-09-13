@@ -276,6 +276,19 @@ class Config(BaseModel):
     # Wird diese beim Laden eines neuen Modells überschritten, wird die am
     # längsten ungenutzte Engine zuerst verdrängt (LRU).
     gpu_memory_ceiling: float = 0.90
+    # Untergrenze für frei bleibenden Speicher (GiB, auf Unified-Memory-Systemen
+    # wie der GB10 identisch mit RAM), unabhängig von gpu_memory_ceiling: die
+    # Config-Schätzung greift nur beim LADEN eines neuen Modells (siehe
+    # process_manager._make_room()), schützt also nicht vor Speicherdruck, der
+    # WÄHREND der Laufzeit bereits geladener Engines entsteht (z.B. durch einen
+    # sehr großen Einzel-Prompt oder einen fremden, nicht vom Hot Pool
+    # verwalteten Prozess). process_manager._ram_pressure_watchdog() prüft
+    # deshalb periodisch den echten freien Speicher (torch.cuda.mem_get_info,
+    # siehe _query_gpu_memory_gib()) und verdrängt bei Unterschreitung
+    # proaktiv die am längsten ungenutzte, gerade unbeschäftigte Engine -
+    # BEVOR der Speicher tatsächlich ausgeht. 0 oder negativ deaktiviert die
+    # Prüfung (nur die Config-Schätzung beim Laden bleibt aktiv).
+    ram_pressure_min_free_gib: float = 6.0
     # Ollama-artiges Verhalten: das zuletzt genutzte Modell wird beim nächsten
     # Dienststart automatisch im Hintergrund nachgeladen (siehe process_manager.py
     # load_last_active_model()/_persist_last_active()). Auf false setzen, um nach
