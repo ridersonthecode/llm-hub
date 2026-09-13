@@ -153,7 +153,3 @@ def cancel_waiting(rid: str) -> bool:
         return False
     fut.cancel()
     return True
-
-
-def queue_depth() -> int:
-    return len(_waiters)
