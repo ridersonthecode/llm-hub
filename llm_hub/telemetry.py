@@ -334,7 +334,7 @@ async def fetch_engine_metrics(port: Optional[int] = None, engine: str = "vllm",
 
 
 async def _fetch_llamacpp_kv_usage(port: int) -> Optional[float]:
-    """KV-Cache-Auslastung in Prozent für llama.cpp: kein fertiges Aggregat
+    """KV-Cache-Auslastung als Bruch (0..1) für llama.cpp: kein fertiges Aggregat
     wie vLLMs kv_cache_usage_perc über /metrics (siehe
     _parse_prometheus_llamacpp-Docstring) - stattdessen selbst aus /slots
     (braucht das --slots-Flag, siehe ModelConfig.engine=="llamacpp"-
@@ -366,7 +366,13 @@ async def _fetch_llamacpp_kv_usage(port: int) -> Optional[float]:
         total_used += slot.get("n_prompt_tokens") or 0
     if total_ctx <= 0:
         return None
-    return round(total_used / total_ctx * 100, 1)
+    # Als Bruch (0..1) zurückgeben, nicht als fertigen Prozentwert - wie
+    # vLLMs kv_cache_usage_perc (siehe _parse_prometheus) erwartet das
+    # Dashboard (fmtPct()) einen Bruch und multipliziert selbst mit 100.
+    # Frueher stand hier bereits "* 100" -> fmtPct multiplizierte ein
+    # zweites Mal, das Dashboard zeigte total unrealistische Werte wie
+    # "4000%" statt z.B. "40%".
+    return round(total_used / total_ctx, 4)
 
 
 def _avg_ttft_from_recent_requests(model: Optional[str], max_samples: int = 20) -> Optional[float]:
