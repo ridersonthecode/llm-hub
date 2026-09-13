@@ -353,6 +353,12 @@ CONFIG_DASHBOARD_HTML = r"""<!doctype html>
           </div>
           <div class="row">
             <div>
+              <label><span data-i18n="cfg.field.ramPressureMinFreeGib">RAM pressure floor (GiB free, 0 = off)</span><span class="help-icon" data-help="cfg_ramPressureMinFreeGib" data-i18n-title="help.clickForInfo" title="Click for more info">?</span></label>
+              <input type="number" id="f-ram_pressure_min_free_gib" min="0" step="0.5">
+            </div>
+          </div>
+          <div class="row">
+            <div>
               <label><span data-i18n="cfg.field.idleTimeout">Idle timeout (seconds)</span><span class="help-icon" data-help="cfg_idleTimeout" data-i18n-title="help.clickForInfo" title="Click for more info">?</span></label>
               <input type="number" id="f-idle_timeout_seconds" min="0">
             </div>
@@ -722,6 +728,7 @@ function renderForm() {
 
   $("f-max_concurrent_models").value = state.max_concurrent_models ?? 1;
   $("f-gpu_memory_ceiling").value = state.gpu_memory_ceiling ?? 0.9;
+  $("f-ram_pressure_min_free_gib").value = state.ram_pressure_min_free_gib ?? 6.0;
   $("f-idle_timeout_seconds").value = state.idle_timeout_seconds ?? "";
   $("f-startup_timeout_seconds").value = state.startup_timeout_seconds ?? 900;
   $("f-queue_timeout_seconds").value = state.queue_timeout_seconds ?? 1800;
@@ -753,6 +760,7 @@ function renderForm() {
 
   document.querySelectorAll("#f-host,#f-port,#f-engine_host,#f-engine_port,#f-hf_home,#f-vllm_bin,#f-sglang_python,#f-llamacpp_bin,"
     + "#f-api_key_enabled,#f-api_key_key,#f-max_concurrent_models,#f-gpu_memory_ceiling,"
+    + "#f-ram_pressure_min_free_gib,"
     + "#f-idle_timeout_seconds,#f-startup_timeout_seconds,#f-auto_reload_last_model,"
     + "#f-queue_timeout_seconds,#f-max_concurrent_requests,#f-queue_debounce_seconds,"
     + "#f-dsa_gpu_memory_utilization,#f-dsa_max_model_len,"
@@ -1601,6 +1609,7 @@ function buildPayload() {
     idle_timeout_seconds: num("f-idle_timeout_seconds"),
     max_concurrent_models: parseInt($("f-max_concurrent_models").value, 10),
     gpu_memory_ceiling: parseFloat($("f-gpu_memory_ceiling").value),
+    ram_pressure_min_free_gib: parseFloat($("f-ram_pressure_min_free_gib").value),
     default_model: $("f-default_model").value || null,
     auto_reload_last_model: $("f-auto_reload_last_model").checked,
     startup_timeout_seconds: parseInt($("f-startup_timeout_seconds").value, 10),
