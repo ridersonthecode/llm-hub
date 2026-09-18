@@ -1279,6 +1279,26 @@ async def _ensure_loaded_once(model: str, wait: bool = True) -> dict:
                     mcfg = cfg.models.get(model)
                     if mcfg and mcfg.hf_token:
                         env["HF_TOKEN"] = mcfg.hf_token
+                    if mcfg and mcfg.engine == "llamacpp":
+                        # llama-server verlinkt libllama-server-impl.so & Co. als
+                        # gemeinsame Libs im selben bin/-Ordner statt sie statisch
+                        # reinzulinken - der Standard-CMake-Build hinterlegt dafür
+                        # ein RUNPATH auf das *aktuelle* Build-Verzeichnis. Live
+                        # erlebt (2026-09-18, qwen3.8-flash-next-iq3xxs): nach einem
+                        # Perf-Test-Rebuild in einem separaten Build-Ordner zeigte
+                        # das RUNPATH der installierten llama-server-Binary auf
+                        # dessen (inzwischen wieder gelöschten) bin/-Pfad statt auf
+                        # das eigene Verzeichnis - Start schlug mit "cannot open
+                        # shared object file" fehl, obwohl die .so direkt daneben
+                        # lag. LD_LIBRARY_PATH wird vom Loader VOR einem RUNPATH
+                        # durchsucht, macht den Start also unabhängig vom (ggf.
+                        # durch einen künftigen Rebuild wieder falschen) RUNPATH.
+                        llamacpp_bin_dir = str(Path(cfg.resolved_llamacpp_bin()).parent)
+                        existing_ld_path = env.get("LD_LIBRARY_PATH", "")
+                        env["LD_LIBRARY_PATH"] = (
+                            llamacpp_bin_dir + os.pathsep + existing_ld_path
+                            if existing_ld_path else llamacpp_bin_dir
+                        )
                     logger.info("Starte Engine: %s", " ".join(cmd))
                     log_f = open(log_path, "ab")
                     proc = await asyncio.create_subprocess_exec(
