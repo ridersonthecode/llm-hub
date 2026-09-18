@@ -92,6 +92,21 @@ def _read_hf_config(model_dir: Path) -> dict:
 _NESTED_TEXT_CONFIG_KEYS = ("text_config", "llm_config", "language_config")
 
 
+# RoBERTa-Familie (roberta, xlm-roberta, camembert, ...) zählt max_position_
+# embeddings NICHT als nutzbare Sequenzlänge, sondern inklusive eines
+# Positions-Offsets: Positions-IDs starten dort bei padding_idx + 1 statt bei
+# 0 (siehe vllm/model_executor/models/roberta.py, Kommentar "RoBERTa positions
+# start at padding_idx + 1 instead of 0"), die nutzbare Obergrenze ist also
+# max_position_embeddings - (pad_token_id + 1). Live erlebt bei
+# BAAI/bge-reranker-v2-m3 (model_type "xlm-roberta", pad_token_id=1,
+# max_position_embeddings=8194): 1:1 übernommen als max_model_len=8194 in
+# config.json eingetragen, vLLM leitet beim Start aber nur 8192 ab (8194 - 1 -
+# 1) und bricht mit ValidationError ab, weil der konfigurierte Wert die
+# "architektonische Obergrenze" überschreitet - der Fehler kam also genau aus
+# diesem ungeprüften Offset, nicht aus einem zu hoch gewählten Nutzerwert.
+_ROBERTA_MODEL_TYPES = {"roberta", "xlm-roberta", "camembert"}
+
+
 def _detect_max_model_len(hf_cfg: dict) -> dict:
     """max_position_embeddings ist die vom Modell ARCHITEKTONISCH unterstützte
     Obergrenze, keine Empfehlung für einen bestimmten Anwendungsfall - ein
@@ -100,7 +115,11 @@ def _detect_max_model_len(hf_cfg: dict) -> dict:
     das bestehende Muster bei den manuell gepflegten Modellen in config.json:
     max_model_len = max_position_embeddings), aber mit deutlichem Hinweis in
     der evidence, damit im Config-Editor klar ist, dass das kein Sicherheits-
-    Check gegen den tatsächlich verfügbaren Speicher ist."""
+    Check gegen den tatsächlich verfügbaren Speicher ist.
+
+    Ausnahme: RoBERTa-Familie, siehe _ROBERTA_MODEL_TYPES - dort wird der
+    Positions-Offset abgezogen, weil vLLM sonst beim Start mit genau diesem
+    Wert scheitert (siehe dortiger Kommentar)."""
     val = hf_cfg.get("max_position_embeddings")
     source = "config.json"
     if val is None:
@@ -112,6 +131,24 @@ def _detect_max_model_len(hf_cfg: dict) -> dict:
                 break
     if not isinstance(val, int) or val <= 0:
         return {"suggested": None, "confidence": "unknown", "evidence": None}
+
+    if hf_cfg.get("model_type") in _ROBERTA_MODEL_TYPES:
+        pad_token_id = hf_cfg.get("pad_token_id")
+        offset = (pad_token_id if isinstance(pad_token_id, int) else 1) + 1
+        adjusted = val - offset
+        if adjusted > 0:
+            return {
+                "suggested": adjusted,
+                "confidence": "high",
+                "evidence": (
+                    f"max_position_embeddings={val} in {source} gefunden, aber model_type="
+                    f"\"{hf_cfg.get('model_type')}\" (RoBERTa-Familie) zählt Positions-IDs ab "
+                    f"padding_idx+1 statt 0 - nutzbare Obergrenze ist {val} - {offset} = {adjusted} "
+                    f"(pad_token_id={pad_token_id if pad_token_id is not None else '1 (Default angenommen)'})."
+                    f" Höher gehen führt bei vLLM zu einem Start-Fehler (ValidationError)."
+                ),
+            }
+
     return {
         "suggested": val,
         "confidence": "high",
